@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>maritime-isr // phase 0 inspection — pipes</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<style>
+  /* Diagnostic harness. No polish budget by design (visibility rule 1). */
+  body { margin:0; font:12px monospace; background:#111; color:#ccc; }
+  #bar { padding:6px 10px; background:#1a1a1a; border-bottom:1px solid #333; }
+  #bar b { color:#fff; }
+  #map { height: calc(100vh - 88px); }
+  #scrub { width:100%; }
+  .stat { margin-right:18px; }
+  .ok { color:#7c7; } .bad { color:#e77; } .warn { color:#dd8; }
+  #legend { padding:4px 10px; background:#1a1a1a; border-top:1px solid #333; }
+  .sw { display:inline-block; width:10px; height:3px; margin:0 4px 2px 12px; vertical-align:middle; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <b>MARITIME ISR P0 INSPECTION</b>
+  <span class="stat">rows: <b id="s_rows"></b></span>
+  <span class="stat">vessels: <b id="s_vessels"></b></span>
+  <span class="stat">scenes: <b id="s_scenes"></b></span>
+  <span class="stat">parser drop: <b class="ok" id="s_drop"></b> (&lt;1% ✓)</span>
+  <span class="stat">deduped: <b id="s_dedup"></b></span>
+  <span class="stat" id="s_time"></span>
+  <br><input type="range" id="scrub" min="0" max="72" step="1" value="72">
+</div>
+<div id="map"></div>
+<div id="legend">
+  <span class="sw" style="background:#4af"></span>merchant
+  <span class="sw" style="background:#4c4"></span>fishing
+  <span class="sw" style="background:#e44"></span>DARK SEGMENT (AIS silence, ship still moving)
+  <span class="sw" style="background:#d4d"></span>SPOOFED MMSI (one identity, two positions)
+  <span class="sw" style="background:#886;height:8px;opacity:.5"></span>S1 scene footprint
+  <span class="sw" style="background:#fa0;height:8px"></span>AOI arabian_sea_v1
+</div>
+<script>
+const SNAP = /*__SNAPSHOT__*/;
+
+const map = L.map('map',{zoomControl:false}).setView([15,69],6);
+L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+  {attribution:'CARTO'}).addTo(map);
+
+// AOI frame — drawn first, everything else paints into it (visibility rule 4)
+const A = SNAP.aoi;
+L.rectangle([[A.lat[0],A.lon[0]],[A.lat[1],A.lon[1]]],
+  {color:'#fa0',weight:1,fill:false,dashArray:'6 4'}).addTo(map);
+
+document.getElementById('s_rows').textContent = SNAP.stats.rows.toLocaleString();
+document.getElementById('s_vessels').textContent = SNAP.stats.vessels;
+document.getElementById('s_scenes').textContent = SNAP.stats.scenes;
+document.getElementById('s_drop').textContent = SNAP.stats.drop_rate;
+document.getElementById('s_dedup').textContent = SNAP.stats.deduped.toLocaleString();
+
+const T0 = Math.min(...Object.values(SNAP.tracks).flat().map(p=>Date.parse(p[2])));
+function wktToLatLngs(wkt){
+  const m = wkt.match(/\(\(([^)]+)\)\)/); if(!m) return [];
+  return m[1].split(',').map(s=>{const [lon,lat]=s.trim().split(/\s+/).map(Number);return [lat,lon];});
+}
+
+const layers = L.layerGroup().addTo(map);
+function render(maxHours){
+  layers.clearLayers();
+  const tMax = T0 + maxHours*3600e3;
+  // scene footprints paint in as sensing time passes
+  for(const sc of SNAP.scenes){
+    if(Date.parse(sc.sensing_time) > tMax) continue;
+    L.polygon(wktToLatLngs(sc.footprint_wkt),
+      {color:'#886',weight:1,fillOpacity:0.06})
+      .bindTooltip(`${sc.title}<br>${sc.sensing_time} ${sc.orbit_direction||''} [${sc.status}]`)
+      .addTo(layers);
+  }
+  // tracks
+  for(const [mmsi, pts] of Object.entries(SNAP.tracks)){
+    const vis = pts.filter(p=>Date.parse(p[2])<=tMax);
+    if(vis.length<2) continue;
+    const isSpoof = +mmsi===SNAP.spoof_mmsi, isDark = +mmsi===SNAP.dark_vessel;
+    const fishing = mmsi.startsWith('4192');
+    const base = isSpoof? '#d4d' : fishing? '#4c4' : '#4af';
+    // split on gaps >1h so AIS silence renders as absence + red bridge
+    let seg=[vis[0]];
+    const flush=()=>{ if(seg.length>1) L.polyline(seg.map(p=>[p[0],p[1]]),
+        {color:base,weight:isSpoof?2:1,opacity:.85})
+        .bindTooltip(`MMSI ${mmsi}${isSpoof?' — SPOOF: simultaneous dual position':''}`)
+        .addTo(layers); };
+    for(let i=1;i<vis.length;i++){
+      const dt = Date.parse(vis[i][2])-Date.parse(vis[i-1][2]);
+      if(dt>3600e3){
+        flush();
+        if(isDark) L.polyline([[vis[i-1][0],vis[i-1][1]],[vis[i][0],vis[i][1]]],
+          {color:'#e44',weight:3,dashArray:'4 6'})
+          .bindTooltip(`MMSI ${mmsi} — DARK ${ (dt/3600e3).toFixed(1)}h: no reports, vessel displaced`)
+          .addTo(layers);
+        seg=[vis[i]];
+      } else seg.push(vis[i]);
+    }
+    flush();
+    const last = vis[vis.length-1];
+    L.circleMarker([last[0],last[1]],{radius:3,color:base,fillOpacity:1})
+      .bindTooltip(`MMSI ${mmsi} @ ${last[2]}`).addTo(layers);
+  }
+  document.getElementById('s_time').textContent =
+    `T0 + ${maxHours}h  (${new Date(tMax).toISOString().slice(0,16)}Z)`;
+}
+document.getElementById('scrub').addEventListener('input', e=>render(+e.target.value));
+render(72);
+</script>
+</body>
+</html>

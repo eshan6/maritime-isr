@@ -1,0 +1,96 @@
+"""Phase 6 acceptance tests.
+
+The roadmap's exit criterion is a human workflow: open the picture, find
+last week's dark vessels, open one, read why it's flagged, export the
+report, in under 5 minutes. We can't test the human, but we CAN test that
+every element that workflow needs is present and wired — a missing entity
+page or an empty evidence chain would break the demo, and that we catch.
+"""
+import json
+from pathlib import Path
+
+import pytest
+
+from maritime_isr.product.snapshot import build_snapshot
+
+DATA = Path(__file__).resolve().parent.parent / "data"
+
+
+@pytest.fixture(scope="module")
+def snap():
+    return build_snapshot(DATA)
+
+
+def test_snapshot_has_operational_picture(snap):
+    assert snap["stats"]["tracks"] > 0
+    assert snap["tracks"] and snap["tracks"][0]["pts"]
+    assert "aoi" in snap and snap["receivers"]
+
+
+def test_dark_vessels_findable(snap):
+    # "find last week's dark vessels" — they must be in the snapshot with
+    # position, length, score, and a scene reference
+    assert snap["dark"], "no dark candidates to demo"
+    d = snap["dark"][0]
+    for k in ("lat", "lon", "length_m", "score", "scene_id", "ts"):
+        assert k in d
+
+
+def test_alerts_carry_evidence_chains(snap):
+    # "read why it's flagged" — every alert must have a non-empty evidence
+    # chain with named edges
+    assert snap["alerts"]
+    for a in snap["alerts"]:
+        assert a["evidence"], f"alert {a['alert_id']} has no evidence"
+        assert all(step.get("edge") for step in a["evidence"])
+
+
+def test_every_alert_subject_has_reachable_context(snap):
+    # clicking an alert must lead somewhere: either a vessel entity page or
+    # a detection with coordinates
+    ent = snap["entities"]
+    for a in snap["alerts"]:
+        if a["subject"].startswith("vessel"):
+            assert a["subject"] in ent, \
+                f"alert on {a['subject']} has no entity page"
+
+
+def test_entity_pages_are_complete(snap):
+    # "open one, read why" — entity pages need identity, risk decomposition,
+    # and a neighborhood
+    assert snap["entities"]
+    for vid, e in snap["entities"].items():
+        assert "risk" in e and "components" in e["risk"]
+        # risk score equals sum of weighted components (explainability)
+        total = sum(c["weighted"] for c in e["risk"]["components"].values())
+        assert abs(e["risk"]["risk_score"] - total) < 1e-6
+        assert "identity_history" in e
+        assert "neighborhood" in e
+
+
+def test_replay_frames_present(snap):
+    # the time-scrubber needs ordered frames with positions
+    assert len(snap["frames"]) >= 20
+    ts = [f["t"] for f in snap["frames"]]
+    assert ts == sorted(ts)
+    assert any(f["pos"] for f in snap["frames"])
+
+
+def test_risk_board_ranked(snap):
+    scores = [r["score"] for r in snap["risk_board"]]
+    assert scores == sorted(scores, reverse=True)
+
+
+def test_product_surface_html_self_contained():
+    """The deliverable must be one openable file with the data embedded and
+    no local dependencies (CDN for Leaflet only)."""
+    html = (DATA / "phase6_product_surface.html")
+    if not html.exists():
+        pytest.skip("run tools/run_phase6_product.py first")
+    text = html.read_text()
+    assert "const SNAP =" in text
+    assert '"tracks"' in text and '"alerts"' in text   # data embedded
+    assert "leaflet" in text.lower()
+    # no unresolved template placeholders
+    for ph in ("__SNAP__", "__JS__", "__RCOL__", "__TYPETAG__"):
+        assert ph not in text

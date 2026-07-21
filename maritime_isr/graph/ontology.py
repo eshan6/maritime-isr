@@ -1,0 +1,69 @@
+"""Ontology v1 (roadmap 4.1) — small, correct, extensible.
+
+The ontology is DATA, not code: types are registered rows in the graph
+store's ontology table, versioned, so adding a type is an insert + version
+bump — zero downtime, zero recompute of existing edges. The constants below
+are v1's seed content; the store owns the live registry. "The schema is a
+hypothesis until a navy has argued with it."
+
+Decay policy (roadmap 4.3) is per-edge-type and encodes one distinction
+that matters more than the numbers:
+
+  STATE edges  (owned-by, flagged-to, docked-at ...) assert a condition
+               that silently rots if never re-observed → half-life decay
+               from observed_at, refreshed by re-assertion.
+  EVENT edges  (met-with, detected-by, formerly-identified-as ...) record
+               something that HAPPENED. Facts don't fade — they recede in
+               time-scope. half_life=None, confidence stays at base.
+
+sanctioned-under is an event-like assertion governed by its valid_from/
+valid_to interval (as-of dates from the sanctions connector), not decay.
+"""
+from __future__ import annotations
+
+ONTOLOGY_VERSION = 1
+
+NODE_TYPES_V1 = [
+    "vessel", "organization", "person", "port", "voyage", "encounter",
+    "detection", "track", "alert", "sensor", "identity", "flag_state",
+    "sanctions_authority",
+]
+
+# name -> dict(src=[...], dst=[...], half_life_days=float|None, kind=state|event)
+EDGE_TYPES_V1: dict[str, dict] = {
+    "owned-by":      dict(src=["vessel", "organization"], dst=["organization", "person"],
+                          half_life_days=365.0, kind="state"),
+    "operated-by":   dict(src=["vessel"], dst=["organization", "person"],
+                          half_life_days=270.0, kind="state"),
+    "flagged-to":    dict(src=["vessel"], dst=["flag_state"],
+                          half_life_days=730.0, kind="state"),
+    "docked-at":     dict(src=["vessel"], dst=["port"],
+                          half_life_days=2.0, kind="state"),
+    "met-with":      dict(src=["vessel"], dst=["vessel"],
+                          half_life_days=None, kind="event"),
+    "detected-by":   dict(src=["detection"], dst=["sensor"],
+                          half_life_days=None, kind="event"),
+    "resolved-from": dict(src=["vessel"], dst=["track", "detection"],
+                          half_life_days=None, kind="event"),
+    "sanctioned-under": dict(src=["organization", "vessel", "person"],
+                             dst=["sanctions_authority"],
+                             half_life_days=None, kind="event"),
+    # identity history: open interval = current identity; closed = former.
+    # The roadmap's "formerly-identified-as" is an identified-as edge whose
+    # t_end has been closed by an identity-change event.
+    "identified-as": dict(src=["vessel"], dst=["identity"],
+                          half_life_days=None, kind="state"),
+}
+
+
+def validate_edge(edge_type: str, src_type: str, dst_type: str,
+                  registry: dict[str, dict]) -> None:
+    """Raise on edges the (live, possibly migrated) ontology doesn't allow."""
+    spec = registry.get(edge_type)
+    if spec is None:
+        raise ValueError(f"unknown edge type {edge_type!r} "
+                         f"(ontology has: {sorted(registry)})")
+    if src_type not in spec["src"] or dst_type not in spec["dst"]:
+        raise ValueError(
+            f"{edge_type}: {src_type}->{dst_type} not allowed "
+            f"(spec: {spec['src']}->{spec['dst']})")

@@ -1,0 +1,164 @@
+"""Constant-velocity Kalman filter + RTS smoother on a local metric plane,
+with *explicit uncertainty growth* over time since last report (roadmap 2.1).
+
+The uncertainty cone is the core input to Phase 3 matching, so its contract
+is stated here once and enforced in code:
+
+    radius_95(dt) = min( kalman 95% radius after dt of pure prediction,
+                         MAX_FEASIBLE_SPEED × dt )
+
+The physical cap dominates after long silences — a CV covariance grows
+super-linearly and would gate in half the ocean after a 9-hour dark period;
+no ship outruns 60 kn. Phase 3 must call `TrackState.uncertainty_radius_m`,
+never read the covariance directly.
+"""
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+
+import numpy as np
+
+from ..config import MAX_FEASIBLE_SPEED_KN
+
+KN_TO_MS = 0.514444
+EARTH_M_PER_DEG = 111_320.0
+
+# Process noise: white-accel PSD. 0.05 m/s² std covers merchant course-keeping;
+# fishing-vessel maneuvering shows up as larger innovations and is absorbed by
+# the smoother rather than a per-class model we can't justify yet.
+SIGMA_ACCEL = 0.05
+# AIS position quality ≈ GPS: ~10 m 1-σ. Reports flagged noisy get 10×.
+SIGMA_MEAS_M = 10.0
+SIGMA_MEAS_NOISY_M = 100.0
+
+
+def to_local(lat: float, lon: float, lat0: float, lon0: float) -> tuple[float, float]:
+    """Equirectangular projection about (lat0, lon0). Sub-0.1% distortion at
+    track-segment scale in the AOI; per-segment anchoring keeps it honest."""
+    x = (lon - lon0) * EARTH_M_PER_DEG * math.cos(math.radians(lat0))
+    y = (lat - lat0) * EARTH_M_PER_DEG
+    return x, y
+
+
+def to_geo(x: float, y: float, lat0: float, lon0: float) -> tuple[float, float]:
+    lat = lat0 + y / EARTH_M_PER_DEG
+    lon = lon0 + x / (EARTH_M_PER_DEG * math.cos(math.radians(lat0)))
+    return lat, lon
+
+
+def _F(dt: float) -> np.ndarray:
+    return np.array([[1, 0, dt, 0], [0, 1, 0, dt], [0, 0, 1, 0], [0, 0, 0, 1]], float)
+
+
+def _Q(dt: float) -> np.ndarray:
+    q = SIGMA_ACCEL ** 2
+    dt2, dt3 = dt * dt, dt * dt * dt
+    return q * np.array([
+        [dt3 / 3, 0, dt2 / 2, 0],
+        [0, dt3 / 3, 0, dt2 / 2],
+        [dt2 / 2, 0, dt, 0],
+        [0, dt2 / 2, 0, dt],
+    ])
+
+
+_H = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], float)
+
+
+@dataclass
+class TrackState:
+    """Filtered state at a moment in time — what Phase 3 gates against."""
+    t: float                 # epoch seconds
+    x: np.ndarray            # [x, y, vx, vy] in local metric frame
+    P: np.ndarray            # 4×4 covariance
+    lat0: float
+    lon0: float
+
+    @property
+    def latlon(self) -> tuple[float, float]:
+        return to_geo(self.x[0], self.x[1], self.lat0, self.lon0)
+
+    @property
+    def sog_kn(self) -> float:
+        return math.hypot(self.x[2], self.x[3]) / KN_TO_MS
+
+    @property
+    def cog_deg(self) -> float:
+        return math.degrees(math.atan2(self.x[2], self.x[3])) % 360.0
+
+    def predict(self, t: float) -> "TrackState":
+        dt = max(0.0, t - self.t)
+        F = _F(dt)
+        return TrackState(t, F @ self.x, F @ self.P @ F.T + _Q(dt),
+                          self.lat0, self.lon0)
+
+    def uncertainty_radius_m(self, t: float | None = None) -> float:
+        """95% position-uncertainty radius, physically capped. THE Phase 3 API."""
+        s = self.predict(t) if t is not None and t > self.t else self
+        dt = (t - self.t) if t is not None else 0.0
+        eigs = np.linalg.eigvalsh(s.P[:2, :2])
+        kalman_r95 = 2.4477 * math.sqrt(max(eigs.max(), 0.0))  # 95% for 2-D Gaussian
+        cone = MAX_FEASIBLE_SPEED_KN * KN_TO_MS * max(dt, 0.0)
+        return min(kalman_r95, cone) if dt > 0 else kalman_r95
+
+
+def filter_smooth(times: np.ndarray, lats: np.ndarray, lons: np.ndarray,
+                  noisy: np.ndarray | None = None
+                  ) -> tuple[list[TrackState], np.ndarray]:
+    """Forward Kalman filter + Rauch–Tung–Striebel smoother over one segment.
+    Returns smoothed states and per-point 1-σ position uncertainty (m).
+    `noisy[i]` inflates that report's measurement noise instead of dropping it —
+    raw is immutable, downweighting is the honest treatment."""
+    n = len(times)
+    lat0, lon0 = float(lats[0]), float(lons[0])
+    zs = np.array([to_local(lats[i], lons[i], lat0, lon0) for i in range(n)])
+    if noisy is None:
+        noisy = np.zeros(n, bool)
+
+    # init: position = first fix, velocity from first pair if available
+    x = np.zeros(4)
+    x[:2] = zs[0]
+    if n > 1 and times[1] > times[0]:
+        x[2:] = (zs[1] - zs[0]) / (times[1] - times[0])
+    P = np.diag([SIGMA_MEAS_M ** 2] * 2 + [(5 * KN_TO_MS) ** 2] * 2)
+
+    xs_f, Ps_f, xs_p, Ps_p = [], [], [], []
+    t_prev = times[0]
+    for i in range(n):
+        dt = times[i] - t_prev
+        F = _F(dt)
+        xp, Pp = F @ x, F @ P @ F.T + _Q(dt)
+        r = (SIGMA_MEAS_NOISY_M if noisy[i] else SIGMA_MEAS_M) ** 2
+        R = np.diag([r, r])
+        S = _H @ Pp @ _H.T + R
+        K = Pp @ _H.T @ np.linalg.inv(S)
+        x = xp + K @ (zs[i] - _H @ xp)
+        P = (np.eye(4) - K @ _H) @ Pp
+        xs_f.append(x.copy()); Ps_f.append(P.copy())
+        xs_p.append(xp); Ps_p.append(Pp)
+        t_prev = times[i]
+
+    # RTS backward pass
+    xs_s = [None] * n
+    Ps_s = [None] * n
+    xs_s[-1], Ps_s[-1] = xs_f[-1], Ps_f[-1]
+    for i in range(n - 2, -1, -1):
+        F = _F(times[i + 1] - times[i])
+        C = xs_f[i] is not None and Ps_f[i] @ F.T @ np.linalg.inv(Ps_p[i + 1])
+        xs_s[i] = xs_f[i] + C @ (xs_s[i + 1] - xs_p[i + 1])
+        Ps_s[i] = Ps_f[i] + C @ (Ps_s[i + 1] - Ps_p[i + 1]) @ C.T
+
+    states = [TrackState(float(times[i]), xs_s[i], Ps_s[i], lat0, lon0)
+              for i in range(n)]
+    sigma = np.array([math.sqrt(max(np.trace(Ps_s[i][:2, :2]) / 2, 0.0))
+                      for i in range(n)])
+    return states, sigma
+
+
+def epoch_s(ts_series) -> "np.ndarray":
+    """Timestamps → float epoch seconds, robust to pandas storage resolution
+    (us vs ns). The naive astype('int64')/1e9 silently mis-scales on
+    timestamp[us] columns — a 1000× dt error that atomizes every track."""
+    import pandas as pd
+    return ((pd.Series(ts_series) - pd.Timestamp("1970-01-01", tz="UTC"))
+            / pd.Timedelta("1s")).to_numpy()

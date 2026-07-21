@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "maritime-isr"
+version = "0.7.0"
+description = "Fusion intelligence platform for the Indian Ocean — SAR/AIS dark-vessel detection, object graph, anomaly library, and analyst product surface. Built on open/synthetic data first."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "pyarrow>=14.0",
+    "scipy>=1.11",
+    "h3>=4.0",
+    "scikit-image>=0.22",
+    "scikit-learn>=1.3",
+    "global-land-mask>=1.0",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7.4"]
+
+[project.scripts]
+maritime-isr = "maritime_isr.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["maritime_isr*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
