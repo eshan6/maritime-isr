@@ -43,3 +43,16 @@ git commit -m "0.4: NOAA historical AIS, GFW SAR detections, versioned registrie
 git add maritime_isr/inspect/
 git commit -m "0.5: inspection dashboard v0 (AOI frame, AIS tracks, S1 footprints)"
 ```
+
+---
+
+# Unit 0.2 — SNAP preprocessing chain (implemented)
+
+```
+git add maritime_isr/infra/install_snap.sh \
+        maritime_isr/process/s1_preprocess.py \
+        maritime_isr/process/validate_sigma0.py \
+        maritime_isr/process/snap_doctor.py \
+        maritime_isr/cli.py tests/test_preprocess.py
+git commit -m "0.2: SNAP preprocessing chain (pyroSAR gpt), sigma0 validator, doctor, memory-capped install"
+```

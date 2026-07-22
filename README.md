@@ -30,6 +30,32 @@ python -m maritime_isr.config # 0.0 exit test: prints AOI + env status
 pytest                        # 14 tests green
 ```
 
+## Unit 0.2 — SAR preprocessing (SNAP)
+
+SNAP is a **batch** step (fires when a scene lands every 2-4 days), separate from
+the live AIS stream. Native install, memory-capped for the 24 GB VM.
+
+```bash
+# on the VM, once:
+bash maritime_isr/infra/install_snap.sh   # installs SNAP, caps gpt heap at 12G
+source ~/.bashrc
+pip install -e '.[sar]'                    # pyroSAR + rasterio (SNAP box only)
+maritime-isr doctor                        # verify gpt on PATH + memory caps + pyroSAR
+
+# process scenes (needs status=raw scenes from 0.1):
+maritime-isr preprocess --limit 1          # one scene end-to-end first
+maritime-isr validate   --limit 1          # exit test: sigma0 median in dB ocean range
+maritime-isr preprocess                    # then batch the rest
+```
+
+Chain: orbit file -> thermal noise removal -> calibration to sigma-nought ->
+terrain correction (geocoding-only, no radiometric flattening over ocean) ->
+cloud-optimized GeoTIFF. Catalog status transitions raw -> calibrated.
+
+**If SNAP hangs**: it's almost always trying to download DEM tiles for terrain
+flattening. Our config disables that over ocean. If it still hangs, check
+`maritime-isr doctor` and the gpt logs under the per-scene temp dir.
+
 ## Running the connectors
 ```bash
 maritime-isr ingest s1 --days 90        # 0.1 backfill (needs CDSE + R2)
