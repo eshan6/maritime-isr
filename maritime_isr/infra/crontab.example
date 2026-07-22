@@ -1,0 +1,10 @@
+# Unit 0.3/0.4 cron. Install: crontab maritime_isr/infra/crontab.example
+# Env for cron shells:
+MISR_DATA_ROOT=/home/ubuntu/maritime-isr/data
+MISR_STORE_BACKEND=mirror
+# Mirror closed AIS partitions to R2 every 10 min (durability; laptop-independent).
+*/10 * * * * cd /home/ubuntu/maritime-isr && .venv/bin/python -m maritime_isr.infra.mirror_cron >> logs/mirror.log 2>&1
+# Refresh sanctions/registries nightly (versioned, diffed).
+17 3 * * * cd /home/ubuntu/maritime-isr && set -a && . ./.env && .venv/bin/python -m maritime_isr.cli ingest registries >> logs/registries.log 2>&1
+# Regenerate the inspection snapshot every 15 min so the dashboard is live-ish.
+*/15 * * * * cd /home/ubuntu/maritime-isr && .venv/bin/python -m maritime_isr.inspect.export_v0 >> logs/inspect.log 2>&1

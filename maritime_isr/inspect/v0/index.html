@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Maritime ISR — Inspection v0 (week 4)</title>
+<link href="https://unpkg.com/maplibre-gl@4.5.0/dist/maplibre-gl.css" rel="stylesheet"/>
+<script src="https://unpkg.com/maplibre-gl@4.5.0/dist/maplibre-gl.js"></script>
+<style>
+  html,body,#map{height:100%;margin:0}
+  body{font-family:monospace;background:#0b0f14}
+  #hud{position:absolute;z-index:2;top:8px;left:8px;background:#0b0f14cc;color:#7fd;
+       padding:8px 12px;border:1px solid #245;font-size:12px;line-height:1.5}
+  #hud b{color:#fff}
+  .warn{color:#fa4}
+</style>
+</head>
+<body>
+<div id="hud">loading snapshot…</div>
+<div id="map"></div>
+<script>
+// Inspection v0 — deliberately ugly. Proves the pipes flow: AIS tracks + S1 footprints.
+const SNAPSHOT_URL = (new URLSearchParams(location.search)).get('src') || './snapshot.json';
+
+const map = new maplibregl.Map({
+  container:'map',
+  style:{version:8,sources:{
+    osm:{type:'raster',tiles:['https://a.tile.openstreetmap.org/{z}/{x}/{y}.png'],tileSize:256,attribution:'© OSM'}
+  },layers:[{id:'osm',type:'raster',source:'osm'}]},
+  center:[69,15], zoom:5
+});
+
+function wktToCoords(wkt){
+  if(!wkt||wkt.indexOf('POLYGON')<0) return null;
+  const inner = wkt.substring(wkt.indexOf('((')+2, wkt.indexOf('))'));
+  return [inner.split(',').map(p=>p.trim().split(/\s+/).map(Number))];
+}
+
+map.on('load', async () => {
+  const hud = document.getElementById('hud');
+  let data;
+  try { data = await (await fetch(SNAPSHOT_URL)).json(); }
+  catch(e){ hud.innerHTML = '<span class="warn">no snapshot found. run: python -m maritime_isr.inspect.export_v0</span>'; return; }
+
+  const a = data.aoi;
+  map.addSource('aoi',{type:'geojson',data:{type:'Feature',geometry:{type:'Polygon',
+    coordinates:[[[a.lon_min,a.lat_min],[a.lon_max,a.lat_min],[a.lon_max,a.lat_max],[a.lon_min,a.lat_max],[a.lon_min,a.lat_min]]]}}});
+  map.addLayer({id:'aoi-line',type:'line',source:'aoi',paint:{'line-color':'#2df','line-width':2,'line-dasharray':[2,2]}});
+
+  const sceneFeats = (data.scenes||[]).map(s=>{
+    const c = wktToCoords(s.wkt); if(!c) return null;
+    return {type:'Feature',properties:{status:s.status},geometry:{type:'Polygon',coordinates:c}};
+  }).filter(Boolean);
+  map.addSource('scenes',{type:'geojson',data:{type:'FeatureCollection',features:sceneFeats}});
+  map.addLayer({id:'scenes-fill',type:'fill',source:'scenes',
+    paint:{'fill-color':['match',['get','status'],'raw','#4a6','calibrated','#6c8','detected','#8fa','#446'],'fill-opacity':0.15}});
+  map.addLayer({id:'scenes-line',type:'line',source:'scenes',paint:{'line-color':'#6a8','line-width':1}});
+
+  const trackFeats = Object.entries(data.tracks||{}).map(([mmsi,pts])=>({
+    type:'Feature',properties:{mmsi},
+    geometry:{type:'LineString',coordinates:pts.map(p=>[p[0],p[1]])}
+  })).filter(f=>f.geometry.coordinates.length>1);
+  map.addSource('tracks',{type:'geojson',data:{type:'FeatureCollection',features:trackFeats}});
+  map.addLayer({id:'tracks-line',type:'line',source:'tracks',
+    paint:{'line-color':'#fd4','line-width':1,'line-opacity':0.7}});
+
+  const c = data.counts;
+  hud.innerHTML = `<b>Maritime ISR — inspection v0</b><br>`+
+    `AOI: ${a.name}<br>window: ${data.window_hours}h<br>`+
+    `vessels: <b>${c.vessels}</b> · positions: <b>${c.positions}</b> · scenes: <b>${c.scenes}</b><br>`+
+    `<span style="color:#6a8">▧ scene footprints</span> · <span style="color:#fd4">▬ AIS tracks</span><br>`+
+    `generated: ${data.generated_at}`;
+});
+</script>
+</body>
+</html>

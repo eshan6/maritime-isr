@@ -1,0 +1,21 @@
+# Unit 0.3 — always-on AIS consumer on the Oracle VM.
+# Install: sudo cp aisstream.service /etc/systemd/system/ && sudo systemctl daemon-reload
+#          sudo systemctl enable --now aisstream
+[Unit]
+Description=Maritime ISR aisstream consumer (AOI live AIS)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/maritime-isr
+EnvironmentFile=/home/ubuntu/maritime-isr/.env
+ExecStart=/home/ubuntu/maritime-isr/.venv/bin/python -m maritime_isr.cli ingest ais
+Restart=always
+RestartSec=5
+StandardOutput=append:/home/ubuntu/maritime-isr/logs/aisstream.log
+StandardError=append:/home/ubuntu/maritime-isr/logs/aisstream.log
+
+[Install]
+WantedBy=multi-user.target
