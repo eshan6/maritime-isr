@@ -100,6 +100,39 @@ def test_old_snapshot_rows_survive_a_refresh(con, monkeypatch):
     assert old == 3, "the earlier snapshot must remain intact after a later refresh"
 
 
+def test_refreshing_twice_on_the_same_as_of_does_not_duplicate(con, monkeypatch):
+    """A repeat pull on the same date is one observation, not two.
+
+    Versioning is per as_of. Two refreshes on the same date must converge, or
+    every count downstream silently doubles.
+    """
+    monkeypatch.setattr(reg, "_fetch", lambda *a, **k: OFAC_CSV.encode())
+    reg.refresh_ofac(con, AS_OF_1)
+    first = con.execute("SELECT count(*) FROM ofac_sdn").fetchone()[0]
+    reg.refresh_ofac(con, AS_OF_1)
+    second = con.execute("SELECT count(*) FROM ofac_sdn").fetchone()[0]
+    assert first == second == 3
+
+
+def test_refreshing_on_a_new_as_of_still_appends_a_version(con, monkeypatch):
+    """The converse: a genuinely new date must NOT overwrite the old snapshot."""
+    monkeypatch.setattr(reg, "_fetch", lambda *a, **k: OFAC_CSV.encode())
+    reg.refresh_ofac(con, AS_OF_1)
+    reg.refresh_ofac(con, AS_OF_2)
+    total = con.execute("SELECT count(*) FROM ofac_sdn").fetchone()[0]
+    assert total == 6, "both snapshots must coexist"
+    dates = con.execute("SELECT count(DISTINCT as_of) FROM ofac_sdn").fetchone()[0]
+    assert dates == 2
+
+
+def test_wpi_same_as_of_refresh_is_idempotent(con, monkeypatch):
+    monkeypatch.setattr(reg, "_fetch", lambda *a, **k: WPI_CSV.encode())
+    reg.refresh_wpi(con, AS_OF_1)
+    reg.refresh_wpi(con, AS_OF_1)
+    n = con.execute("SELECT count(*) FROM wpi_ports").fetchone()[0]
+    assert n == 3
+
+
 def test_every_ofac_row_carries_as_of_and_pipeline_version(con, monkeypatch):
     monkeypatch.setattr(reg, "_fetch", lambda *a, **k: OFAC_CSV.encode())
     reg.refresh_ofac(con, AS_OF_1)

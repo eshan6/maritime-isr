@@ -87,6 +87,20 @@ def _record_snapshot(con, source_id: str, as_of: datetime, n_rows: int) -> None:
     )
 
 
+def _clear_snapshot(con, table: str, as_of: datetime) -> None:
+    """Drop any rows already stored for this exact as_of, so a re-run converges.
+
+    Versioning is per as_of date: refreshing on a *new* date appends a new
+    snapshot and keeps the old one. But refreshing twice on the *same* date is a
+    repeat of one observation, not two observations — without this, a re-run
+    silently doubles the snapshot and every count downstream is wrong.
+    """
+    try:
+        con.execute(f"DELETE FROM {table} WHERE as_of = ?", [as_of])
+    except Exception:  # noqa: BLE001 - table may not exist on first run
+        pass
+
+
 def _diff(con, table: str, source_id: str, key_col: str, as_of) -> tuple[int, int]:
     """Compare the newest two snapshots of a source; return (added, removed)."""
     versions = con.execute(
@@ -181,6 +195,7 @@ def refresh_ofac(con, as_of: datetime) -> int:
         )
         """
     )
+    _clear_snapshot(con, "ofac_sdn", as_of)
     con.executemany(
         "INSERT INTO ofac_sdn VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         [(r["ent_num"], r["name"], r["sdn_type"], r["program"], r["title"],
@@ -242,6 +257,7 @@ def refresh_un(con, as_of: datetime) -> int:
         )
         """
     )
+    _clear_snapshot(con, "un_consolidated", as_of)
     con.executemany(
         "INSERT INTO un_consolidated VALUES (?,?,?,?,?,?,?,?,?)",
         [(r["data_id"], r["name"], r["entity_kind"], r["un_list_type"],
@@ -308,6 +324,7 @@ def refresh_eu(con, as_of: datetime) -> int:
         )
         """
     )
+    _clear_snapshot(con, "eu_consolidated", as_of)
     con.executemany(
         "INSERT INTO eu_consolidated VALUES (?,?,?,?,?,?)",
         [(r["logical_id"], r["name"], r["programme"], r["identifier"], as_of, git_sha())
@@ -403,6 +420,7 @@ def refresh_wpi(con, as_of: datetime) -> int:
             r["harbor_size"], r["harbor_type"], r7, r9,
             cfg.aoi.contains(r["lat"], r["lon"]), as_of, git_sha(),
         ))
+    _clear_snapshot(con, "wpi_ports", as_of)
     con.executemany(
         "INSERT INTO wpi_ports VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", packed
     )
