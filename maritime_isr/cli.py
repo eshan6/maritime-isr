@@ -377,7 +377,7 @@ def cmd_live_ingest(args):
         return run(limit=args.limit)
     if args.source == "registries":
         from .ingest.registries import run
-        return run()
+        return run(only=args.only)
     if args.source == "noaa":
         from .ingest.noaa_ais import run
         return run(month=args.month)
@@ -423,7 +423,9 @@ def main():
     pves = ing.add_parser("gfw-vessels", help="identity for vessels seen in the event tables")
     pves.add_argument("--limit", type=int, default=None)
 
-    ing.add_parser("registries")
+    preg = ing.add_parser("registries", help="OFAC SDN, UN, EU sanctions + WPI ports")
+    preg.add_argument("--only", choices=["ofac", "un", "eu", "wpi"], default=None,
+                      help="refresh just one source; default is all four")
     pnoaa = ing.add_parser("noaa"); pnoaa.add_argument("--month", required=True)
     p.set_defaults(fn=cmd_live_ingest)
 

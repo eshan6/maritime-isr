@@ -123,6 +123,10 @@ def check_packages(rep: Report) -> None:
         "h3": "the shared spatial grid",
         "requests": "talks to the APIs",
         "pydantic": "validates records before landing",
+        # Not optional: without pytz, DuckDB cannot bind a timezone-aware
+        # datetime as a query parameter against a TIMESTAMPTZ column, which is
+        # exactly what the registry as_of lookups do.
+        "pytz": "lets DuckDB compare timezone-aware timestamps",
     }
     for mod, why in required.items():
         try:
