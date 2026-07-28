@@ -1,5 +1,9 @@
 """Mirror closed (previous-hour) Parquet partitions to R2. Cron entrypoint.
 
+PARKED: awaiting deploy host. Laptop mode runs MISR_STORE_BACKEND=local with no
+Cloudflare R2 bucket provisioned, so there is nothing to mirror to. Kept intact
+for the deploy host. See DATA_SOURCES.md.
+
 Only mirrors partitions strictly older than the current hour (the current hour
 is still being written by the live consumer). Idempotent: skips keys already in R2.
 """

@@ -1,5 +1,11 @@
 """Unit 0.3 — aisstream.io live AIS connector.
 
+PARKED: awaiting deploy host. This is a live websocket consumer — it only
+yields data while a machine stays connected and listening. Under download-only
+laptop mode the laptop cannot stay on, so this connector is not run and not
+wired into any scheduled path. The code is correct and is kept intact; it
+resumes the moment an always-on host exists. See DATA_SOURCES.md.
+
 WebSocket consumer filtered to the AOI bounding box. Parses PositionReport
 messages into the canonical schema, dedups, and writes hourly Parquet
 partitions through the shared writer. Runs as a systemd service on the VM so it

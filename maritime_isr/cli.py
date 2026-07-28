@@ -336,8 +336,14 @@ def cmd_live_config(args):
 
 
 def cmd_live_doctor(args):
-    from .process.snap_doctor import run
-    return run()
+    """Default: check THIS laptop can run download-only mode.
+
+    The SNAP/pyroSAR checks are parked (no deploy host) and now live behind
+    `--snap`, so a laptop run is not drowned in failures about a toolchain it
+    is not supposed to have.
+    """
+    from .infra.laptop_doctor import run
+    return run(snap=getattr(args, "snap", False))
 
 
 def cmd_live_preprocess(args):
@@ -376,7 +382,9 @@ def main():
     p = sub.add_parser("config", help="print resolved live config + env check")
     p.set_defaults(fn=cmd_live_config)
 
-    p = sub.add_parser("doctor", help="verify SNAP/pyroSAR install")
+    p = sub.add_parser("doctor", help="check this machine can run download-only mode")
+    p.add_argument("--snap", action="store_true",
+                   help="instead run the PARKED SNAP/pyroSAR checks (deploy host only)")
     p.set_defaults(fn=cmd_live_doctor)
 
     p = sub.add_parser("preprocess", help="0.2: SNAP chain raw->calibrated sigma0 COG")

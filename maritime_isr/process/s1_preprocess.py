@@ -1,5 +1,9 @@
 """Unit 0.2 — Sentinel-1 GRD preprocessing chain via pyroSAR + SNAP gpt.
 
+PARKED: awaiting deploy host. Requires ESA SNAP installed, which laptop mode
+excludes, and operates on downloaded SAR imagery, which the 1 GB disk budget
+excludes. Kept intact for the deploy host. See DATA_SOURCES.md.
+
 Chain (spec exit test): orbit file -> thermal noise removal -> calibration to
 sigma-nought -> terrain correction (geocoding) -> cloud-optimized GeoTIFF, with
 scene_catalog status transitioning raw -> calibrated.

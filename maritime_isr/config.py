@@ -59,7 +59,12 @@ ENV_SPEC: dict[str, tuple[str, str]] = {
 @dataclass
 class Config:
     aoi: AOI = field(default_factory=AOI)
-    store_backend: str = field(default_factory=lambda: os.getenv("MISR_STORE_BACKEND", "mirror"))
+    # Default is `local`: the current operating mode is a Windows laptop with no
+    # Oracle VM and no R2 bucket (STATE.md OPEN QUESTION #3). `mirror` was the
+    # old default and assumed the VM existed; on a laptop it makes every reader
+    # try to resolve s3:// paths against a bucket that isn't configured. Flip
+    # this to `mirror` on the deploy host once R2 is wired.
+    store_backend: str = field(default_factory=lambda: os.getenv("MISR_STORE_BACKEND", "local"))
     data_root: Path = field(
         default_factory=lambda: Path(os.getenv("MISR_DATA_ROOT", "./data")).expanduser()
     )

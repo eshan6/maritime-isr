@@ -1,5 +1,12 @@
 """Unit 0.4 — NOAA historical AIS -> same canonical schema.
 
+PARKED: structurally cannot serve AOI_V1. Marine Cadastre publishes AIS from
+the US Coast Guard receiver network, subsetted to the US Exclusive Economic
+Zone. Our AOI is the Arabian Sea (5-25N, 60-78E), where coverage is zero — not
+sparse, zero. This connector is only useful if the AOI moves to US waters.
+Kept intact because the mapping to the canonical schema is correct and would be
+reusable. See DATA_SOURCES.md.
+
 NOAA/Marine Cadastre publishes daily/zonal AIS CSVs. We fetch a month, filter
 to the AOI, map to canonical PositionReports, and land them in the same hourly
 Parquet store the live feed writes to (identical schema — a historical row and a
