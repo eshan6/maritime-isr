@@ -365,3 +365,50 @@ def test_http_error_becomes_registry_unavailable(monkeypatch):
 
 def test_all_four_sources_are_registered():
     assert set(reg.REFRESHERS) == {"ofac", "un", "eu", "wpi"}
+
+
+# ==========================================================================
+# manual import — for when the publisher is down
+# ==========================================================================
+
+def test_wpi_imports_a_hand_downloaded_file(con, tmp_path, monkeypatch):
+    """NGA returned 503 across every URL variant on 2026-07-29.
+
+    WPI is a static reference file that changes monthly at most, so importing a
+    browser download is a legitimate substitute, not a workaround.
+    """
+    import zipfile
+
+    import maritime_isr.config as cfg_mod
+    from maritime_isr.ingest import landing
+
+    monkeypatch.setattr(cfg_mod.cfg, "data_root", tmp_path, raising=False)
+    monkeypatch.setattr(landing.cfg, "data_root", tmp_path, raising=False)
+
+    z = tmp_path / "wpi.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("UpdatedPub150.csv", WPI_CSV)
+
+    reg.refresh_wpi(con, AS_OF_1, path=str(z))
+    assert con.execute("SELECT count(*) FROM wpi_ports").fetchone()[0] == 3
+
+
+def test_wpi_manual_import_still_lands_raw(con, tmp_path, monkeypatch):
+    """A hand-downloaded file is raw too — immutability applies either way."""
+    import maritime_isr.config as cfg_mod
+    from maritime_isr.ingest import landing
+
+    monkeypatch.setattr(cfg_mod.cfg, "data_root", tmp_path, raising=False)
+    monkeypatch.setattr(landing.cfg, "data_root", tmp_path, raising=False)
+
+    src = tmp_path / "wpi.csv"
+    src.write_text(WPI_CSV, encoding="utf-8")
+    reg.refresh_wpi(con, AS_OF_1, path=str(src))
+
+    landed = [p for p in (tmp_path / "raw").rglob("*") if p.is_file()]
+    assert landed, "manual import must still land the raw bytes"
+
+
+def test_wpi_manual_import_missing_file_is_reported(con, tmp_path):
+    with pytest.raises(reg.RegistryUnavailable, match="not found"):
+        reg.refresh_wpi(con, AS_OF_1, path=str(tmp_path / "nope.zip"))

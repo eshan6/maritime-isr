@@ -35,6 +35,8 @@ from datetime import datetime, timezone
 
 import requests
 
+from pathlib import Path
+
 from ..config import cfg
 from ..db import connect
 from ..h3util import index_both
@@ -422,12 +424,34 @@ def parse_wpi(csv_text: str) -> list[dict]:
     return rows
 
 
-def refresh_wpi(con, as_of: datetime) -> int:
+def refresh_wpi(con, as_of: datetime, path: str | None = None) -> int:
+    """Land the World Port Index.
+
+    `path` imports a file downloaded by hand instead of fetching. NGA's API
+    endpoint returns 503 for extended periods — it did across every URL variant
+    on 2026-07-29 — and WPI is a static reference file that changes monthly at
+    most, so a manual download is a perfectly good substitute rather than a
+    workaround. Same human-in-the-loop shape as the GFW SAR portal export.
+
+    Grab it from https://msi.nga.mil/Publications/WPI (the browser page often
+    works when the API does not), then:
+
+        maritime-isr ingest registries --only wpi --path C:\\Users\\you\\Downloads\\wpi.zip
+    """
     import os
 
-    url = os.getenv("MISR_WPI_URL", WPI_ZIP)
-    print("[registries] fetching WPI ports ...")
-    payload = _fetch(url, "wpi-ports", f"wpi_{as_of:%Y%m%d}.zip")
+    if path:
+        src = Path(path)
+        if not src.exists():
+            raise RegistryUnavailable(f"wpi-ports: file not found: {src}")
+        print(f"[registries] reading WPI from {src.name} ...")
+        payload = src.read_bytes()
+        # Still land it in the immutable raw store, exactly as a fetch would.
+        land_raw("wpi-ports", f"wpi_{as_of:%Y%m%d}{src.suffix or '.zip'}", payload)
+    else:
+        url = os.getenv("MISR_WPI_URL", WPI_ZIP)
+        print("[registries] fetching WPI ports ...")
+        payload = _fetch(url, "wpi-ports", f"wpi_{as_of:%Y%m%d}.zip")
 
     # The download is a zip containing a CSV; tolerate a bare CSV too.
     csv_text = None
@@ -487,8 +511,12 @@ REFRESHERS = {
 }
 
 
-def run(only: str | None = None) -> int:
-    """Refresh every registry. One failing source does not stop the others."""
+def run(only: str | None = None, path: str | None = None) -> int:
+    """Refresh every registry. One failing source does not stop the others.
+
+    `path` is only meaningful with `only="wpi"` — it imports a hand-downloaded
+    World Port Index file instead of fetching it.
+    """
     con = connect()
     _ensure_snapshot_meta(con)
     as_of = utcnow()
@@ -497,7 +525,10 @@ def run(only: str | None = None) -> int:
     failures = []
     for name in names:
         try:
-            REFRESHERS[name](con, as_of)
+            if name == "wpi" and path:
+                REFRESHERS[name](con, as_of, path=path)
+            else:
+                REFRESHERS[name](con, as_of)
         except RegistryUnavailable as e:
             print(f"[registries] SKIPPED {name}: {e}")
             failures.append(name)

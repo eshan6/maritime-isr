@@ -377,7 +377,7 @@ def cmd_live_ingest(args):
         return run(limit=args.limit)
     if args.source == "registries":
         from .ingest.registries import run
-        return run(only=args.only)
+        return run(only=args.only, path=args.path)
     if args.source == "noaa":
         from .ingest.noaa_ais import run
         return run(month=args.month)
@@ -426,6 +426,9 @@ def main():
     preg = ing.add_parser("registries", help="OFAC SDN, UN, EU sanctions + WPI ports")
     preg.add_argument("--only", choices=["ofac", "un", "eu", "wpi"], default=None,
                       help="refresh just one source; default is all four")
+    preg.add_argument("--path", default=None,
+                      help="import a hand-downloaded file instead of fetching "
+                           "(WPI only, for when NGA is down)")
     pnoaa = ing.add_parser("noaa"); pnoaa.add_argument("--month", required=True)
     p.set_defaults(fn=cmd_live_ingest)
 
