@@ -64,6 +64,16 @@ WPI_ZIP = (
 
 TIMEOUT_S = 180
 
+# Several government file servers (NGA's MSI among them) return 5xx to the
+# default python-requests user agent while serving browsers normally. Presenting
+# an ordinary UA is not evasion — these are public files published for download.
+_UA = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    )
+}
+
 
 class RegistryUnavailable(RuntimeError):
     """A registry could not be fetched. Other registries still refresh."""
@@ -138,7 +148,7 @@ def _fetch(url: str, source_id: str, filename: str) -> bytes:
     last_status = None
     for attempt in range(1, 4):
         try:
-            resp = requests.get(url, timeout=TIMEOUT_S)
+            resp = requests.get(url, timeout=TIMEOUT_S, headers=_UA)
         except requests.RequestException as e:
             if attempt == 3:
                 raise RegistryUnavailable(f"{source_id}: network error — {e}") from e
