@@ -318,8 +318,60 @@ downloaded, which laptop mode explicitly excludes.
 
 ---
 
+## Measured on first live run — 2026-07-29
+
+Everything above this line was desk research. These are numbers from an actual
+pull over AOI v1, 8-week window (2026-06-04 → 2026-07-30).
+
+| Table | Rows | Note |
+|---|---|---|
+| `gfw_encounters` | 14 | Sparse. GFW's tracked fleet skews to fishing/carrier. |
+| `gfw_loitering` | 24,153 | By far the largest signal. |
+| `gfw_port_visits` | 3,000 | Exactly 3 pages — **may be truncated**, verify. |
+| `gfw_ais_gaps` | 5 | Very sparse, but each carries `intentionalDisabling`. |
+| `gfw_vessel_identity` | 315 from 300 vessels | **1.05 records per vessel.** |
+| `gfw_vessel_owners` | 4 from 300 vessels | **≤1.3% coverage.** |
+| `ofac_sdn` | 19,157 | 1,516 of them vessels — unusually useful. |
+| `un_consolidated` | 1,011 | |
+| `eu_consolidated` | 6,017 | Needs `?token=` in the URL or 403s. |
+| `wpi_ports` | 0 | NGA returning 503 across all URL variants — outage. |
+| `scene_catalog` | 636 | Sentinel-1 metadata, no credentials needed. |
+
+Total 73.9 MB of the 1 GB budget. Every positioned table passed the AOI check.
+
+### The ownership finding — read this before planning Phase 4
+
+**GFW registry ownership is effectively empty for this AOI's vessel population:
+4 ownership intervals across 300 vessels.** Identity history is nearly as thin
+at 1.05 records per vessel, meaning most vessels have a single identity record
+and no recorded rename or reflagging.
+
+This undercuts two Phase 4 premises directly:
+
+- **The canonical chain** — *vessel met vessel → owner → sanctioned entity*
+  (roadmap 4.4, spec unit 4.4) — needs an owner edge to traverse. At 1.3%
+  coverage it will almost never fire on free data for this AOI.
+- **Identity-change-then-anomaly** (anomaly rule 5 in roadmap 5.2) needs
+  identity history. At 1.05 records per vessel there is essentially none.
+
+This is a data-availability fact, not a build gap, and it is **not** a reason to
+skip Phase 4 — ADR-011 turns the graph on early precisely because edge history
+compounds from the day it starts. But the chain must be validated against
+synthetic injects, and any claim that it fires *organically* on real AOI data
+needs evidence we do not currently have.
+
+Open: does ownership coverage improve for larger/commercial vessels, or outside
+this AOI? The 300 sampled here were whatever appeared in the event tables,
+which skews to fishing vessels. Worth measuring before concluding it is
+globally sparse rather than sparse *here*.
+
+---
+
 ## History
 
+- **2026-07-29** — first live run. Numbers above. EU needed a URL token; NGA
+  WPI down (503 on every variant); GFW vessel-detail endpoint takes `dataset`
+  singular plus `registries-info-data=ALL`, not the search endpoint's params.
 - **2026-07-28** — initial reconnaissance. Recorded: GFW SAR per-detection data
   is portal-only (not API); GFW SAR is offline since 2026-07-03 pending
   Sentinel-1C/1D migration; raw historical AIS is unobtainable free for this

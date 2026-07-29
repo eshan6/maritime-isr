@@ -133,6 +133,17 @@ list — ingest can be verified on the laptop right now.
 - **Per-detection SAR has no API.** Only gridded counts are automatable; vessel
   length and AIS-match status come from a manual portal CSV export. See
   DATA_SOURCES.md.
+- **GFW ownership data is effectively empty for this AOI** — 4 ownership
+  intervals across 300 vessels (<=1.3%), and identity history is 1.05 records
+  per vessel. The Phase 4 canonical chain and the identity-change anomaly rule
+  both depend on data that is largely absent. Measured, not assumed. See
+  DATA_SOURCES.md. Not a reason to skip Phase 4 (ADR-011), but organic firing
+  of the chain on real AOI data cannot currently be claimed.
+- **`gfw_port_visits` returned exactly 3,000 rows** = exactly 3 pages of 1,000.
+  Verify this is a real count and not silent pagination truncation.
+- **WPI unavailable** — NGA returns 503 on every URL variant including files
+  known to exist. Publisher-side outage; retry later. `tools/probe_wpi.py`
+  finds a working URL when they are back.
 - **No free raw historical AIS for this AOI.** Marine Cadastre is US EEZ only, so
   `ingest/noaa_ais.py` can never contribute a row here. This is a structural gap,
   not a bug — it constrains unit 3.2 and the M3 demo, though not unit 3.1's
