@@ -44,6 +44,60 @@ class AOI:
         return self.lat_min <= lat <= self.lat_max and self.lon_min <= lon <= self.lon_max
 
 
+def load_dotenv(path: Path | None = None, *, override: bool = False) -> int:
+    """Load KEY=VALUE pairs from a `.env` file at the repo root into os.environ.
+
+    Every connector reads credentials with `os.getenv`, and `.env.example` tells
+    the operator to copy it to `.env` — but nothing was actually reading that
+    file, so a correctly-filled `.env` had no effect and every key looked
+    missing. This closes that gap.
+
+    Real environment variables win by default: if a key is already set in the
+    shell, the `.env` value does not clobber it. Pass `override=True` to
+    reverse that.
+
+    Deliberately dependency-free — a dozen lines here beats adding python-dotenv
+    for a file format this simple. Returns the number of keys set.
+    """
+    env_path = Path(path) if path else Path(
+        os.getenv("MISR_ENV_FILE") or (Path(__file__).resolve().parent.parent / ".env")
+    )
+    if not env_path.is_file():
+        return 0
+
+    n = 0
+    try:
+        # utf-8-sig: PowerShell's `Set-Content -Encoding utf8` writes a BOM,
+        # which would otherwise corrupt the first key name.
+        text = env_path.read_text(encoding="utf-8-sig")
+    except OSError:
+        return 0
+
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip()
+        # Trailing inline comment, e.g. `MISR_STORE_BACKEND=local  # or mirror`.
+        # Requires whitespace before the '#' so a '#' inside a secret survives.
+        if " #" in value:
+            value = value.split(" #", 1)[0].strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if not key or not value:
+            continue  # blank values mean "not set", not "set to empty"
+        if override or key not in os.environ:
+            os.environ[key] = value
+            n += 1
+    return n
+
+
+# Load before Config() is constructed below — its field defaults read os.getenv
+# at instantiation time, so the .env must already be in the environment.
+load_dotenv()
+
+
 ENV_SPEC: dict[str, tuple[str, str]] = {
     "R2_ACCOUNT_ID": ("storage", "Cloudflare account id"),
     "R2_ACCESS_KEY_ID": ("storage", "R2 API token access key"),

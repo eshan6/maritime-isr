@@ -156,3 +156,141 @@ def test_parked_modules_say_so_in_their_docstring(module_name):
     mod = importlib.import_module(module_name)
     doc = mod.__doc__ or ""
     assert "PARKED" in doc, f"{module_name} is parked but its docstring does not say so"
+
+
+# --------------------------------------------------------------------------
+# .env loading
+#
+# Regression guard for a host-only bug: `.env.example` told the operator to
+# copy the file to `.env`, every connector read credentials via os.getenv, and
+# nothing ever loaded the file. A correctly-filled `.env` had no effect and
+# every key reported missing. Found on Eshan's laptop, not in the sandbox,
+# because the sandbox had no `.env` at all.
+# --------------------------------------------------------------------------
+
+def test_dotenv_is_loaded_into_environ(tmp_path, monkeypatch):
+    from maritime_isr.config import load_dotenv
+
+    monkeypatch.delenv("GFW_API_TOKEN", raising=False)
+    p = tmp_path / ".env"
+    p.write_text("GFW_API_TOKEN=abc123\n", encoding="utf-8")
+    assert load_dotenv(p) == 1
+    assert os.getenv("GFW_API_TOKEN") == "abc123"
+
+
+def test_dotenv_skips_comments_and_blank_lines(tmp_path, monkeypatch):
+    from maritime_isr.config import load_dotenv
+
+    monkeypatch.delenv("SOME_KEY", raising=False)
+    p = tmp_path / ".env"
+    p.write_text("# a comment\n\n   \nSOME_KEY=value\n", encoding="utf-8")
+    assert load_dotenv(p) == 1
+    assert os.getenv("SOME_KEY") == "value"
+
+
+def test_dotenv_strips_trailing_inline_comment(tmp_path, monkeypatch):
+    """The old .env.example shipped `MISR_STORE_BACKEND=mirror  # local | r2`."""
+    from maritime_isr.config import load_dotenv
+
+    monkeypatch.delenv("MISR_STORE_BACKEND", raising=False)
+    p = tmp_path / ".env"
+    p.write_text("MISR_STORE_BACKEND=local        # local | r2 | mirror\n", encoding="utf-8")
+    load_dotenv(p)
+    assert os.getenv("MISR_STORE_BACKEND") == "local"
+
+
+def test_dotenv_preserves_hash_inside_a_secret(tmp_path, monkeypatch):
+    """A '#' with no space before it is part of the value, not a comment."""
+    from maritime_isr.config import load_dotenv
+
+    monkeypatch.delenv("SECRET", raising=False)
+    p = tmp_path / ".env"
+    p.write_text("SECRET=abc#def\n", encoding="utf-8")
+    load_dotenv(p)
+    assert os.getenv("SECRET") == "abc#def"
+
+
+def test_dotenv_handles_a_jwt_untouched(tmp_path, monkeypatch):
+    """JWTs contain dots, dashes and underscores; none may be mangled."""
+    from maritime_isr.config import load_dotenv
+
+    jwt = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJkYXRhIjp7fX0.a-b_c.d"
+    monkeypatch.delenv("GFW_API_TOKEN", raising=False)
+    p = tmp_path / ".env"
+    p.write_text(f"GFW_API_TOKEN={jwt}\n", encoding="utf-8")
+    load_dotenv(p)
+    assert os.getenv("GFW_API_TOKEN") == jwt
+
+
+def test_dotenv_tolerates_a_utf8_bom(tmp_path, monkeypatch):
+    """PowerShell's `Set-Content -Encoding utf8` writes a BOM."""
+    from maritime_isr.config import load_dotenv
+
+    monkeypatch.delenv("GFW_API_TOKEN", raising=False)
+    p = tmp_path / ".env"
+    p.write_bytes(b"\xef\xbb\xbfGFW_API_TOKEN=withbom\n")
+    load_dotenv(p)
+    assert os.getenv("GFW_API_TOKEN") == "withbom"
+
+
+def test_dotenv_strips_surrounding_quotes(tmp_path, monkeypatch):
+    from maritime_isr.config import load_dotenv
+
+    monkeypatch.delenv("QUOTED", raising=False)
+    p = tmp_path / ".env"
+    p.write_text('QUOTED="hello world"\n', encoding="utf-8")
+    load_dotenv(p)
+    assert os.getenv("QUOTED") == "hello world"
+
+
+def test_dotenv_blank_value_means_not_set(tmp_path, monkeypatch):
+    """`R2_ACCOUNT_ID=` in .env.example must not shadow as an empty string."""
+    from maritime_isr.config import load_dotenv
+
+    monkeypatch.delenv("R2_ACCOUNT_ID", raising=False)
+    p = tmp_path / ".env"
+    p.write_text("R2_ACCOUNT_ID=\n", encoding="utf-8")
+    load_dotenv(p)
+    assert os.getenv("R2_ACCOUNT_ID") is None
+
+
+def test_real_environment_wins_over_dotenv(tmp_path, monkeypatch):
+    """A key already exported in the shell must not be clobbered by .env."""
+    from maritime_isr.config import load_dotenv
+
+    monkeypatch.setenv("GFW_API_TOKEN", "from-shell")
+    p = tmp_path / ".env"
+    p.write_text("GFW_API_TOKEN=from-file\n", encoding="utf-8")
+    load_dotenv(p)
+    assert os.getenv("GFW_API_TOKEN") == "from-shell"
+
+
+def test_dotenv_override_flag_reverses_precedence(tmp_path, monkeypatch):
+    from maritime_isr.config import load_dotenv
+
+    monkeypatch.setenv("GFW_API_TOKEN", "from-shell")
+    p = tmp_path / ".env"
+    p.write_text("GFW_API_TOKEN=from-file\n", encoding="utf-8")
+    load_dotenv(p, override=True)
+    assert os.getenv("GFW_API_TOKEN") == "from-file"
+
+
+def test_dotenv_missing_file_is_a_noop(tmp_path):
+    from maritime_isr.config import load_dotenv
+
+    assert load_dotenv(tmp_path / "nope.env") == 0
+
+
+def test_doctor_sees_a_token_supplied_only_via_dotenv(tmp_path, monkeypatch):
+    """The exact end-to-end failure: .env present and filled, doctor said missing."""
+    from maritime_isr.config import load_dotenv
+
+    monkeypatch.delenv("GFW_API_TOKEN", raising=False)
+    p = tmp_path / ".env"
+    p.write_text("GFW_API_TOKEN=eyJhbGciOi.test.sig\n", encoding="utf-8")
+    load_dotenv(p)
+
+    rep = laptop_doctor.Report()
+    laptop_doctor.check_credentials(rep)
+    statuses = {name: status for status, name, _ in rep.rows}
+    assert statuses["key GFW_API_TOKEN"] == laptop_doctor.OK
