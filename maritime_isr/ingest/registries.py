@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import csv
 import io
+import time
 import xml.etree.ElementTree as ET
 import zipfile
 from datetime import datetime, timezone
@@ -45,11 +46,14 @@ from .landing import land_raw
 # --------------------------------------------------------------------------
 OFAC_SDN_CSV = "https://www.treasury.gov/ofac/downloads/sdn.csv"
 UN_CONSOLIDATED_XML = "https://scsanctions.un.org/resources/xml/en/consolidated.xml"
-# The EU list is served from the Commission's FSD service. Some endpoints
-# require a free token; if this URL 4xx's, the connector reports it rather than
-# failing the whole refresh. Record any working replacement in DATA_SOURCES.md.
+# The EU list is served from the Commission's FSD service and REQUIRES a token
+# query parameter — without it the endpoint returns 403, which is what our first
+# live run hit. `dG9rZW4tMjAxNw` is the long-standing public token (base64 of
+# "token-2017") published in the Commission's own RSS feed of download links.
+# Override with MISR_EU_SANCTIONS_URL if the Commission rotates it.
 EU_CONSOLIDATED_XML = (
     "https://webgate.ec.europa.eu/fsd/fsf/public/files/xmlFullSanctionsList_1_1/content"
+    "?token=dG9rZW4tMjAxNw"
 )
 # NGA World Port Index. The key in the path changes between editions; override
 # with MISR_WPI_URL when NGA republishes.
@@ -124,19 +128,45 @@ def _diff(con, table: str, source_id: str, key_col: str, as_of) -> tuple[int, in
 
 
 def _fetch(url: str, source_id: str, filename: str) -> bytes:
-    """GET a registry file and land the exact bytes in the immutable raw store."""
-    try:
-        resp = requests.get(url, timeout=TIMEOUT_S)
-    except requests.RequestException as e:
-        raise RegistryUnavailable(f"{source_id}: network error — {e}") from e
-    if resp.status_code >= 400:
-        raise RegistryUnavailable(
-            f"{source_id}: HTTP {resp.status_code} from {url}. "
-            "The publisher may have moved or gated the file; "
-            "record the working URL in DATA_SOURCES.md."
-        )
-    land_raw(source_id, filename, resp.content)
-    return resp.content
+    """GET a registry file and land the exact bytes in the immutable raw store.
+
+    Retries 5xx with backoff. NGA's WPI endpoint returns 503 intermittently —
+    our first live run hit one — and a government file server having a bad
+    minute should not cost us the whole refresh.
+    """
+    delay = 3.0
+    last_status = None
+    for attempt in range(1, 4):
+        try:
+            resp = requests.get(url, timeout=TIMEOUT_S)
+        except requests.RequestException as e:
+            if attempt == 3:
+                raise RegistryUnavailable(f"{source_id}: network error — {e}") from e
+            time.sleep(delay)
+            delay *= 2
+            continue
+
+        if resp.status_code < 400:
+            land_raw(source_id, filename, resp.content)
+            return resp.content
+
+        last_status = resp.status_code
+        if resp.status_code >= 500 and attempt < 3:
+            print(f"[registries] {source_id}: HTTP {resp.status_code}, "
+                  f"retry {attempt}/3 in {delay:.0f}s")
+            time.sleep(delay)
+            delay *= 2
+            continue
+        break
+
+    hint = ("The publisher may have moved or gated the file; "
+            "record the working URL in DATA_SOURCES.md.")
+    if last_status == 403:
+        hint = "403 usually means a required access token is missing from the URL."
+    elif last_status and last_status >= 500:
+        hint = ("Server-side error that persisted across 3 retries — the publisher "
+                "is likely down. Try again later; nothing else is affected.")
+    raise RegistryUnavailable(f"{source_id}: HTTP {last_status} from {url}. {hint}")
 
 
 # --------------------------------------------------------------------------
@@ -312,8 +342,11 @@ def parse_eu(xml_bytes: bytes) -> list[dict]:
 
 
 def refresh_eu(con, as_of: datetime) -> int:
+    import os
+
+    url = os.getenv("MISR_EU_SANCTIONS_URL", EU_CONSOLIDATED_XML)
     print("[registries] fetching EU consolidated ...")
-    payload = _fetch(EU_CONSOLIDATED_XML, "eu-consolidated", f"eu_{as_of:%Y%m%d}.xml")
+    payload = _fetch(url, "eu-consolidated", f"eu_{as_of:%Y%m%d}.xml")
     rows = parse_eu(payload)
 
     con.execute(
