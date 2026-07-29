@@ -83,15 +83,27 @@ def vessel_ids_from_events() -> list[str]:
 
 
 def fetch_vessel(vessel_id: str) -> dict | None:
-    """Fetch one vessel's full identity record, including history."""
+    """Fetch one vessel's full identity record, including history.
+
+    Parameter names verified against the official client's `VesselDetailParams`,
+    not guessed. Three things the detail endpoint is fussy about:
+
+    * `dataset` is **singular** here. The events endpoint takes `datasets[]`;
+      sending `datasets[0]` to this one returns 422.
+    * `includes` accepts only POTENTIAL_RELATED_SELF_REPORTED_INFO. OWNERSHIP
+      and AUTHORIZATIONS belong to the *search* endpoint's enum, and sending
+      them here is the other half of that 422.
+    * `registries-info-data` defaults to NONE, which returns a vessel with no
+      registry history and no owners at all — silently useless for our purpose.
+      ALL is required.
+    """
     try:
         payload = gc.get_json(
             f"vessels/{vessel_id}",
             params={
-                "datasets[0]": VESSEL_DATASET,
+                "dataset": VESSEL_DATASET,
+                "registries-info-data": "ALL",
                 "includes[0]": "POTENTIAL_RELATED_SELF_REPORTED_INFO",
-                "includes[1]": "OWNERSHIP",
-                "includes[2]": "AUTHORIZATIONS",
             },
         )
     except Exception as e:  # noqa: BLE001

@@ -152,7 +152,13 @@ def post_paginated(path: str, body: dict, *, limit: int = PAGE_SIZE) -> Iterator
 def get_json(path: str, params: dict | None = None) -> Any:
     resp = request("GET", path, params=params)
     if resp.status_code >= 400:
-        resp.raise_for_status()
+        # Surface the server's explanation. GFW returns a JSON body saying which
+        # parameter it rejected; raise_for_status() alone throws that away and
+        # leaves you staring at a bare "422 Unprocessable Entity".
+        detail = resp.text[:400].replace("\n", " ")
+        raise requests.HTTPError(
+            f"{resp.status_code} from {path} — {detail}", response=resp
+        )
     return resp.json()
 
 
