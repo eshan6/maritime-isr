@@ -27,7 +27,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from ..config import ENV_SPEC, cfg, header_safety
+from ..config import ENV_SPEC, cfg, header_safety, repo_root
 
 # Under laptop mode the whole downloaded corpus must stay under 1 GB.
 DISK_BUDGET_BYTES = 1_000_000_000
@@ -175,6 +175,33 @@ def check_duckdb(rep: Report) -> None:
             rep.add(FAIL, "duckdb run", f"query returned {got!r}, expected 42")
     except Exception as e:  # noqa: BLE001
         rep.add(FAIL, "duckdb run", f"query failed: {e}")
+
+
+def check_working_directory(rep: Report) -> None:
+    """Say plainly which checkout is in use, and whether you are standing in it.
+
+    Commands work from anywhere because the package is installed in editable
+    mode, which is convenient and was also a trap: `.env` resolves from the
+    package location while `data/` used to resolve from the current directory,
+    so `doctor` could report READY against a data dir that had nothing in it.
+    Data root is now anchored to the repo, but the mismatch is still worth
+    surfacing — `git pull` in the wrong folder silently does nothing.
+    """
+    root = repo_root()
+    rep.add(OK, "repo root", str(root))
+    try:
+        here = Path.cwd().resolve()
+    except OSError:
+        return
+    if here == root:
+        rep.add(OK, "working dir", "you are in the repo root")
+    else:
+        rep.add(
+            WARN,
+            "working dir",
+            f"you are in {here}, not the repo. Data still lands in the repo, but "
+            f"`git pull` here will fail. Run: cd {root}",
+        )
 
 
 def check_data_dir(rep: Report) -> None:
@@ -331,6 +358,7 @@ def run(snap: bool = False) -> int:
     print("-" * 72)
 
     rep = Report()
+    check_working_directory(rep)
     check_python(rep)
     check_packages(rep)
     check_h3_version(rep)

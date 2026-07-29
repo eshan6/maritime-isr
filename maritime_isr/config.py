@@ -174,6 +174,26 @@ def load_dotenv(path: Path | None = None, *, override: bool = False) -> int:
 load_dotenv()
 
 
+def repo_root() -> Path:
+    """The checkout this package was installed from. `.env` and `data/` live here."""
+    return Path(__file__).resolve().parent.parent
+
+
+def _resolve_data_root() -> Path:
+    """Where landed data goes. Relative paths resolve against the REPO ROOT.
+
+    They used to resolve against the current working directory, which meant
+    running `python -m maritime_isr.cli` from somewhere else silently used a
+    different data directory — while `.env` was still found via the package
+    location. The two disagreed and nothing complained: doctor reported READY
+    against `C:\\Users\\eshan\\data` while the real data sat in the repo.
+
+    An absolute MISR_DATA_ROOT is honoured as-is.
+    """
+    raw = Path(os.getenv("MISR_DATA_ROOT", "./data")).expanduser()
+    return raw if raw.is_absolute() else (repo_root() / raw).resolve()
+
+
 ENV_SPEC: dict[str, tuple[str, str]] = {
     "R2_ACCOUNT_ID": ("storage", "Cloudflare account id"),
     "R2_ACCESS_KEY_ID": ("storage", "R2 API token access key"),
@@ -195,9 +215,7 @@ class Config:
     # try to resolve s3:// paths against a bucket that isn't configured. Flip
     # this to `mirror` on the deploy host once R2 is wired.
     store_backend: str = field(default_factory=lambda: os.getenv("MISR_STORE_BACKEND", "local"))
-    data_root: Path = field(
-        default_factory=lambda: Path(os.getenv("MISR_DATA_ROOT", "./data")).expanduser()
-    )
+    data_root: Path = field(default_factory=lambda: _resolve_data_root())
     r2_bucket: str | None = field(default_factory=lambda: os.getenv("R2_BUCKET"))
 
     def local_parquet_dir(self, store: str) -> Path:

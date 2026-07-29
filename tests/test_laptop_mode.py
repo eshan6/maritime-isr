@@ -457,3 +457,61 @@ def test_gfw_client_warns_on_a_truncated_jwt(monkeypatch, capsys):
     monkeypatch.setenv("GFW_API_TOKEN", "eyJhbGciOiJSUzI1NiJ9.eyJkYXRhIjp7fX0")
     gfw_client.token()
     assert "WARNING" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------
+# path anchoring
+#
+# Running from the wrong folder used to resolve `.env` from the package
+# location but `data/` from the current directory. doctor then reported READY
+# against an empty data dir in the home folder while the real data sat in the
+# repo — and `git pull` in that folder silently failed.
+# --------------------------------------------------------------------------
+
+def test_relative_data_root_anchors_to_the_repo_not_cwd(tmp_path, monkeypatch):
+    from maritime_isr.config import _resolve_data_root, repo_root
+
+    monkeypatch.setenv("MISR_DATA_ROOT", "./data")
+    monkeypatch.chdir(tmp_path)
+    assert _resolve_data_root() == (repo_root() / "data").resolve()
+
+
+def test_data_root_is_identical_from_any_directory(tmp_path, monkeypatch):
+    from maritime_isr.config import _resolve_data_root
+
+    monkeypatch.setenv("MISR_DATA_ROOT", "./data")
+    monkeypatch.chdir(tmp_path)
+    a = _resolve_data_root()
+    monkeypatch.chdir(tmp_path.parent)
+    assert _resolve_data_root() == a
+
+
+def test_absolute_data_root_is_honoured(tmp_path, monkeypatch):
+    from maritime_isr.config import _resolve_data_root
+
+    monkeypatch.setenv("MISR_DATA_ROOT", str(tmp_path / "elsewhere"))
+    assert _resolve_data_root() == tmp_path / "elsewhere"
+
+
+def test_repo_root_contains_pyproject():
+    """repo_root() must point at the checkout, not the package directory."""
+    from maritime_isr.config import repo_root
+
+    assert (repo_root() / "pyproject.toml").is_file()
+
+
+def test_doctor_warns_when_not_in_the_repo(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    rep = laptop_doctor.Report()
+    laptop_doctor.check_working_directory(rep)
+    assert rep.warnings, "running outside the repo should warn"
+    assert "cd " in rep.warnings[0][2], "must give the exact cd command"
+
+
+def test_doctor_is_quiet_when_in_the_repo(monkeypatch):
+    from maritime_isr.config import repo_root
+
+    monkeypatch.chdir(repo_root())
+    rep = laptop_doctor.Report()
+    laptop_doctor.check_working_directory(rep)
+    assert not rep.warnings
