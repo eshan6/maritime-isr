@@ -294,3 +294,166 @@ def test_doctor_sees_a_token_supplied_only_via_dotenv(tmp_path, monkeypatch):
     laptop_doctor.check_credentials(rep)
     statuses = {name: status for status, name, _ in rep.rows}
     assert statuses["key GFW_API_TOKEN"] == laptop_doctor.OK
+
+
+# --------------------------------------------------------------------------
+# credential encoding
+#
+# Third host-only bug. The GFW token reached .env with its ASCII replaced by
+# full-width Unicode look-alikes (U+FF45 etc). Visually identical, 3 bytes each
+# instead of 1, and impossible to put in an HTTP header — headers are latin-1.
+# The failure surfaced as UnicodeEncodeError 30 frames deep in urllib3, and
+# doctor reported the token "present" the whole time.
+# --------------------------------------------------------------------------
+
+def _fullwidth(s: str, start: int = 0) -> str:
+    return s[:start] + "".join(
+        chr(ord(c) + 0xFEE0) if 0x21 <= ord(c) <= 0x7E else c for c in s[start:]
+    )
+
+
+REAL_TOKEN = "eyJhbGciOiJSUzI1NiJ9.eyJkYXRhIjp7fX0.sig-abc_123"
+
+
+def test_sanitize_leaves_a_clean_ascii_secret_untouched():
+    from maritime_isr.config import sanitize_secret
+
+    cleaned, notes = sanitize_secret(REAL_TOKEN)
+    assert cleaned == REAL_TOKEN
+    assert notes == [], "a clean token must not be 'repaired'"
+
+
+def test_sanitize_restores_a_fullwidth_token_exactly():
+    from maritime_isr.config import sanitize_secret
+
+    cleaned, notes = sanitize_secret(_fullwidth(REAL_TOKEN))
+    assert cleaned == REAL_TOKEN
+    assert any("NFKC" in n for n in notes)
+
+
+def test_sanitize_handles_partial_corruption():
+    """On the host the first ~8 chars survived as ASCII and the rest did not."""
+    from maritime_isr.config import sanitize_secret
+
+    cleaned, _ = sanitize_secret(_fullwidth(REAL_TOKEN, start=8))
+    assert cleaned == REAL_TOKEN
+
+
+def test_sanitize_strips_zero_width_characters():
+    from maritime_isr.config import sanitize_secret
+
+    cleaned, notes = sanitize_secret("abc​def­ghi")
+    assert cleaned == "abcdefghi"
+    assert any("zero-width" in n for n in notes)
+
+
+def test_sanitize_converts_non_breaking_space():
+    from maritime_isr.config import sanitize_secret
+
+    cleaned, _ = sanitize_secret(" token ")
+    assert cleaned == "token"
+
+
+def test_header_safety_accepts_ascii():
+    from maritime_isr.config import header_safety
+
+    ok, why = header_safety(REAL_TOKEN)
+    assert ok and why == ""
+
+
+def test_header_safety_rejects_and_names_the_characters():
+    from maritime_isr.config import header_safety
+
+    ok, why = header_safety(_fullwidth(REAL_TOKEN))
+    assert not ok
+    assert "U+FF" in why, "must name the actual offending codepoints"
+
+
+def test_header_safety_matches_what_http_client_would_do():
+    """Our check must agree with the encoding http.client actually performs."""
+    from maritime_isr.config import header_safety
+
+    for value in (REAL_TOKEN, _fullwidth(REAL_TOKEN), "plain", "café"):
+        try:
+            value.encode("latin-1")
+            really_ok = True
+        except UnicodeEncodeError:
+            really_ok = False
+        assert header_safety(value)[0] is really_ok
+
+
+def test_dotenv_repairs_a_fullwidth_token_end_to_end(tmp_path, monkeypatch, capsys):
+    """The exact host failure: BOM + full-width token -> usable token."""
+    from maritime_isr.config import header_safety, load_dotenv
+
+    monkeypatch.delenv("GFW_API_TOKEN", raising=False)
+    p = tmp_path / ".env"
+    p.write_bytes(
+        b"\xef\xbb\xbf" + f"GFW_API_TOKEN={_fullwidth(REAL_TOKEN, 8)}\n".encode("utf-8")
+    )
+    load_dotenv(p)
+
+    assert os.environ["GFW_API_TOKEN"] == REAL_TOKEN
+    assert header_safety(os.environ["GFW_API_TOKEN"])[0]
+    assert "repaired GFW_API_TOKEN" in capsys.readouterr().out, "repair must not be silent"
+
+
+def test_doctor_FAILS_on_a_present_but_unusable_token(monkeypatch):
+    """The gap: doctor went green on a token that could never be sent."""
+    monkeypatch.setenv("GFW_API_TOKEN", _fullwidth(REAL_TOKEN))
+    rep = laptop_doctor.Report()
+    laptop_doctor.check_credentials(rep)
+
+    statuses = {name: status for status, name, _ in rep.rows}
+    assert statuses["key GFW_API_TOKEN"] == laptop_doctor.FAIL
+    assert rep.failures, "an unusable credential must fail, not pass"
+
+
+def test_doctor_run_reports_not_ready_on_a_bad_token(monkeypatch, capsys):
+    monkeypatch.setenv("GFW_API_TOKEN", _fullwidth(REAL_TOKEN))
+    rc = laptop_doctor.run()
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "RESULT: NOT READY" in out
+
+
+def test_doctor_only_warns_on_a_bad_but_PARKED_credential(monkeypatch):
+    """A parked key cannot break anything today — warn, do not fail the run."""
+    monkeypatch.setenv("GFW_API_TOKEN", REAL_TOKEN)
+    monkeypatch.setenv("R2_ACCESS_KEY_ID", _fullwidth("abc123"))
+    rep = laptop_doctor.Report()
+    laptop_doctor.check_credentials(rep)
+
+    statuses = {name: status for status, name, _ in rep.rows}
+    assert statuses["key R2_ACCESS_KEY_ID"] == laptop_doctor.WARN
+    assert not rep.failures
+
+
+def test_gfw_client_fails_fast_with_plain_english(monkeypatch):
+    """Not a 30-line urllib3 traceback."""
+    from maritime_isr.ingest import gfw_client
+
+    monkeypatch.setenv("GFW_API_TOKEN", _fullwidth(REAL_TOKEN))
+    with pytest.raises(gfw_client.GFWAuthError) as e:
+        gfw_client.token()
+
+    msg = str(e.value)
+    assert "HTTP header" in msg
+    assert "U+FF" in msg, "must name the offending characters"
+    assert "re-paste" in msg or "retype" in msg.lower(), "must say how to fix it"
+
+
+def test_gfw_client_accepts_a_clean_token(monkeypatch):
+    from maritime_isr.ingest import gfw_client
+
+    monkeypatch.setenv("GFW_API_TOKEN", REAL_TOKEN)
+    assert gfw_client.token() == REAL_TOKEN
+
+
+def test_gfw_client_warns_on_a_truncated_jwt(monkeypatch, capsys):
+    """The other common paste failure, which otherwise shows up as a bare 401."""
+    from maritime_isr.ingest import gfw_client
+
+    monkeypatch.setenv("GFW_API_TOKEN", "eyJhbGciOiJSUzI1NiJ9.eyJkYXRhIjp7fX0")
+    gfw_client.token()
+    assert "WARNING" in capsys.readouterr().out

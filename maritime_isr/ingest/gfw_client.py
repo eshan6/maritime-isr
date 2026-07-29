@@ -18,6 +18,8 @@ from typing import Any, Iterator
 
 import requests
 
+from ..config import header_safety
+
 API_BASE = "https://gateway.api.globalfishingwatch.org/v3"
 
 # GFW returns at most this many rows per events request; we page with offset.
@@ -45,6 +47,28 @@ def token() -> str:
             "  2. Generate an API token.\n"
             "  3. Put GFW_API_TOKEN=<your token> in a .env file at the repo root.\n"
             "Then run `maritime-isr doctor` to confirm it is picked up."
+        )
+
+    # Fail here, in plain English, rather than 30 frames deep in urllib3.
+    # HTTP headers are latin-1; a token carrying look-alike Unicode raises
+    # UnicodeEncodeError from http.client.putheader with no hint of the cause.
+    ok, why = header_safety(tok)
+    if not ok:
+        raise GFWAuthError(
+            "GFW_API_TOKEN cannot be sent in an HTTP header.\n"
+            f"  {why}\n"
+            "  A GFW token is plain ASCII: letters, digits, '-', '_' and '.'\n"
+            "  Fix: delete the GFW_API_TOKEN line from .env and retype or re-paste\n"
+            "  it from the GFW API portal directly into a plain-text editor.\n"
+            "  Then run `maritime-isr doctor` — it now checks this."
+        )
+
+    # A JWT is three dot-separated base64url segments. A truncated paste is the
+    # other common failure and produces a far less obvious 401 from the server.
+    if tok.count(".") != 2:
+        print(
+            f"[gfw] WARNING: token has {tok.count('.')} dots; a JWT normally has 2. "
+            "If the next call returns 401, suspect a truncated copy-paste."
         )
     return tok
 

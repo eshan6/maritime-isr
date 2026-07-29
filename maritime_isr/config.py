@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import sys
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -42,6 +43,73 @@ class AOI:
 
     def contains(self, lat: float, lon: float) -> bool:
         return self.lat_min <= lat <= self.lat_max and self.lon_min <= lon <= self.lon_max
+
+
+# Invisible characters that copy-paste drags along and that are never a
+# legitimate part of a credential. Stripped before use.
+_INVISIBLE = dict.fromkeys(
+    map(ord, "​‌‍⁠﻿­"), None
+)
+
+
+def sanitize_secret(value: str) -> tuple[str, list[str]]:
+    """Repair a credential mangled by copy-paste. Returns (cleaned, notes).
+
+    Pasting a token out of a rendered surface — a chat window, a PDF, a styled
+    web page — can substitute ASCII with Unicode look-alikes that are visually
+    identical and functionally useless. HTTP headers are latin-1 only, so a
+    token full of full-width characters raises UnicodeEncodeError deep inside
+    urllib3, long after the point where the mistake was made.
+
+    Three repairs, all lossless for a genuine ASCII secret:
+      * remove zero-width and soft-hyphen characters
+      * turn non-breaking and other Unicode spaces into ordinary spaces, then strip
+      * NFKC-normalise, which maps full-width and compatibility forms back to
+        ASCII (U+FF45 FULLWIDTH LATIN SMALL LETTER E -> 'e')
+
+    An already-clean ASCII value is returned unchanged with no notes.
+    """
+    notes: list[str] = []
+
+    cleaned = value.translate(_INVISIBLE)
+    if cleaned != value:
+        notes.append("removed zero-width/invisible characters")
+
+    despaced = "".join(
+        " " if unicodedata.category(c) == "Zs" else c for c in cleaned
+    ).strip()
+    if despaced != cleaned.strip():
+        notes.append("converted non-breaking spaces")
+    cleaned = despaced
+
+    normalised = unicodedata.normalize("NFKC", cleaned)
+    if normalised != cleaned:
+        notes.append("normalised full-width/look-alike characters to ASCII (NFKC)")
+    cleaned = normalised
+
+    return cleaned, notes
+
+
+def header_safety(value: str) -> tuple[bool, str]:
+    """Can this value be sent in an HTTP header? Returns (ok, plain-English why not).
+
+    HTTP headers are latin-1 encoded. `requests` does not check, so a bad value
+    surfaces as a UnicodeEncodeError from `http.client.putheader` with no clue
+    about which credential caused it.
+    """
+    try:
+        value.encode("latin-1")
+        return True, ""
+    except UnicodeEncodeError:
+        bad = sorted({c for c in value if ord(c) > 0xFF})
+        sample = ", ".join(
+            f"{c!r} (U+{ord(c):04X} {unicodedata.name(c, 'unnamed')})" for c in bad[:3]
+        )
+        return False, (
+            f"{len(bad)} distinct non-Latin-1 character(s), e.g. {sample}. "
+            "This usually means the value was copied from a rendered page or "
+            "chat window that substituted look-alike Unicode for plain ASCII."
+        )
 
 
 def load_dotenv(path: Path | None = None, *, override: bool = False) -> int:
@@ -87,6 +155,14 @@ def load_dotenv(path: Path | None = None, *, override: bool = False) -> int:
             value = value[1:-1]
         if not key or not value:
             continue  # blank values mean "not set", not "set to empty"
+
+        # Repair copy-paste damage, and say so — a silent repair would hide a
+        # real problem, and a silent non-repair costs an hour of debugging in
+        # urllib3. See sanitize_secret().
+        value, notes = sanitize_secret(value)
+        if notes:
+            print(f"[config] repaired {key} from .env: {'; '.join(notes)}")
+
         if override or key not in os.environ:
             os.environ[key] = value
             n += 1

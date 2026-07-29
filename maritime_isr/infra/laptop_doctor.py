@@ -27,7 +27,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from ..config import ENV_SPEC, cfg
+from ..config import ENV_SPEC, cfg, header_safety
 
 # Under laptop mode the whole downloaded corpus must stay under 1 GB.
 DISK_BUDGET_BYTES = 1_000_000_000
@@ -237,21 +237,47 @@ def check_store_backend(rep: Report) -> None:
 
 
 def check_credentials(rep: Report) -> None:
-    """Report which connectors can run. Missing keys are a warning, not a failure."""
+    """Report which connectors can run. Missing keys are a warning, not a failure.
+
+    A key that is *present but unusable* is a FAILURE, not a pass. Reporting
+    "present" for a token that cannot be encoded into an HTTP header is worse
+    than reporting nothing: it sends the operator to run a pull that cannot
+    possibly succeed, and the real error surfaces deep inside urllib3.
+    """
     for var, what in LAPTOP_CREDS.items():
-        if os.getenv(var):
-            rep.add(OK, f"key {var}", f"present — {what} can run")
-        else:
+        raw = os.getenv(var)
+        if not raw:
             rep.add(
                 WARN,
                 f"key {var}",
                 f"missing — {what} cannot run. Put it in a .env file at the repo root",
             )
+            continue
+        ok, why = header_safety(raw)
+        if ok:
+            rep.add(OK, f"key {var}", f"present and header-safe — {what} can run")
+        else:
+            rep.add(
+                FAIL,
+                f"key {var}",
+                f"present but UNUSABLE — {why} "
+                "Retype or re-paste it into a plain-text editor.",
+            )
+
     for var, why in PARKED_CREDS.items():
-        if os.getenv(var):
+        raw = os.getenv(var)
+        if not raw:
+            rep.add(OK, f"key {var}", f"absent — fine. {why}")
+        elif header_safety(raw)[0]:
             rep.add(OK, f"key {var}", "present (not needed in laptop mode)")
         else:
-            rep.add(OK, f"key {var}", f"absent — fine. {why}")
+            # Parked, so not a failure today — but it would break on the deploy host.
+            rep.add(
+                WARN,
+                f"key {var}",
+                "present but NOT header-safe. Parked, so harmless now; "
+                "re-paste it before the deploy host needs it",
+            )
 
 
 def check_env_file(rep: Report) -> None:
