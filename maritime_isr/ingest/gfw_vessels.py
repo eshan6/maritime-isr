@@ -49,6 +49,9 @@ EVENT_TABLES = (
 
 VESSEL_DATASET = "public-global-vessel-identity:latest"
 
+# Stop a systemically broken run early instead of failing thousands of times.
+MAX_CONSECUTIVE_FAILURES = 15
+
 
 def _parse_ts(v) -> datetime | None:
     if v is None:
@@ -239,12 +242,30 @@ def run(limit: int | None = None) -> int:
     owner_rows: list[dict] = []
     current_rows: list[dict] = []
     failed = 0
+    consecutive_failures = 0
 
     for n, vid in enumerate(ids, 1):
         payload = fetch_vessel(vid)
         if payload is None:
             failed += 1
+            consecutive_failures += 1
+            # Abort rather than grind through thousands of identical failures.
+            # If the first N in a row all fail, the fault is systemic — a wrong
+            # id field, a bad dataset slug, a revoked token — and every further
+            # request is a guaranteed waste of the operator's time.
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES and not identity_rows:
+                print(
+                    f"\n[gfw-vessels] ABORTING after {consecutive_failures} consecutive "
+                    f"failures and zero successes.\n"
+                    f"  This is a systemic fault, not bad luck — continuing through the "
+                    f"remaining {len(ids) - n:,} vessels would only repeat it.\n"
+                    f"  Most likely: the vessel ids harvested from the event tables are "
+                    f"not GFW vessel ids.\n"
+                    f"  Diagnose with:  python tools/inspect_raw_event.py"
+                )
+                return 1
             continue
+        consecutive_failures = 0
         land_raw_json(SOURCE_ID, f"vessel_{vid}.json", payload)
         identity_rows.extend(map_identity_rows(vid, payload))
         owner_rows.extend(map_owner_rows(vid, payload))
