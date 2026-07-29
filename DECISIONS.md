@@ -173,3 +173,163 @@ or doc carries "Bastion." Read "Bastion" in the roadmap as "Maritime ISR."
 names for one thing invites drift and confusion in a solo build.
 **Consequences.** The roadmap file's title is a known, tolerated artifact of
 history; do not propagate it. Do not "restore" the Bastion name anywhere.
+
+---
+
+## ADR-013 — Download-only laptop mode *(Accepted)*
+**Context.** The Oracle ARM VM (ADR-009) is **not provisioned**, and the operator
+works from a Windows laptop that cannot stay powered on. Several Phase 0 exit
+criteria were written assuming an always-on host: 30+ days of continuous AIS
+capture, R2 object storage, a systemd service, and SNAP installed. None of those
+assumptions currently hold, and they may not hold for some time. Until this was
+written down, the mode existed only in session prompts — so the criteria it
+invalidates were failing against an unrecorded decision, which is exactly how a
+plan quietly rots.
+**Decision.** Until a deploy host exists, the project runs in **download-only
+laptop mode**:
+- Every data source must be a **finite download**. No streaming, no always-on
+  consumers.
+- Storage is **local Parquet + DuckDB**. `MISR_STORE_BACKEND=local` is the
+  default (was `mirror`).
+- **Total downloaded data stays under 1 GB.**
+- No R2, no systemd, no SNAP, no live AIS capture.
+- Code that requires any of the above is **PARKED, not deleted** — marked
+  `PARKED: awaiting deploy host` in its module docstring, with the reason and
+  what would un-park it.
+**Alternatives rejected.** *Provision the VM first and change nothing* —
+rejected: it blocks all progress on an infrastructure step that has been pending
+for weeks, when a large amount of useful ingest work needs no server at all.
+*Delete the parked code* — rejected: it is correct code whose only fault is
+needing a host; deleting it means rewriting it later.
+**Consequences.** This decision is what retires the VM-dependent Phase 0 exit
+criteria — see ADR-014, which amends them explicitly rather than leaving them
+permanently red. Currently parked: `ingest/aisstream.py`,
+`infra/aisstream.service`, `infra/mirror_cron.py`, `process/s1_preprocess.py`,
+`process/validate_sigma0.py`, and the imagery-download half of
+`ingest/copernicus.py`. Separately, `ingest/noaa_ais.py` is parked for a
+different and permanent reason: Marine Cadastre covers the **US EEZ only** and
+can never serve AOI v1 (see DATA_SOURCES.md). When a deploy host appears, this
+ADR is superseded, not merely ignored.
+
+---
+
+## ADR-014 — Phase 0 exit criteria amended for download-only mode *(Accepted)*
+**Context.** Three exit criteria cannot be met under ADR-013, and two of those
+could not be met on the free path *at all* for AOI v1. Left unamended, Phase 0
+stays permanently red for reasons that have nothing to do with build quality,
+and "Phase 0 incomplete" stops carrying information.
+**Decision.** Amend the following on the record. Each amendment states what was
+required, what is required instead, and why.
+
+**Roadmap Phase 0.3 — "30+ days of continuous AIS over the AOI, <1% parser drop
+rate."**
+→ *Amended to:* **GFW derived AIS event tables** (encounters, loitering, port
+visits, AIS gaps) landed over the AOI for a rolling 8-week window, with
+provenance and idempotent re-runs.
+*Reason:* raw historical AIS positions are **not freely obtainable for this
+AOI** — Marine Cadastre is US-waters only, aisstream is live-only and needs an
+always-on host, and satellite AIS is paid (ADR-005). This is a data-availability
+fact, not a build gap. The drop-rate criterion is retained verbatim and deferred
+to whenever live capture begins; it is meaningless without a parser running.
+
+**Spec unit 0.1 — "`ingest s1 --days 90` completes; catalog shows expected scene
+count; re-run downloads nothing new."**
+→ *Amended to:* **`ingest s1 --days 56 --catalog-only` completes; the scene
+catalog shows the expected count for the AOI window; a re-run adds no rows.**
+*Reason:* the imagery itself is GB-scale and both the 1 GB budget and the
+absence of R2 (ADR-013) exclude it. Catalog metadata is kilobytes, needs no
+credentials, and delivers the actual near-term value — letting every detection
+be joined to the satellite pass that produced it, which is what separates "no
+ship was there" from "nothing looked there." The download half is deferred
+verbatim, not dropped.
+
+**Spec unit 0.4 — "GFW SAR detections for our AOI queryable; sanctions tables
+carry as-of dates; a re-run produces a diff, not a duplicate."**
+→ *Clauses two and three stand unamended and are met.* Clause one is
+→ *Amended to:* **GFW SAR ingest paths exist and are exercised: gridded presence
+via the API, and per-detection via the Data Download Portal CSV importer.
+Non-zero SAR rows are NOT required for unit closure while the upstream dataset
+is offline.**
+*Reason:* two independent upstream facts, neither ours. GFW's per-detection SAR
+has **no API** — it is a browser CSV export only. And GFW's SAR datasets have
+been **offline since 2026-07-03** pending their Sentinel-1C/1D migration. Gating
+our unit on another organisation's outage would misreport our own readiness.
+When SAR returns, this clause reverts to its original form with no code change.
+
+**Alternatives rejected.** *Leave the criteria as written and mark Phase 0
+permanently incomplete* — rejected: a criterion that can never pass stops being
+a test and becomes noise; worse, it hides the criteria that genuinely haven't
+been met yet. *Silently reinterpret them* — rejected: that is the failure this
+whole document exists to prevent.
+**Consequences.** Phase 0 can close under download-only mode. Each amendment
+carries its reason and its reversion condition, so when the VM, R2, or GFW's SAR
+feed arrives, the original criterion is restored rather than forgotten. **No
+amendment weakens a criterion about our own correctness** — provenance,
+idempotency, AOI scoping and as-of dating are all untouched.
+
+---
+
+## ADR-015 — One H3 helper; every resolution computed directly from coordinates *(Accepted)*
+**Supersedes the helper clause of ADR-003; reinforces its resolution policy.**
+
+**Context.** ADR-003 mandated "the **one shared H3 helper**." Two exist, at three
+different resolutions, and they are both live:
+
+| Helper | Resolution | Used by |
+|---|---|---|
+| `tiling.py` | **6** (`H3_RESOLUTION`) | `detect/pipeline`, `fusion/associate`, `fusion/dark`, `tracks/{builder,coverage,features}`, `connectors/{ais,registries}` |
+| `fusion/dark.py` | **8** (`STATIC_RES`) | static-object clustering |
+| `h3util.py` | **7 and 9** | `ingest/landing` (all ingest connectors), `ingest/registries`, `writer` |
+
+This is a live defect, not a cosmetic one. The ingest tables stamp res-7/res-9
+cells; the fusion core joins on res-6 cells. **Different resolutions produce
+different cell IDs, so those joins return nothing** — the exact silent-miss
+failure ADR-003 was written to prevent. It has not yet caused damage only
+because nothing consumes the ingest tables yet.
+
+**Decision.**
+1. **One helper module** computes **every** resolution the project uses — 6, 7, 8
+   and 9 — from lat/lon. The duplicate is deleted. No module computes cells
+   itself, and no module hard-codes a resolution outside the helper.
+2. **Every resolution is computed directly from coordinates. Never derive a
+   coarser cell as the parent of a finer one.** H3's hierarchy is not perfectly
+   nested: a res-7 cell is not geometrically contained in its res-6 parent, so
+   `cell_to_parent` and direct computation disagree for points near boundaries.
+   **Measured on 200,000 random points inside AOI v1:**
+
+   ```
+   parent(res-7 cell) != direct res-6 cell : 14,398  (7.199%)
+   parent(res-9 cell) != direct res-7 cell : 12,341  (6.170%)
+
+   example  8.720358N, 65.061535E
+     direct res-6        86604ba17ffffff
+     parent(res-7 -> 6)  86604ba07ffffff
+   ```
+
+   Roughly **1 record in 14** would be filed under the wrong coarse cell —
+   position-dependent, intermittent, invisible in row counts, and far harder to
+   diagnose than the present uniform mismatch.
+3. **Fusion baselines must be re-measured, not carried forward,** if fusion's
+   join resolution changes. Current synthetic-suite baseline, measured
+   2026-07-29 at res 6:
+
+   ```
+   association accuracy   96.9%  (65 non-ambiguous contacts, target >=85%)
+   dark-vessel precision  100.0% (6 flagged, exit >=70%)
+   dark-vessel recall     75.0%  (of 8 ghosts above the size floor)
+   ```
+
+   These are **synthetic-suite numbers** (CLAUDE.md §4.6). After the change, the
+   new figures are stated as the baseline; the old ones are not reused.
+
+**Alternatives rejected.** *Pick a winner and convert everything to it* —
+rejected as the whole fix: it resolves today's mismatch but leaves the structural
+cause, two modules free to compute cells independently, so the next resolution
+choice reintroduces it. *Derive res 6 from res-7 parents* — rejected on the
+measurement above. *Change ADR-003's res 7/9 policy* — rejected: res 7 for joins
+and res 9 for fine matching remain correct and are reinforced here; res 6 and 8
+are additional working resolutions, not replacements.
+**Consequences.** This is **its own session**, not a patch on the ingest work —
+it touches eight modules in the fusion core, requires re-running the evaluation
+harness, and must restate the baselines. Until it lands, ingest tables and fusion
+tables **cannot be joined**, and any attempt to do so silently returns nothing.
