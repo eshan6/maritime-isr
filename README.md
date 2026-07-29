@@ -109,8 +109,9 @@ CLI shape is `maritime-isr <verb> <target> [options]`. Available so far
 (all Phase 0 — verify on-host before trusting):
 
 ```bash
-# Health check: confirms env vars, SNAP install, dependencies
+# Health check: Python, libraries, DuckDB, data dir, disk budget, API keys
 maritime-isr doctor
+maritime-isr doctor --snap   # the parked SNAP/pyroSAR checks (deploy host only)
 
 # Sentinel-1 SAR: backfill the AOI (idempotent — re-runs download nothing new)
 maritime-isr ingest s1 --days 90
@@ -132,6 +133,83 @@ maritime-isr inspect v0
 
 Each command's exit test is defined in `maritime-isr-execution-spec.md`. A command
 "working in the sandbox" is not the same as its exit test passing on the VM.
+
+---
+
+## D1 quickstart — download-only laptop mode
+
+This is the mode to use on a Windows laptop with no server: every source is a
+finite download, storage is local Parquet + DuckDB, total data stays under 1 GB.
+Read `DATA_SOURCES.md` first — it records what is and is not obtainable, and
+why. Run everything from the repo root.
+
+**1. Set up (once).**
+
+```bash
+pip install -e ".[dev]"
+copy .env.example .env          # PowerShell: Copy-Item .env.example .env
+```
+
+Then open `.env` and paste in your free Global Fishing Watch token
+(register at <https://globalfishingwatch.org/our-apis/>).
+
+**2. Check the machine is ready.**
+
+```bash
+maritime-isr doctor
+```
+
+*Success* ends with `RESULT: READY`. Warnings about parked keys (R2, Copernicus,
+aisstream) are expected and fine — those need a server we do not have.
+*Failure* ends with `RESULT: NOT READY` and lists exactly what to fix.
+
+**3. Download the data.**
+
+```bash
+maritime-isr ingest gfw-events --weeks 8     # encounters, loitering, port visits, AIS gaps
+maritime-isr ingest gfw-vessels              # identity for every vessel seen above
+maritime-isr ingest registries               # OFAC + UN + EU sanctions, WPI ports
+maritime-isr ingest s1 --days 56 --catalog-only   # Sentinel-1 scene metadata, no imagery
+```
+
+Each is idempotent — running it twice downloads the same window again and lands
+no duplicates, so an interrupted run is safe to repeat.
+
+**4. SAR detections (currently degraded — read this).**
+
+GFW's SAR datasets have been offline since 2026-07-03 pending their migration to
+Sentinel-1C/1D. When they return:
+
+```bash
+maritime-isr ingest gfw --weeks 8            # gridded presence: COUNTS per cell, not contacts
+```
+
+Per-detection SAR (with vessel length and AIS-match status) has **no API** — it
+is a manual CSV export from GFW's Data Download Portal. Once downloaded:
+
+```bash
+maritime-isr ingest gfw-sar-csv --path C:\Users\you\Downloads\sar_detections.csv
+```
+
+**5. See what landed.**
+
+```bash
+python tools/d1_report.py
+```
+
+Prints row count, date range, AOI bounds check and disk size for every table,
+plus total usage against the 1 GB budget. `AOI: all inside` is what you want;
+`** N OUTSIDE **` means a real bug.
+
+**Want to see it work before you have a token?**
+
+```bash
+python tools/d1_smoke.py          # lands FIXTURE data through the real code, then reports
+python tools/d1_smoke.py --clean  # removes it
+```
+
+Everything the smoke test lands is synthetic. It proves the plumbing runs; it is
+not evidence about any real vessel, and no number from it may be quoted.
 
 ---
 

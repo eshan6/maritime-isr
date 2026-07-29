@@ -336,8 +336,14 @@ def cmd_live_config(args):
 
 
 def cmd_live_doctor(args):
-    from .process.snap_doctor import run
-    return run()
+    """Default: check THIS laptop can run download-only mode.
+
+    The SNAP/pyroSAR checks are parked (no deploy host) and now live behind
+    `--snap`, so a laptop run is not drowned in failures about a toolchain it
+    is not supposed to have.
+    """
+    from .infra.laptop_doctor import run
+    return run(snap=getattr(args, "snap", False))
 
 
 def cmd_live_preprocess(args):
@@ -359,10 +365,19 @@ def cmd_live_ingest(args):
         return run(max_hours=args.hours)
     if args.source == "gfw":
         from .ingest.gfw import run
-        return run()
+        return run(weeks=args.weeks, resolution=args.resolution)
+    if args.source == "gfw-sar-csv":
+        from .ingest.gfw import import_portal_csv
+        return import_portal_csv(args.path)
+    if args.source == "gfw-events":
+        from .ingest.gfw_events import run
+        return run(kind=args.kind, weeks=args.weeks)
+    if args.source == "gfw-vessels":
+        from .ingest.gfw_vessels import run
+        return run(limit=args.limit)
     if args.source == "registries":
         from .ingest.registries import run
-        return run()
+        return run(only=args.only)
     if args.source == "noaa":
         from .ingest.noaa_ais import run
         return run(month=args.month)
@@ -376,7 +391,9 @@ def main():
     p = sub.add_parser("config", help="print resolved live config + env check")
     p.set_defaults(fn=cmd_live_config)
 
-    p = sub.add_parser("doctor", help="verify SNAP/pyroSAR install")
+    p = sub.add_parser("doctor", help="check this machine can run download-only mode")
+    p.add_argument("--snap", action="store_true",
+                   help="instead run the PARKED SNAP/pyroSAR checks (deploy host only)")
     p.set_defaults(fn=cmd_live_doctor)
 
     p = sub.add_parser("preprocess", help="0.2: SNAP chain raw->calibrated sigma0 COG")
@@ -391,7 +408,24 @@ def main():
     ing = p.add_subparsers(dest="source", required=True)
     ps1 = ing.add_parser("s1"); ps1.add_argument("--days", type=int, default=90); ps1.add_argument("--catalog-only", action="store_true")
     pais = ing.add_parser("ais"); pais.add_argument("--hours", type=float, default=None)
-    ing.add_parser("gfw"); ing.add_parser("registries")
+    pgfw = ing.add_parser("gfw", help="GFW gridded SAR presence (AGGREGATE counts, not contacts)")
+    pgfw.add_argument("--weeks", type=int, default=8)
+    pgfw.add_argument("--resolution", choices=["LOW", "HIGH"], default="HIGH")
+
+    pcsv = ing.add_parser("gfw-sar-csv", help="land a per-detection SAR CSV from the GFW portal")
+    pcsv.add_argument("--path", required=True, help="path to the downloaded CSV")
+
+    pev = ing.add_parser("gfw-events", help="GFW encounters/loitering/port visits/AIS gaps")
+    pev.add_argument("--kind", choices=["encounters", "loitering", "port_visits", "gaps"],
+                     default=None, help="default: all four")
+    pev.add_argument("--weeks", type=int, default=8)
+
+    pves = ing.add_parser("gfw-vessels", help="identity for vessels seen in the event tables")
+    pves.add_argument("--limit", type=int, default=None)
+
+    preg = ing.add_parser("registries", help="OFAC SDN, UN, EU sanctions + WPI ports")
+    preg.add_argument("--only", choices=["ofac", "un", "eu", "wpi"], default=None,
+                      help="refresh just one source; default is all four")
     pnoaa = ing.add_parser("noaa"); pnoaa.add_argument("--month", required=True)
     p.set_defaults(fn=cmd_live_ingest)
 

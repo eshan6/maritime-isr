@@ -19,6 +19,7 @@ dependencies = [
     # live-data path (execution-spec units 0.0-0.5)
     "pydantic>=2.6",
     "duckdb>=0.10",
+    "pytz>=2024.1",       # duckdb TIMESTAMPTZ parameter binding
     "requests>=2.31",
     "websockets>=12.0",
     "boto3>=1.34",
@@ -41,6 +42,9 @@ include = ["maritime_isr*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "slow: end-to-end runs that take minutes (deselect with -m 'not slow')",
+]
 
 [tool.ruff]
 line-length = 100

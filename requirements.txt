@@ -8,6 +8,9 @@ h3>=4.0
 # Live-data path (execution-spec units 0.0-0.5)
 pydantic>=2.6
 duckdb>=0.10
+# duckdb needs pytz to bind timezone-aware datetimes as query
+# parameters against TIMESTAMPTZ columns (the registry as_of lookups).
+pytz>=2024.1
 requests>=2.31
 websockets>=12.0
 boto3>=1.34
