@@ -333,3 +333,70 @@ are additional working resolutions, not replacements.
 it touches eight modules in the fusion core, requires re-running the evaluation
 harness, and must restate the baselines. Until it lands, ingest tables and fusion
 tables **cannot be joined**, and any attempt to do so silently returns nothing.
+
+---
+
+## ADR-016 — Direct sanctions matching replaces ownership traversal on free data *(Accepted)*
+**Amends the Phase 4 exit criterion. Companion to ADR-014.**
+
+**Context.** Measured on the first live run, 2026-07-29: GFW registry ownership
+covers **61 intervals across 9,184 vessels — 0.66%**, and identity history is
+**1.05 records per vessel**, meaning most hulls have a single identity record and
+no recorded rename or reflagging.
+
+The roadmap's canonical chain (4.4) assumes *vessel met vessel → traverse
+owned-by → owner sanctioned-under OFAC → alert*. At 0.66% ownership coverage,
+combined with 14 encounters in an 8-week AOI window, that chain has an owner to
+traverse for roughly 1 vessel in 150. The Phase 4 exit criterion requiring it to
+fire **"on at least one organic real-world case"** cannot be met on free data for
+this AOI — not because the code is wrong, but because the edge does not exist.
+
+**Decision — two parts.**
+
+**(a) Invert the chain: match sanctions to hulls directly.** OFAC SDN names
+**1,516 vessels outright**, each with call sign, vessel type, tonnage, flag and a
+`vessel_owner` field. So instead of asking GFW who owns a hull, match our
+identified vessels against OFAC by IMO, then call sign, then normalised name. A
+hit is a **direct sanctioned-vessel finding that needs no ownership edge at all**,
+and OFAC's own `vessel_owner` column supplies the organisation side — the org
+graph is built from the sanctions list rather than from GFW.
+
+Match precedence is deliberate and must be preserved: **IMO > call sign > name.**
+IMO is a permanent hull number; name and call sign are changeable and collide.
+A name-only match is a *candidate*, never a finding, and must carry lower
+confidence per CLAUDE.md §4.3.
+
+**(b) Ownership-based risk propagation is a paid-feed feature.** The free tier is
+**behavioural** — loitering, encounters, AIS gaps, port patterns, all dense and
+free — plus **direct** sanctions matching. Ownership graphs (Lloyd's List
+Intelligence, S&P Global Maritime, Clarksons class) slot in later as a connector
+per ADR-001, exactly as Spire does for satellite AIS per ADR-005.
+
+**Phase 4 exit criterion amended to:** *"the sanctioned-entity chain fires
+correctly on synthetic injects, **and** a direct OFAC vessel match is
+demonstrated on real AOI data."* The original organic-ownership-chain clause is
+**deferred, not dropped** — it reverts the moment an ownership feed is funded.
+
+**Alternatives rejected.** *Equasis / IMO GISIS scraping* — both are free-
+registration ship databases with real ownership data, but bulk programmatic
+access is very likely against their terms of use; **read the ToS before writing a
+connector**, do not assume. Logged as research, not a plan. *Leave the criterion
+unamended* — rejected: a criterion that can never pass is not a test, and hiding
+behind it would let us imply an ownership capability we do not have. *Abandon
+Phase 4* — rejected: ADR-011 stands, the graph still accumulates behavioural and
+identity edges from day one, and those cannot be backfilled.
+
+**Consequences.** The near-term product is honestly *behavioural anomaly
+detection with direct sanctions matching over the Arabian Sea*, not
+ownership-network intelligence. That is a smaller claim and a true one. **Do not
+describe ownership-chain capability in any external material until a paid feed is
+integrated and measured.** Two things follow for implementation: the matcher lives
+on the ingest/graph side and the fusion core learns nothing OFAC-specific
+(CLAUDE.md §4.5); and match confidence must reflect which key matched.
+
+**Also settled here:** WPI is downgraded from blocked-dependency to optional.
+GFW events already carry `distances.startDistanceFromPortKm` /
+`endDistanceFromShoreKm` on **every** event type, and port visits carry full
+anchorage records with lat/lon, name and flag. That answers "anchorage queue or
+open-water loiter?" from data already landed, with no external dependency. WPI
+remains useful only for global coverage of ports we have no events at yet.

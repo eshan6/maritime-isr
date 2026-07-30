@@ -9,7 +9,7 @@ session. `CLAUDE.md`, `ARCHITECTURE.md`, `DECISIONS.md` are stable contracts;
 > broken, and set "Next up." If you don't update it, the next session starts blind.
 
 **Last updated:** 2026-07-29, after the repair + download-only ingest rework
-(spec units 0.1 / 0.3 / 0.4). Merged to `main` as `fdb5449`; docs at `c59352b`.
+(spec units 0.1 / 0.3 / 0.4) **ran live on the laptop and landed real data.**
 
 ---
 
@@ -27,16 +27,20 @@ session. `CLAUDE.md`, `ARCHITECTURE.md`, `DECISIONS.md` are stable contracts;
 
 ## Current reality (the one-paragraph truth)
 
-Phase 0 code plus the synthetic Phase 1–6 prototype are written and green in the
-sandbox (**202 tests**). The repo now runs in **download-only laptop mode**
-(ADR-013): no Oracle VM, no R2, no systemd, no SNAP, no live AIS capture. The
-ingest rework (units 0.1 / 0.3 / 0.4) added connectors that *can* download real
-GFW events, vessel identity, sanctions, ports and Sentinel-1 catalog metadata —
-but **none has been run against a live API, and no real data has been landed.**
-The sandbox cannot reach any data host (proxy-blocked) and has no GFW token, so
-that code is "built, unverified on host." The one genuine host verification so
-far is `doctor` passing on the Windows laptop. No AIS captured, no SAR scene
-downloaded or preprocessed, no dark vessel detected on real data.
+**The project holds real data for the first time.** On 2026-07-29 the ingest
+connectors ran live on Eshan's Windows laptop and landed **27,791 GFW event and
+vessel-identity rows** plus **26,824 sanctions and scene-catalog rows** over
+AOI v1 — 73.9 MB of the 1 GB budget, every positioned table passing the AOI
+bounds check. Running in download-only laptop mode (ADR-013): no Oracle VM, no
+R2, no systemd, no SNAP, no live AIS capture.
+
+**What that data is, precisely:** GFW's *derived* behaviour events (loitering,
+port visits, encounters, AIS gaps), vessel identity, three sanctions lists, and
+Sentinel-1 scene metadata. **No SAR imagery, no AIS position tracks, and no dark
+vessel detected by us.** GFW's 5 gap events are GFW's finding, not ours. Our own
+dark-vessel detection needs SAR contacts matched against AIS tracks, and neither
+is obtainable free for this AOI (see DATA_SOURCES.md). The synthetic Phase 1–6
+prototype remains green in-sandbox and every metric it produces is synthetic.
 
 ---
 
@@ -45,10 +49,10 @@ downloaded or preprocessed, no dark vessel detected on real data.
 | Unit | What it is | Status | Notes |
 |---|---|---|---|
 | 0.0 | Repo skeleton + canonical schemas + H3 helper + config loader | 🟡 | Schema round-trip tests green in sandbox. |
-| 0.1 | Copernicus Sentinel-1 GRD connector | 🟠 | Catalog-only path needs **no credentials** and is the amended exit test (ADR-014). Imagery download PARKED. Never run live. |
+| 0.1 | Copernicus Sentinel-1 GRD connector | ✅ | **636 scenes landed live**, no credentials needed. Amended exit test met (ADR-014). Imagery download PARKED. |
 | 0.2 | SNAP preprocessing chain (pyroSAR) + install script + `doctor` cmd | 🟡 | Install script memory-capped (12 G heap / tile cache / 4 threads). **Never run on a host** — and ARM is unvalidated (see OPEN QUESTIONS). Fiddliest unit; budget a full session. |
 | 0.3 | aisstream live AIS consumer + systemd service | ⬜ | **PARKED** (ADR-013) — needs an always-on host. Exit test deferred verbatim, not amended. |
-| 0.4 | GFW + versioned OFAC/UN/EU/WPI registries | 🟠 | Token in place, `doctor` green. Diff-on-refresh + as-of dates written and fixture-tested; **never run live**. SAR clause amended (ADR-014). NOAA half PARKED — US EEZ only. |
+| 0.4 | GFW + versioned OFAC/UN/EU/WPI registries | ✅ | **Ran live.** GFW events 27,172 rows; vessel identity 9,648 intervals / 9,184 summaries; OFAC 19,157 (1,516 vessels); UN 1,011; EU 6,017. WPI blocked by an NGA outage — optional per ADR-016. SAR clause amended (ADR-014). NOAA PARKED. |
 | 0.5 | Inspection dashboard v0 (AOI frame, AIS tracks, scene footprints) | 🟡 | Throwaway/ugly by design. Verifies once real AIS + scenes are landing. |
 | 1.0 → 6.3 | Phases 1–6 (synthetic prototype) | 🟡 | Implemented and green on the synthetic suites. Every metric is synthetic-only. |
 
@@ -56,20 +60,39 @@ downloaded or preprocessed, no dark vessel detected on real data.
 
 | Work | Status | Notes |
 |---|---|---|
-| Repair of partial-upload breakage | ✅ | Import break was already fixed in `69b0e82`; residual was regenerating gitignored synthetic data + deleting a re-uploaded `RENAME_AFTER_UPLOAD.md`. Suite green. |
-| `DATA_SOURCES.md` reconnaissance | ✅ | Desk research, sourced. Genuinely complete. |
-| Laptop-mode hardening + `doctor` | ✅ | **Host-verified on the Windows laptop** — first ✅ in the project. |
-| GFW connectors (events, identity, SAR) | 🟠 | Fixture-tested only. Never run against the live API. |
-| Sanctions / WPI / S1 catalog | 🟠 | Parsers fixture-tested. Never run against live publishers. EU URL unconfirmed. |
-| Ingest report + smoke test | 🟡 | `tools/d1_report.py` proven against fixture data through the real code path. Real numbers still outstanding. |
+| Repair of partial-upload breakage | ✅ | Import break was already fixed in `69b0e82`; residual was regenerating gitignored synthetic data + deleting a re-uploaded `RENAME_AFTER_UPLOAD.md`. |
+| `DATA_SOURCES.md` reconnaissance | ✅ | Desk research, then replaced with measured numbers from the live run. |
+| Laptop-mode hardening + `doctor` | ✅ | Host-verified on the Windows laptop. |
+| GFW event connectors | ✅ | **Live:** 24,153 loitering / 3,000 port visits / 14 encounters / 5 gaps. |
+| GFW vessel identity | ✅ | **Live:** 9,184 of 9,185 vessels, 1 lookup failure. |
+| Sanctions (OFAC / UN / EU) | ✅ | **Live**, versioned with as-of dates. |
+| S1 scene catalog | ✅ | **Live:** 636 scenes, metadata only. |
+| WPI ports | ⬜ | Blocked by NGA portal outage. Optional per ADR-016; manual `--path` import available. |
+| GFW SAR (gridded + portal CSV) | ⬜ | Upstream offline since 2026-07-03. Both paths degrade cleanly. |
+| Ingest report | ✅ | Prints real counts, date ranges, AOI checks and disk usage. |
 
 **Test tally:** 202 tests passing in-sandbox. Sandbox-green ≠ host-verified — do
 **not** report this as "202 tests prove it works on real data." Every number the
 system has ever produced comes from synthetic fixtures or fixture-driven tests.
 
-**Host-only bugs found once real hardware was involved (3):** `pytz` missing for
-DuckDB `TIMESTAMPTZ` parameter binding; non-idempotent same-`as_of` registry
-refresh; and `.env` never being read at all. None were visible in the sandbox.
+**Host-only bugs found once real hardware was involved (6).** None were visible
+in the sandbox; all sat in the seam between the code and the real world:
+1. `pytz` missing — DuckDB cannot bind a tz-aware datetime to `TIMESTAMPTZ`.
+2. `.env` was never read at all; every credential looked missing.
+3. `doctor` passed a token that could not be sent — a credential check that
+   tested existence rather than usability.
+4. `data_root` resolved from the working directory while `.env` resolved from the
+   package, so `doctor` went green against an empty data dir.
+5. GFW vessel-detail params were wrong (`datasets[0]` vs `dataset`, wrong
+   `includes`, and `registries-info-data` defaulting to NONE) — 422 on all 9,185.
+6. EU sanctions needed a token in the URL; noted as a risk in DATA_SOURCES.md
+   and then shipped without one.
+
+**The pattern worth remembering:** items 2, 3 and 4 were all *masked by a green
+doctor*. Checks that assert a thing exists are near-worthless; checks that
+exercise it are what catch real faults. Fixture-shaped tests validated mapping
+logic but could not catch item 5, because the fixtures encoded my own assumption
+about the request shape.
 
 ---
 
@@ -107,23 +130,34 @@ steps personally.
 
 ## Next up
 
-Under ADR-013 (download-only laptop mode) the VM is no longer the top of the
-list — ingest can be verified on the laptop right now.
+Ingest units 0.1 and 0.4 are closed. Four things queued, in priority order.
 
-1. **Run the ingest units on the laptop** (0.1 catalog-only, 0.4 GFW + registries)
-   and paste back `python tools/d1_report.py`. Token is in place and `doctor`
-   passes. This is the only thing standing between us and the project's first
-   real data. **Not closed until the report prints real, non-zero row counts —
-   fixture numbers do not count.**
-2. **Confirm the EU sanctions URL** — it may be token-gated; the connector
-   reports and skips rather than failing, so a live run will tell us.
-3. **The H3 unification session (ADR-015).** One helper, resolutions 6/7/8/9 all
-   computed directly from coordinates, duplicate deleted, eight fusion-core
-   modules touched, harness re-run and baselines restated. **Its own session.**
-   Blocking before Phase 3 consumes ingest data.
-4. Then Phase 1 (units 1.1–1.4) — unblocked, needs no AIS and no VM.
-5. The Oracle VM remains the prerequisite for SAR imagery, SNAP and live AIS
-   (all PARKED per ADR-013) — but none of those block the ingest units or Phase 1.
+1. **Event mapping gaps** (small, high value, do first). Three fields the live
+   run showed we are dropping: `gap.intentionalDisabling` — GFW's own
+   dark-vessel judgement; the `distances.*FromPortKm` / `*FromShoreKm` block,
+   present on **every** event type, which removes the need for WPI; and
+   `port_visit.*Anchorage` records with lat/lon, which give us a port gazetteer
+   for free. Also: event-level `confidence` does not exist except on port
+   visits, so the envelope is writing null nearly everywhere. Diagnose from
+   `data/raw/gfw-events/` with `tools/inspect_raw_event.py` — no re-download.
+   Add per-page progress to `post_paginated` while in there.
+
+2. **Direct OFAC vessel matching** (ADR-016a). Match 9,184 identified vessels
+   against 1,516 OFAC vessels by **IMO > call sign > name**, in that precedence.
+   Name-only matches are candidates, never findings, and carry lower confidence.
+   This is the free-tier replacement for ownership traversal.
+
+3. **H3 unification** (ADR-015). Its own session. One helper, resolutions
+   6/7/8/9 computed directly from lat/lon, duplicate deleted, eight fusion-core
+   modules touched. **Blocking before anything joins ingest data to fusion
+   data** — they currently cannot join at all. Re-run the harness and restate
+   the baselines; do not carry forward 96.9% / 100% / 75%.
+
+4. **Phase 1** (units 1.1–1.4). Unblocked — needs no AIS and no VM. Note unit
+   1.2 downloads xView3, which breaks the 1 GB budget; raise it before starting.
+
+**Waiting on the outside world, not on us:** WPI (NGA portal outage — retry, or
+import by hand with `--path`), and GFW SAR (offline upstream since 2026-07-03).
 
 ## Known broken / rough / watch
 
