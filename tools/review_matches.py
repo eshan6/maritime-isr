@@ -30,7 +30,13 @@ sys.path.insert(0, str(REPO))
 
 from maritime_isr.db import connect  # noqa: E402
 from maritime_isr.ingest.landing import read_table  # noqa: E402
-from maritime_isr.ingest.sanctions_match import MATCH_TABLE, normalise_name  # noqa: E402
+from maritime_isr.ingest.sanctions_match import (  # noqa: E402
+    MATCH_TABLE,
+    TIER_CONFIDENCE,
+    TIER_ORDER,
+    imo_checksum_ok,
+    normalise_name,
+)
 
 
 def load_ofac_remarks(con) -> dict[str, str]:
@@ -64,7 +70,6 @@ def main() -> int:
 
     imo_rows = by_tier.get("imo", [])
     name_rows = by_tier.get("name", [])
-    cs_rows = by_tier.get("call_sign", [])
 
     print("=" * 84)
     print("OFAC VESSEL MATCH REVIEW")
@@ -74,12 +79,40 @@ def main() -> int:
           "   <-- the honest headline number")
     print(f"  distinct sanctioned entities  : {len({r['ofac_ent_num'] for r in rows}):,}")
     print()
-    print(f"  by IMO       {len(imo_rows):>5}   findings   "
-          f"({len({r['vessel_id'] for r in imo_rows}):,} distinct vessels)")
-    print(f"  by call sign {len(cs_rows):>5}   findings   "
-          f"({len({r['vessel_id'] for r in cs_rows}):,} distinct vessels)")
-    print(f"  by name only {len(name_rows):>5}   CANDIDATES "
-          f"({len({r['vessel_id'] for r in name_rows}):,} distinct vessels)")
+    labels = {
+        "imo": "by IMO",
+        "call_sign_name": "by call sign+name",
+        "call_sign": "by call sign only",
+        "name": "by name only",
+    }
+    for tier in TIER_ORDER:
+        tr = by_tier.get(tier, [])
+        kind = "findings  " if TIER_CONFIDENCE[tier] >= 0.50 else "CANDIDATES"
+        print(f"  {labels[tier]:<18} {len(tr):>5}   {kind} "
+              f"({len({r['vessel_id'] for r in tr}):,} distinct vessels)")
+    unknown = set(by_tier) - set(TIER_ORDER)
+    if unknown:
+        print(f"  !! rows landed under unrecognised tier(s): {sorted(unknown)} — these "
+              "predate the current tier policy; re-run the matcher")
+
+    # ---- check 1b: IMO check digits ---------------------------------------
+    # Independent of the extraction check below. Verifying we read the right
+    # characters says nothing about whether the number itself is a real IMO.
+    print("\n" + "=" * 84)
+    print("IMO CHECK DIGIT — every IMO match, validated arithmetically")
+    print("=" * 84)
+    bad = [r for r in imo_rows if not imo_checksum_ok(str(r.get("ofac_imo") or ""))]
+    print(f"  {len(imo_rows) - len(bad)} of {len(imo_rows)} IMO matches pass their "
+          "check digit.")
+    if bad:
+        print("  FAILING — these do not survive the 0.95 tier:")
+        for r in bad:
+            print(f"    ent {r['ofac_ent_num']:>6}  IMO {r.get('ofac_imo')}  "
+                  f"{str(r.get('ofac_name'))[:32]}")
+    else:
+        print("  All pass. The checksum rejects ~90% of random 7-digit strings, so")
+        print("  this is real corroboration that the extracted numbers are IMOs and")
+        print("  not some other 7-digit value in the remarks.")
 
     # ---- check 2: what did the IMO regex actually read? -------------------
     print("\n" + "=" * 84)
@@ -165,12 +198,17 @@ def main() -> int:
                 w.writerow({k: r.get(k) for k in cols})
         print(f"\nwrote {len(rows)} rows -> {out}")
 
+    n_imo_vessels = len({r["vessel_id"] for r in imo_rows})
     print("\n" + "=" * 84)
-    print("Until the IMO evidence above is reviewed, the honest statement is:")
-    print(f"  '{len({r['vessel_id'] for r in imo_rows})} vessels in the AOI event data match an "
-          "OFAC-sanctioned hull by IMO,")
-    print("   pending verification of the IMO extraction.'")
-    print("NOT '144 sanctioned vessels detected'.")
+    print("HOW THIS MAY BE STATED")
+    print("=" * 84)
+    print(f"  '{n_imo_vessels} vessels appearing in Global Fishing Watch's AOI event data")
+    print("   match an OFAC-sanctioned hull by IMO number.'")
+    print()
+    print("  NOT 'we detected N sanctioned vessels'. We ran no SAR, no detection, and")
+    print("  observed nothing going dark. The vessel population and every dark/gap")
+    print("  determination are GFW's; ours is the identity match against OFAC.")
+    print("  That attribution travels with this number all the way to any UI.")
     print("=" * 84)
     con.close()
     return 0

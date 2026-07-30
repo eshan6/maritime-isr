@@ -441,3 +441,97 @@ GFW events already carry `distances.startDistanceFromPortKm` /
 anchorage records with lat/lon, name and flag. That answers "anchorage queue or
 open-water loiter?" from data already landed, with no external dependency. WPI
 remains useful only for global coverage of ports we have no events at yet.
+
+---
+
+## ADR-017 — Phase 1 (own SAR) and xView3 are deferred, not scheduled *(Accepted)*
+**Amends ADR-014's SAR clause. Operator decision, 2026-07-30.**
+
+**Context.** Two things were on the near-term list: acquiring our own Sentinel-1
+scenes and detecting vessels in them (Phase 1), and pulling the xView3 dataset to
+train and measure a detector. Three facts landed against both:
+
+1. **GFW's SAR datasets are offline**, so the free path to SAR *detections*
+   (someone else's, already matched to AIS) is closed for now — see
+   `DATA_SOURCES.md`.
+2. **Per-detection AOI SAR has no API** we can drive from a laptop. Scene
+   discovery works — 636 Sentinel-1 catalogue records are landed — but the
+   pixels, and SNAP to process them, do not fit the download-only mode of
+   ADR-013.
+3. **The capability that actually works today is enrichment on landed data**:
+   27,172 GFW events, 9,648 identity intervals and a versioned OFAC snapshot,
+   all already on disk.
+
+**Decision.** Phase 1 and xView3 are **deferred, with no scheduled date**. The
+1 GB disk cap of ADR-013 stands and **nothing new is downloaded**. Work moves to:
+populate the graph with real edges, measure whether the result is worth looking
+at, and only then build something viewable — **in that order**.
+
+The reasoning, in the operator's words: *"proving a capability nobody is asking
+to see is the wrong spend."* Own-SAR is not on the M6 demo path. The demo path is
+a map, a ranked list, a plain-English reason and an export — none of which needs
+a pixel we processed ourselves.
+
+**Deferred is not dropped.** Nothing here is deleted or rewritten; the Phase 1
+modules stay in the tree under their `PARKED: awaiting deploy host` markers per
+ADR-013. When GFW's SAR datasets return, or a deploy host with SNAP exists, this
+reverts by un-parking, not by rebuilding.
+
+**Alternatives rejected.** *Schedule Phase 1 anyway to keep the roadmap intact* —
+rejected: a roadmap is a plan, not a debt. *Download xView3 now while the cap has
+room* — rejected: the cap has room because we have not spent it, and spending it
+on a dataset with no consumer is how prototypes end up with 900 MB of data and no
+product. *Drop Phase 1 permanently* — rejected: the SAR path is the eventual
+differentiator, and the code already exists.
+
+**Consequences.** Until this reverts, **every dark-vessel and AIS-gap
+determination in this system is Global Fishing Watch's, not ours.** We have run
+no SAR, detected no vessel, and observed nothing going dark. That attribution
+must travel with the number all the way to any UI — see ADR-018.
+
+---
+
+## ADR-018 — Match-tier corrections: IMO checksum, and call sign alone is a candidate *(Accepted)*
+**Refines ADR-016(a). Three corrections, one framing rule.**
+
+**Context.** The direct matcher landed 126 distinct vessels against the OFAC
+snapshot — 98 by IMO, 29 by name, 0 by call sign. Reviewing what would happen if
+those numbers were wrong surfaced three gaps.
+
+**(a) IMO numbers are now check-digit validated.** OFAC has no IMO column; we
+regex the number out of free-text remarks. Extraction review confirmed all 98
+were keyword-anchored with a single 7-digit value — but that only proves we read
+the right characters. It says nothing about whether the number *is* an IMO. The
+seventh digit is a checksum (first six digits × 7,6,5,4,3,2, summed, last digit
+of the sum), and it **rejects 90.3% of random 7-digit strings** — measured, not
+quoted. `normalise_imo` now requires it, so a failing number cannot reach the
+0.95 tier at all. This is independent evidence from the extraction check, which
+is why both are kept.
+
+**(b) A call sign alone is a candidate, not a finding.** Call signs are assigned
+by the flag state, **reused after reassignment**, and short ones collide
+internationally — a four-character call sign was never a globally unique key.
+The tier splits: `call_sign_name` (call sign **and** name agree, 0.80, a finding)
+above the 0.50 threshold, `call_sign` alone (0.40, a candidate) below it. Zero
+call-sign matches exist today, so this is **policy set before it can fire**
+rather than cleanup after it has. A missing name on either side does not demote —
+absence of a name is not evidence against — it simply fails to promote.
+
+**(c) The H3 regression guard now runs the join.** ADR-015's guard asserted that
+ingest rows carry an `h3_r6` column. That is an existence check, and the defect
+it guards is a *join* failure: both tables have healthy row counts, both have an
+H3 column, and the query returns nothing. The test now lands a real ingest table,
+runs the real `fusion.dark.dark_cascade`, joins them in DuckDB on the cell, and
+asserts non-zero rows — plus a negative control at the wrong resolution, so a
+test joining nulls to nulls cannot pass.
+
+**The framing rule, to be held exactly as written.** *98 vessels matched by us
+against GFW's event data* — **not** *98 sanctioned vessels detected by us*. No
+SAR, no dark-vessel detection, nothing observed going dark by us. **The dark
+determination is GFW's and must be attributed to them all the way to any UI we
+eventually build.**
+
+**Consequences.** Rows landed before this ADR carry the retired flat `call_sign`
+tier semantics and any unvalidated IMOs; re-running the matcher is required
+before its output is quoted. The review tool flags unrecognised tiers for exactly
+this reason.

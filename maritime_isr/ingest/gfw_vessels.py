@@ -31,6 +31,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from . import gfw_client as gc
+from .checks import report_landed
 from .landing import land_raw_json, land_table, read_table, stamp_envelope
 
 SOURCE_ID = "gfw-vessels"
@@ -288,19 +289,23 @@ def run(limit: int | None = None) -> int:
             print(f"[gfw-vessels]   {n}/{len(ids)}")
 
     if identity_rows:
-        land_table(identity_rows, table=IDENTITY_TABLE,
-                   key_fields=("vessel_id", "record_kind", "mmsi", "ship_name", "valid_from"),
-                   day_field="valid_from")
+        w = land_table(identity_rows, table=IDENTITY_TABLE,
+                       key_fields=("vessel_id", "record_kind", "mmsi", "ship_name",
+                                   "valid_from"),
+                       day_field="valid_from")
+        report_landed("gfw-vessels", IDENTITY_TABLE, w, len(identity_rows),
+                      noun="identity interval")
     if owner_rows:
-        land_table(owner_rows, table=OWNERS_TABLE,
-                   key_fields=("vessel_id", "owner_name", "valid_from"),
-                   day_field="valid_from")
+        w = land_table(owner_rows, table=OWNERS_TABLE,
+                       key_fields=("vessel_id", "owner_name", "valid_from"),
+                       day_field="valid_from")
+        report_landed("gfw-vessels", OWNERS_TABLE, w, len(owner_rows),
+                      noun="ownership interval")
     if current_rows:
-        land_table(current_rows, table=CURRENT_TABLE,
-                   key_fields=("vessel_id",), day_field="last_seen")
-
-    print(f"[gfw-vessels] landed {len(identity_rows)} identity intervals, "
-          f"{len(owner_rows)} ownership intervals, {len(current_rows)} vessel summaries")
+        w = land_table(current_rows, table=CURRENT_TABLE,
+                       key_fields=("vessel_id",), day_field="last_seen")
+        report_landed("gfw-vessels", CURRENT_TABLE, w, len(current_rows),
+                      noun="vessel summary")
     if failed:
         print(f"[gfw-vessels] {failed} vessel lookups failed (logged above)")
     return 0

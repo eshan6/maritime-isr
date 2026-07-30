@@ -201,6 +201,46 @@ def report_snapshots(con) -> None:
         print(f"  {src:<24} {versions:>9}  {str(first)[:10]:<12} {str(latest)[:10]:<12}")
 
 
+def report_coverage(con) -> int:
+    """Non-null rate for every declared field. Returns the number of failures.
+
+    A row count says a table has rows. It does not say the rows carry values —
+    and an all-null column looks perfect in every count we print elsewhere.
+    Floors marked `-` are observed and not gated: they have not been measured on
+    live data yet, and inventing a bar in a sandbox is the same class of error
+    this section exists to catch.
+    """
+    from maritime_isr.ingest.checks import COVERAGE_EXPECTATIONS, coverage_report
+
+    printed = False
+    failures = 0
+    for table in sorted(COVERAGE_EXPECTATIONS):
+        pattern = str(cfg.data_root / "conformed" / table / "day=*" / "part.parquet")
+        try:
+            rows = con.execute(
+                f"SELECT * FROM read_parquet('{pattern}', union_by_name=true)"
+            ).fetchdf().to_dict("records")
+        except Exception:  # noqa: BLE001 — table not landed yet
+            continue
+        if not rows:
+            continue
+        if not printed:
+            print("\nFIELD COVERAGE  (non-null rate; '-' = observed, not gated)")
+            print("  " + "-" * 92)
+            printed = True
+        print(f"  {table}  ({len(rows):,} rows)")
+        for field, rate, floor in coverage_report(table, rows):
+            bar = f">= {floor:.0%}" if floor is not None else "-"
+            bad = floor is not None and rate < floor
+            if bad:
+                failures += 1
+            mark = "  FAIL" if bad else ""
+            print(f"      {field:<32} {rate:>7.1%}   {bar:>7}{mark}")
+    if printed and not failures:
+        print("  no floored field fell below its bar.")
+    return failures
+
+
 def main() -> int:
     print("=" * 96)
     print("Maritime ISR — D1 landed-data report")
@@ -215,6 +255,7 @@ def main() -> int:
         p_rows, p_bytes = report_parquet(con)
         d_rows, _ = report_duckdb(con)
         report_snapshots(con)
+        coverage_failures = report_coverage(con)
     finally:
         con.close()
 
@@ -242,6 +283,9 @@ def main() -> int:
         print("Nothing landed yet. Run the connectors first — see README 'D1 quickstart'.")
     else:
         print("Within budget.")
+    if coverage_failures:
+        print(f"{coverage_failures} field(s) below their coverage floor — see FIELD "
+              "COVERAGE above. Row counts do not reveal this; treat it as a landing bug.")
     print("=" * 96)
     return 0
 

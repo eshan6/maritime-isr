@@ -43,6 +43,7 @@ from pathlib import Path
 
 from ..config import AOI_V1
 from . import gfw_client as gc
+from .checks import report_landed
 from .landing import land_raw, land_raw_json, land_table, stamp_envelope, stamp_h3
 
 SOURCE_ID = "gfw-sar"
@@ -178,8 +179,7 @@ def run_gridded(weeks: int = 8, resolution: str = "HIGH") -> int:
     written = land_table(rows, table=GRID_TABLE,
                          key_fields=("cell_lat", "cell_lon", "observed_date"),
                          day_field="observed_date")
-    print(f"[gfw-sar] landed {len(rows)} grid cells into {GRID_TABLE} "
-          f"across {len(written)} day partitions")
+    report_landed("gfw-sar", GRID_TABLE, written, len(rows), noun="grid cell")
     return 0
 
 
@@ -299,8 +299,8 @@ def import_portal_csv(path: str | Path) -> int:
                          key_fields=("detection_id",), day_field="acquired_at_detection")
     matched = sum(1 for r in rows if r["matched_to_ais"] is True)
     unmatched = sum(1 for r in rows if r["matched_to_ais"] is False)
-    print(f"[gfw-sar] landed {len(rows)} detections into {DETECTION_TABLE} "
-          f"({len(written)} day partitions); {skipped} skipped/out-of-AOI")
+    report_landed("gfw-sar", DETECTION_TABLE, written, len(rows), noun="detection")
+    print(f"[gfw-sar]   {skipped} skipped/out-of-AOI")
     print(f"[gfw-sar]   matched to AIS: {matched}   unmatched: {unmatched}   "
           f"unknown: {len(rows) - matched - unmatched}")
     print("[gfw-sar]   'unmatched' is the dark-vessel-relevant subset, but it is NOT "

@@ -147,13 +147,168 @@ def test_neighbors_is_the_same_function_as_disk():
 # ==========================================================================
 
 def test_ingest_rows_carry_the_resolution_fusion_joins_on():
-    """The actual ADR-015 failure: ingest stamped 7/9, fusion joins on 6."""
+    """The actual ADR-015 failure: ingest stamped 7/9, fusion joins on 6.
+
+    An existence check only. The real guard is the query test below — a column
+    being present says nothing about whether its values join.
+    """
     from maritime_isr.ingest.landing import stamp_h3
 
     row = {"lat": 15.5, "lon": 68.2}
     stamp_h3(row)
     assert "h3_r6" in row, "without res 6, ingest tables cannot join fusion tables"
     assert row["h3_r6"] == h3util.cell(15.5, 68.2, h3util.DEFAULT_RES)
+
+
+# --- the guard with teeth: run the join, in DuckDB, on real output ---------
+
+#: Positions from landed GFW encounter/gap events in the AOI. Real coordinates
+#: rather than round numbers, because cell boundaries fall where they fall and
+#: a tidy 15.0/68.0 could sit comfortably inside one cell by luck.
+_AOI_POSITIONS = [
+    (18.9732, 71.6237),
+    (15.4411, 68.2098),
+    (12.0873, 74.8331),
+    (21.5502, 69.0417),
+    (8.7204, 65.0615),
+]
+
+
+def _land_ingest_side(tmp_path, monkeypatch) -> int:
+    """Land an ingest table exactly as a connector does. Returns rows landed."""
+    from maritime_isr import config as cfg_mod
+    from maritime_isr.ingest import landing
+    from maritime_isr.ingest.landing import land_table, stamp_envelope, stamp_h3
+
+    monkeypatch.setattr(cfg_mod.cfg, "data_root", tmp_path, raising=False)
+    monkeypatch.setattr(landing.cfg, "data_root", tmp_path, raising=False)
+
+    import datetime as dt
+
+    rows = []
+    for i, (lat, lon) in enumerate(_AOI_POSITIONS):
+        r = {"event_id": f"enc-{i}", "lat": lat, "lon": lon,
+             "start_time": dt.datetime(2026, 6, 14, tzinfo=dt.timezone.utc)}
+        stamp_h3(r)
+        stamp_envelope(r, source_id="gfw-events", source_ref=f"enc:{i}",
+                       acquired_at=r["start_time"])
+        rows.append(r)
+    written = land_table(rows, table="gfw_encounters",
+                         key_fields=("event_id",), day_field="start_time")
+    return sum(written.values())
+
+
+def _run_fusion_side():
+    """Run the real fusion cascade and return its verdict rows.
+
+    This calls `fusion.dark.dark_cascade`, not a hand-built dict — the whole
+    point is to compare against the cell the fusion core *actually* computes.
+    Empty track and static lists are fine: the cascade still emits one verdict
+    row per contact, and the verdict is not what is under test here.
+    """
+    import datetime as dt
+
+    import pandas as pd
+
+    from maritime_isr.fusion.dark import dark_cascade
+    from maritime_isr.tracks.coverage import CoverageModel
+
+    ts = pd.Timestamp(dt.datetime(2026, 6, 14, 6, 0, tzinfo=dt.timezone.utc))
+    t0 = ts.timestamp() - 3600
+
+    # Coverage evidence at the same places and times, so the contacts are not
+    # all suppressed for deafness — closer to how the cascade really runs.
+    ais = pd.DataFrame([
+        {"ts": ts, "lat": lat, "lon": lon, "receiver": "ter:r1|sat:s1",
+         "mmsi": 400000000 + i}
+        for i, (lat, lon) in enumerate(_AOI_POSITIONS)
+    ])
+    model = CoverageModel(t0).fit(ais)
+
+    unmatched = [
+        {"detection_id": f"det-{i}", "scene_id": "S1_TEST_0001", "ts": ts,
+         "lat": lat, "lon": lon, "length_m": 180.0, "score": 0.9}
+        for i, (lat, lon) in enumerate(_AOI_POSITIONS)
+    ]
+    return dark_cascade(unmatched, model, statics=[], tracks=[])
+
+
+def test_a_landed_ingest_table_actually_joins_a_fusion_table(tmp_path, monkeypatch):
+    """Run the join. Assert rows come back.
+
+    ADR-015 was a *join* failure, and a join failure is silent: both sides have
+    healthy row counts, both have an h3 column, and the query returns nothing.
+    Asserting that ingest stamps res 6 is an existence check and would not have
+    caught it if fusion had moved instead. So this executes the query.
+    """
+    import duckdb
+
+    landed = _land_ingest_side(tmp_path, monkeypatch)
+    assert landed == len(_AOI_POSITIONS), "ingest side did not land"
+
+    verdicts = _run_fusion_side()
+    assert verdicts, "fusion side produced nothing to join against"
+
+    from maritime_isr.ingest.landing import table_glob
+
+    con = duckdb.connect()
+    try:
+        fusion_rows = [{"candidate_id": v["candidate_id"], "h3_cell": v["h3_cell"]}
+                       for v in verdicts]
+        con.execute("CREATE TABLE dark_candidates (candidate_id VARCHAR, h3_cell VARCHAR)")
+        con.executemany("INSERT INTO dark_candidates VALUES (?, ?)",
+                        [(r["candidate_id"], r["h3_cell"]) for r in fusion_rows])
+
+        n = con.execute(
+            f"""
+            SELECT count(*)
+            FROM read_parquet('{table_glob("gfw_encounters")}') i
+            JOIN dark_candidates d ON i.h3_r6 = d.h3_cell
+            """
+        ).fetchone()[0]
+        assert n > 0, (
+            "the ingest table and the fusion table share no H3 cell. This is "
+            "the ADR-015 defect: both sides look healthy, the join returns "
+            "nothing, and no row count anywhere reveals it."
+        )
+        assert n == len(_AOI_POSITIONS), (
+            f"expected one join hit per position, got {n}"
+        )
+
+        # Negative control: the same query at the wrong resolution must find
+        # nothing. Without this, a test that joined on a column of NULLs
+        # against a column of NULLs could pass and prove nothing.
+        wrong = con.execute(
+            f"""
+            SELECT count(*)
+            FROM read_parquet('{table_glob("gfw_encounters")}') i
+            JOIN dark_candidates d ON i.h3_r7 = d.h3_cell
+            """
+        ).fetchone()[0]
+        assert wrong == 0, (
+            "res 7 joined a res 6 fusion cell — the resolutions are no longer "
+            "distinguishable and this guard has stopped guarding anything"
+        )
+    finally:
+        con.close()
+
+
+def test_fusion_cell_equals_the_ingest_stamp_position_by_position(tmp_path, monkeypatch):
+    """Same coordinate through both code paths must give the same cell.
+
+    The join test proves *some* rows match. This proves every one does, which
+    is what makes a missing match a real signal rather than sampling luck.
+    """
+    from maritime_isr.ingest.landing import stamp_h3
+
+    verdicts = _run_fusion_side()
+    assert len(verdicts) == len(_AOI_POSITIONS)
+    for (lat, lon), v in zip(_AOI_POSITIONS, verdicts):
+        row = {"lat": lat, "lon": lon}
+        stamp_h3(row)
+        assert row["h3_r6"] == v["h3_cell"], (
+            f"ingest and fusion disagree at {lat},{lon}"
+        )
 
 
 def test_stamped_cells_match_what_the_fusion_core_would_compute():
