@@ -231,6 +231,33 @@ def cmd_graph_query(args):
     g.close()
 
 
+def cmd_graph_populate(args):
+    """Fill the graph from landed real data and report its connectivity.
+
+    Thin wrapper over tools/graph_report.py so the documented CLI shape works;
+    the tool stays runnable on its own for ad-hoc use.
+    """
+    import runpy
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    argv = []
+    if args.report_only:
+        argv.append("--report-only")
+    if args.all_gaps:
+        argv.append("--all-gaps")
+    script = _Path(__file__).resolve().parent.parent / "tools" / "graph_report.py"
+    old = _sys.argv
+    _sys.argv = [str(script), *argv]
+    try:
+        runpy.run_path(str(script), run_name="__main__")
+    except SystemExit as e:
+        return e.code or 0
+    finally:
+        _sys.argv = old
+    return 0
+
+
 def cmd_alerts(args):
     """Alert queue with full evidence chains."""
     from .config import DATA_ROOT, GRAPH_DB_NAME
@@ -482,6 +509,14 @@ def main():
     p = sub.add_parser("graph-query")
     p.add_argument("--mmsi", type=int, required=True)
     p.set_defaults(fn=cmd_graph_query)
+
+    p = sub.add_parser("graph-populate",
+                       help="build the graph from landed real data, then report it")
+    p.add_argument("--report-only", action="store_true",
+                   help="report the graph as it stands, write nothing")
+    p.add_argument("--all-gaps", action="store_true",
+                   help="include AIS gaps GFW did NOT flag as intentional")
+    p.set_defaults(fn=cmd_graph_populate)
 
     p = sub.add_parser("alerts")
     p.set_defaults(fn=cmd_alerts)
