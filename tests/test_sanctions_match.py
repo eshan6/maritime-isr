@@ -330,3 +330,40 @@ def test_matcher_does_not_touch_the_fusion_core():
     src = inspect.getsource(sm)
     for forbidden in ("from ..fusion", "from ..graph", "import fusion", "import graph"):
         assert forbidden not in src, f"matcher must not reach into {forbidden!r}"
+
+
+def test_reported_count_is_what_landed_not_what_was_built(tmp_path, monkeypatch, capsys):
+    """First live run printed "landed 173" when 127 landed — a 36% overstatement.
+
+    The natural key is (vessel_id, ofac_ent_num, match_tier), so one hull
+    matching one OFAC entity via both its registry and self-reported identity
+    records collapses to a single row.
+    """
+    import duckdb
+
+    from maritime_isr.ingest import registries as reg
+    from maritime_isr.ingest.landing import read_table
+
+    # same vessel, same IMO, two identity records -> two candidate rows, one landed
+    _land_identity([
+        {"vessel_id": "v1", "imo": "9111222", "ship_name": "OLD NAME",
+         "call_sign": None, "mmsi": "1", "flag": "IND", "record_kind": "registry"},
+        {"vessel_id": "v1", "imo": "9111222", "ship_name": "NEW NAME",
+         "call_sign": None, "mmsi": "2", "flag": "PAN", "record_kind": "self_reported"},
+    ])
+    con = duckdb.connect(str(tmp_path / "d.duckdb"))
+    reg._ensure_snapshot_meta(con)
+    monkeypatch.setattr(reg, "_fetch", lambda *a, **k: (
+        '9639,"SEA HARRIER","vessel","IRAN","-0-","CS1","Cargo","1","2",'
+        '"Panama","OWNER","Registration Identification IMO 9111222"\n').encode())
+    reg.refresh_ofac(con, AS_OF)
+    monkeypatch.setattr(sm, "connect", lambda *a, **k: con)
+
+    sm.run()
+    out = capsys.readouterr().out
+    landed = len(read_table(sm.MATCH_TABLE))
+
+    assert landed == 1, "both identity records match the same entity — one row"
+    assert f"landed {landed} match" in out, f"reported count must equal landed count:\n{out}"
+    assert "collapsed to" in out, "the collapse must be explained, not hidden"
+    con.close()

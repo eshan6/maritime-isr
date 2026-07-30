@@ -165,6 +165,24 @@ Ingest units 0.1 and 0.4 are closed. The three queued fixes are **done**
    adapter lives on the ingest side and the fusion core learns nothing
    GFW-specific.
 
+## First analytical result (2026-07-29)
+
+`maritime-isr ingest sanctions-match` on the landed data: **126 distinct vessels
+match an OFAC-sanctioned hull, 98 of them by IMO** (permanent hull number, so
+these are findings rather than candidates), 29 by name only (candidates), 0 by
+call sign. IMO extraction verified on all 98 — keyword-anchored, single 7-digit
+value, 0 questionable. 53 of the 98 carry a different name and often a different
+flag from OFAC's, which is the identity-laundering signature and is exactly what
+an IMO match is for.
+
+**Say:** "98 vessels in GFW's AOI event data match an OFAC-sanctioned hull by
+IMO." **Do not say:** "98 sanctioned vessels detected" — GFW detected them; our
+contribution is the join. And none of this is dark-vessel detection: no SAR is
+involved and nothing was observed going dark by us. Full caveats in
+DATA_SOURCES.md.
+
+---
+
 ## Known broken / rough / watch
 
 - **GFW SAR is offline upstream since 2026-07-03**, pending their migration to

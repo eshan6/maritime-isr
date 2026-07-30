@@ -325,12 +325,23 @@ def run(as_of: datetime | None = None) -> int:
               "overlap in this window.")
         return 0
 
-    land_table(rows, table=MATCH_TABLE,
-               key_fields=("vessel_id", "ofac_ent_num", "match_tier"),
-               day_field="sanctions_as_of")
+    written = land_table(rows, table=MATCH_TABLE,
+                         key_fields=("vessel_id", "ofac_ent_num", "match_tier"),
+                         day_field="sanctions_as_of")
 
+    # Report what LANDED, not what we built. The natural key is
+    # (vessel_id, ofac_ent_num, match_tier), so one vessel matching one OFAC
+    # entity via both its registry AND self-reported identity records collapses
+    # to a single row. On the first live run that gap was 173 built vs 127
+    # landed — printing the pre-merge count overstated the result by 36%.
+    landed = sum(written.values())
     findings = sum(1 for r in rows if r["is_finding"])
-    print(f"[ofac-match] landed {len(rows)} match(es) into {MATCH_TABLE}")
+    print(f"[ofac-match] landed {landed} match(es) into {MATCH_TABLE}")
+    if landed != len(rows):
+        print(f"[ofac-match]   ({len(rows)} candidate rows collapsed to {landed} on the "
+              "natural key — the same hull matched via several identity records)")
+    print(f"[ofac-match]   {len({r['vessel_id'] for r in rows})} distinct vessel(s), "
+          f"{len({r['ofac_ent_num'] for r in rows})} distinct sanctioned entit(ies)")
     print(f"[ofac-match]   by IMO: {tiers['imo']}   by call sign: {tiers['call_sign']}   "
           f"by name only: {tiers['name']}")
     print(f"[ofac-match]   {findings} finding(s), {len(rows) - findings} candidate(s) "

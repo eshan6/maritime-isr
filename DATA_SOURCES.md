@@ -367,6 +367,57 @@ globally sparse rather than sparse *here*.
 
 ---
 
+## First analytical result — OFAC vessel matching, 2026-07-29
+
+Run on the landed data with `maritime-isr ingest sanctions-match`, reviewed with
+`tools/review_matches.py`.
+
+| | Count |
+|---|---|
+| Distinct vessels matching a sanctioned hull | **126** |
+| — by **IMO** (permanent hull number) | **98** — findings |
+| — by call sign | 0 |
+| — by name only | 29 — **candidates**, not findings |
+| Distinct OFAC entities matched | 121 |
+| Ambiguous name keys dropped by the guard | 7 |
+
+**The IMO extraction was verified, not assumed.** OFAC has no IMO column, so it
+is regexed out of free-text remarks — a wrong extraction would produce false
+matches reported at 0.95 confidence. All 98 were keyword-anchored on the pattern
+`Registration Identification IMO NNNNNNN` with exactly one 7-digit number in the
+remark. **0 of 98 questionable.**
+
+**Zero call-sign matches.** GFW's identity records rarely populate `call_sign`,
+so the middle tier had almost nothing to index. The gradient is effectively
+two-tier on this data — worth knowing before relying on it.
+
+**53 of the 98 IMO matches carry a different name from OFAC's**, frequently with
+a different flag: our `GMB`/`GUY`/`COM`/`MLI`/`BES`/`TON` against OFAC's
+Panama/Cameroon/San Marino/Comoros/Barbados. Renaming and reflagging is exactly
+what the identity-laundering pattern looks like, and an IMO match is what makes
+it visible — the hull number does not change when the name and flag do. These are
+**rename candidates, not verified rename events**: confirming one needs the
+registry history, and GFW's is thin (1.05 records per vessel).
+
+### What can and cannot be said about this
+
+**Supportable today:** *"98 distinct vessels appearing in GFW's AOI event data
+for 2026-06-04 → 2026-07-30 match an OFAC-sanctioned hull by IMO, against the
+2026-07-29 SDN snapshot. IMO extraction verified on all 98."*
+
+**Not supportable:** "98 sanctioned vessels detected." We did not detect these
+vessels — GFW did. Our contribution is the join between GFW's event data and the
+sanctions list. Nor is this dark-vessel detection: none of it involves SAR, and
+no vessel here was observed going dark by us.
+
+**Also not supportable:** treating the 29 name-only candidates as findings. They
+are dominated by generic names — IVY, SAGA, MARIA, GALAXY, LEO, AMBER, DIAMOND —
+which is precisely the collision risk the tier exists to flag. A few look
+plausible (`MT NOOR 1` → `NOOR 1`, `M V OPAL` → `OPAL`) but plausible is not
+verified.
+
+---
+
 ## History
 
 - **2026-07-29** — first live run. Numbers above. EU needed a URL token; NGA
