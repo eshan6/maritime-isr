@@ -71,8 +71,8 @@ prototype remains green in-sandbox and every metric it produces is synthetic.
 | GFW SAR (gridded + portal CSV) | ⬜ | Upstream offline since 2026-07-03. Both paths degrade cleanly. |
 | Ingest report | ✅ | Prints real counts, date ranges, AOI checks and disk usage. |
 
-**Test tally:** 202 tests passing in-sandbox. Sandbox-green ≠ host-verified — do
-**not** report this as "202 tests prove it works on real data." Every number the
+**Test tally:** 273 tests passing in-sandbox. Sandbox-green ≠ host-verified — do
+**not** report this as "273 tests prove it works on real data." Every number the
 system has ever produced comes from synthetic fixtures or fixture-driven tests.
 
 **Host-only bugs found once real hardware was involved (6).** None were visible
@@ -130,34 +130,40 @@ steps personally.
 
 ## Next up
 
-Ingest units 0.1 and 0.4 are closed. Four things queued, in priority order.
+Ingest units 0.1 and 0.4 are closed. The three queued fixes are **done**
+(2026-07-29): event mapping gaps, direct OFAC matching, H3 unification.
 
-1. **Event mapping gaps** (small, high value, do first). Three fields the live
-   run showed we are dropping: `gap.intentionalDisabling` — GFW's own
-   dark-vessel judgement; the `distances.*FromPortKm` / `*FromShoreKm` block,
-   present on **every** event type, which removes the need for WPI; and
-   `port_visit.*Anchorage` records with lat/lon, which give us a port gazetteer
-   for free. Also: event-level `confidence` does not exist except on port
-   visits, so the envelope is writing null nearly everywhere. Diagnose from
-   `data/raw/gfw-events/` with `tools/inspect_raw_event.py` — no re-download.
-   Add per-page progress to `post_paginated` while in there.
+**One thing needs your decision before work starts:**
 
-2. **Direct OFAC vessel matching** (ADR-016a). Match 9,184 identified vessels
-   against 1,516 OFAC vessels by **IMO > call sign > name**, in that precedence.
-   Name-only matches are candidates, never findings, and carry lower confidence.
-   This is the free-tier replacement for ownership traversal.
+1. **Phase 1 — units 1.1 to 1.4** (land mask, CFAR detector, xView3 chip
+   pipeline, CNN false-positive killer, evaluation harness). Unblocked by
+   ADR-013: needs no AIS and no VM. Exit test is F1 >= 0.75 on xView3 held-out.
+   **Blocker to raise first:** unit 1.2 downloads xView3, which is tens of GB
+   and breaks the 1 GB budget outright. That needs an explicit decision — a
+   budget exception for training data, an external drive, or a subset. Do not
+   silently exceed the budget.
 
-3. **H3 unification** (ADR-015). Its own session. One helper, resolutions
-   6/7/8/9 computed directly from lat/lon, duplicate deleted, eight fusion-core
-   modules touched. **Blocking before anything joins ingest data to fusion
-   data** — they currently cannot join at all. Re-run the harness and restate
-   the baselines; do not carry forward 96.9% / 100% / 75%.
+**Ready to run whenever the publisher is back:**
 
-4. **Phase 1** (units 1.1–1.4). Unblocked — needs no AIS and no VM. Note unit
-   1.2 downloads xView3, which breaks the 1 GB budget; raise it before starting.
+2. `maritime-isr ingest registries --only wpi` — NGA's MSI portal is under
+   maintenance; every URL variant returns 503. `tools/probe_wpi.py` finds a
+   working URL when they recover, or import a browser download with `--path`.
+   Optional per ADR-016 — GFW's `distances` block already covers the immediate
+   need.
+3. `maritime-isr ingest gfw` — GFW SAR offline upstream since 2026-07-03.
 
-**Waiting on the outside world, not on us:** WPI (NGA portal outage — retry, or
-import by hand with `--path`), and GFW SAR (offline upstream since 2026-07-03).
+**Then, once real matches exist:**
+
+4. **Run `maritime-isr ingest sanctions-match`** on the laptop and report the
+   counts by tier. This is the first thing built specifically against a measured
+   negative finding (0.66% ownership), so its real-data result matters: if it
+   returns zero matches across 9,184 vessels, that is itself a finding about the
+   AOI vessel population and should be recorded, not treated as a bug.
+
+5. **Adapt the landed ingest tables into the fusion/graph schemas.** Now
+   unblocked — ADR-015 means the joins actually work. Per CLAUDE.md §4.5 the
+   adapter lives on the ingest side and the fusion core learns nothing
+   GFW-specific.
 
 ## Known broken / rough / watch
 
