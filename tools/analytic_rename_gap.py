@@ -90,6 +90,22 @@ def split_by_freshness(rows: list[dict], identity_by_vessel: dict[str, list[dict
     things*, not from any record of the change itself. A registry transition
     record — "vessel X, formerly Y, effective date Z" — would settle it. Snapshot
     arithmetic cannot.
+
+    **Worse than weak on a single snapshot — structurally biased.** `as_of` is
+    the day we *downloaded* the SDN list, not the day OFAC designated the
+    vessel; the CSV carries no designation date. A GFW identity interval's
+    `valid_from` is when that identity started transmitting, which is always
+    before the day we ran the download. So with one snapshot the comparison
+    resolves to "OFAC newer" for essentially every row, and the resulting split
+    is an artifact of our download schedule rather than a fact about vessels.
+    Measured on the first live run: **53 of 53 landed in "OFAC newer", 0 in
+    "GFW newer"** — exactly the degenerate outcome this predicts.
+
+    `freshness_is_informative()` detects that condition. The split only starts
+    carrying signal once we hold **two or more OFAC snapshots** and can watch a
+    name change *between* them, which is what the versioned-snapshot design in
+    `registries.py` exists to make possible. It is a matter of waiting, not of
+    writing a better query.
     """
     gfw_newer, ofac_newer, undated = [], [], []
     for m in rows:
@@ -108,6 +124,52 @@ def split_by_freshness(rows: list[dict], identity_by_vessel: dict[str, list[dict
             ofac_newer.append({**m, "_gfw_latest": gfw_latest,
                                "_ofac_as_of": ofac_as_of})
     return gfw_newer, ofac_newer, undated
+
+
+def freshness_is_informative(matches: list[dict]) -> tuple[bool, str]:
+    """Can the freshness split mean anything yet? Returns (usable, reason).
+
+    One OFAC snapshot cannot establish a direction of change — see
+    `split_by_freshness`. Saying so is the whole job here: a split that always
+    answers the same way is not evidence, and printing its buckets without this
+    check would be a number reported over unverified reality.
+    """
+    dates = {str(m.get("sanctions_as_of"))[:10] for m in matches
+             if m.get("sanctions_as_of") is not None}
+    if len(dates) <= 1:
+        only = next(iter(dates), "unknown")
+        return False, (
+            f"only ONE OFAC snapshot is landed (as_of {only}). `as_of` is the day "
+            "we downloaded the list, not the day OFAC designated the vessel — the "
+            "SDN CSV has no designation date. Every GFW identity interval starts "
+            "before our download, so this split resolves to 'OFAC newer' by "
+            "construction and tells us nothing about renaming."
+        )
+    return True, f"{len(dates)} OFAC snapshots landed ({', '.join(sorted(dates))})"
+
+
+def gap_flag_census() -> dict[str, int]:
+    """How the intentional-disabling flag is distributed over ALL landed gaps.
+
+    Reporting "0 flagged" without the denominator is the reported-vs-landed bug
+    in a new costume: 0 out of 5 gaps and 0 out of 5,000 mean very different
+    things, and 0 because the column is entirely null means a third thing again
+    — a mapping bug rather than a finding.
+    """
+    census = {"total": 0, "flagged_true": 0, "explicit_false": 0, "null": 0,
+              "with_vessel_id": 0}
+    for r in read_table("gfw_ais_gaps"):
+        census["total"] += 1
+        if r.get("vessel_id"):
+            census["with_vessel_id"] += 1
+        v = r.get("gfw_intentional_disabling")
+        if v is None:
+            census["null"] += 1
+        elif v:
+            census["flagged_true"] += 1
+        else:
+            census["explicit_false"] += 1
+    return census
 
 
 def intentional_gaps() -> dict[str, list[dict]]:
@@ -169,10 +231,23 @@ def main(argv: list[str] | None = None) -> int:
           f"{len({m['vessel_id'] for m in ofac_newer}):>4} vessel(s)")
     print("      -> more likely clerical, or a name predating the designation.")
     print(f"  Undated on one side                     : {len(undated):>4} row(s)")
-    print("\n  Only the first population is a story, and it is a weak one:")
-    print("  inferring the DIRECTION of a change from two snapshot dates is weaker")
-    print("  evidence than a registry transition record. We have no transition")
-    print("  record. Do not upgrade this to 'renamed after being sanctioned'.")
+    usable, reason = freshness_is_informative(matches)
+    if not usable:
+        print("\n  !! THE SPLIT ABOVE CARRIES NO SIGNAL. Do not read it.")
+        print(f"     {reason}")
+        print("     A split that can only ever answer one way is not evidence. This")
+        print("     becomes informative once a SECOND OFAC snapshot is landed and a")
+        print("     name change can be seen happening BETWEEN them — which is what")
+        print("     the versioned snapshots in registries.py were built for. It is a")
+        print("     matter of waiting for the next refresh, not of a better query.")
+        print("     Until then the honest statement is: 53 vessels carry a name that")
+        print("     differs from OFAC's, and we cannot say which came first.")
+    else:
+        print(f"\n  Freshness comparison is usable: {reason}")
+        print("  Only the first population is a story, and it is still a weak one:")
+        print("  inferring the DIRECTION of a change from snapshot dates is weaker")
+        print("  evidence than a registry transition record, which we do not have.")
+        print("  Do not upgrade this to 'renamed after being sanctioned'.")
 
     # ---- the cross-reference --------------------------------------------
     gaps = intentional_gaps()
@@ -180,8 +255,24 @@ def main(argv: list[str] | None = None) -> int:
     print("CROSS-REFERENCE AGAINST GFW-FLAGGED INTENTIONAL AIS GAPS")
     print(RULE)
     n_gap_rows = sum(len(v) for v in gaps.values())
-    print(f"  gaps GFW flagged intentionalDisabling : {n_gap_rows:,} "
+    census = gap_flag_census()
+    print(f"  AIS gap rows landed in total          : {census['total']:,}")
+    print(f"    flagged intentionalDisabling=true   : {census['flagged_true']:,}")
+    print(f"    explicitly false                    : {census['explicit_false']:,}")
+    print(f"    no verdict from GFW (null)          : {census['null']:,}")
+    print(f"  usable (flagged AND has a vessel id)  : {n_gap_rows:,} "
           f"across {len(gaps):,} vessel(s)")
+    if census["total"] == 0:
+        print("\n  ZERO gap rows are landed at all. Nothing can cross-reference against")
+        print("  an empty table — this is a missing-input condition, not a null result.")
+    elif census["flagged_true"] == 0 and census["explicit_false"] == 0:
+        print("\n  Every landed gap has a NULL verdict — GFW assessed none of them.")
+        print("  With the column entirely null, check the mapping is reading GFW's")
+        print("  field before concluding anything about the vessels.")
+    elif census["flagged_true"] == 0:
+        print(f"\n  GFW assessed {census['explicit_false']:,} gap(s) and flagged none as")
+        print("  intentional. The column is populated, so this is GFW's verdict")
+        print("  rather than a mapping bug — a real, if small, negative result.")
 
     hits = []
     for m in mism:
@@ -197,11 +288,18 @@ def main(argv: list[str] | None = None) -> int:
           f"{len({m['vessel_id'] for m, _ in hits})}")
     if not hits:
         print("\n  Zero. Reported as zero.")
-        print("  With the landed volumes above, this is what the arithmetic predicts:")
-        print("  the flagged-gap population is small, the name-mismatch population is")
-        print("  small, and they are drawn from thousands of vessels. A null result")
-        print("  here says the free 8-week window does not contain the pattern — not")
-        print("  that the pattern does not exist, and not that the query is wrong.")
+        if census["flagged_true"] == 0:
+            print("  Note WHY it is zero: one side of this cross-reference is empty.")
+            print("  With no GFW-flagged gap at all, the intersection was zero before")
+            print("  the name-mismatch side was even consulted. That is a weaker kind")
+            print("  of null than 'both populations exist and do not overlap', and it")
+            print("  should not be reported as though the two had been compared.")
+        else:
+            print("  With the landed volumes above, this is what the arithmetic")
+            print("  predicts: both populations are small and drawn from thousands of")
+            print("  vessels. A null result says the free 8-week window does not")
+            print("  contain the pattern — not that the pattern does not exist, and")
+            print("  not that the query is wrong.")
         print("  The query is worth keeping: it costs nothing to re-run on a wider")
         print("  window or a paid feed, and it is the shape of the real product.")
     else:

@@ -139,10 +139,16 @@ these produce are the point; do not quote any of them until he pastes a run back
 
 ### Run these four, in this order, and paste the output back
 
-    1. maritime-isr ingest sanctions-match
-    2. python tools/review_matches.py
-    3. python tools/analytic_rename_gap.py
-    4. maritime-isr graph-populate
+    1. python -m maritime_isr.cli ingest sanctions-match
+    2. python tools/review_matches.py            # DONE - 98/98 pass
+    3. python tools/analytic_rename_gap.py       # DONE - re-run after the fix
+    4. python tools/graph_report.py              # NOT YET RUN
+
+**The `maritime-isr` console script is not installed on the laptop.** It is
+declared in `pyproject.toml` but the package was never `pip install`ed, so the
+short name does not resolve. `python -m maritime_isr.cli <verb>` runs the same
+code with no install; `pip install -e .` from the repo root makes the short name
+work if we want it.
 
 **1 — re-run the matcher.** Required, not optional: ADR-018 changed what a match
 means. IMO numbers are now check-digit validated and the call-sign tier split in
@@ -207,10 +213,65 @@ the identity match between the two. No SAR, no dark-vessel detection, nothing
 observed going dark by us. **That attribution travels with the number all the way
 to any UI we build** (ADR-018). Full caveats in DATA_SOURCES.md.
 
-**These figures predate ADR-018 and must be re-measured.** IMO check-digit
-validation can only remove rows from the 0.95 tier, never add them, so 98 is now
-a ceiling rather than a count. Re-run `maritime-isr ingest sanctions-match`
-before quoting anything here.
+---
+
+## Second analytical result (2026-07-30) — one confirmation, two negatives
+
+Run live on the laptop against the landed tables. Three outcomes, and only the
+first is good news.
+
+### 1. CONFIRMED — every IMO survives its check digit
+
+`python tools/review_matches.py`: **98 of 98 IMO matches pass their check
+digit**, and 0 of 98 had questionable extraction. Two independent checks now
+agree — extraction is keyword-anchored with a single 7-digit value, and the
+arithmetic says each number is a real IMO. Since the checksum can only *remove*
+rows from the 0.95 tier, **98 is confirmed rather than a ceiling**: re-running
+the matcher under ADR-018 cannot reduce it. 45 names agree with OFAC, 53 differ.
+
+This is the strongest corroboration the sanctions matching has. Record it.
+
+### 2. NEGATIVE — the freshness split is degenerate, and it is our bug
+
+`python tools/analytic_rename_gap.py` put **53 of 53 name mismatches in "OFAC
+newer" and 0 in "GFW newer."** A split that lands 100% in one bucket is not a
+finding about vessels, it is an artifact of the query.
+
+**Cause:** `sanctions_as_of` is **the day we downloaded the SDN list**, not the
+day OFAC designated the vessel — the SDN CSV carries no designation date. A GFW
+identity interval's `valid_from` is when that identity started transmitting,
+always before our download. So the comparison resolves one way by construction.
+
+**Fix shipped:** `freshness_is_informative()` detects the single-snapshot
+condition and the report now refuses to present the buckets, printing `THE SPLIT
+ABOVE CARRIES NO SIGNAL` instead. It becomes usable when a **second OFAC
+snapshot** is landed and a name change can be seen happening *between* them —
+which is exactly what the versioned snapshots in `registries.py` were built for.
+A matter of waiting for the next refresh, not of a better query.
+
+**Honest statement today:** *53 vessels carry a name that differs from OFAC's,
+and we cannot say which name came first.*
+
+### 3. NEGATIVE — zero flagged gaps, so the cross-reference never ran
+
+`gaps GFW flagged intentionalDisabling : 0`. Only 5 gap events are landed for
+the whole AOI window, and none carries the flag. **The intersection was zero
+before the name-mismatch side was consulted** — that is a weaker kind of null
+than "both populations exist and do not overlap," and it was being reported as
+though the two had been compared.
+
+**Fix shipped:** the report now prints the denominator (total gap rows, flagged
+true, explicitly false, null) and distinguishes three cases — an empty table
+(missing input), an all-null verdict column (possible mapping bug), and GFW
+having genuinely assessed gaps and flagged none (a real negative). **Run it again
+after the fix to see which of the three we are in** — if the column is entirely
+null, the mapping needs checking before any conclusion about vessels.
+
+### Still outstanding
+
+**The connectivity number does not exist yet.** `graph-populate` did not run —
+the `maritime-isr` console script is not installed on the laptop. Use
+`python tools/graph_report.py`, which is the same code.
 
 ---
 
