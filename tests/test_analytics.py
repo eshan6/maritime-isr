@@ -255,3 +255,94 @@ def test_the_report_names_the_densest_neighbourhood(tmp_path, monkeypatch, capsy
     assert "1-hop  : 3 vessel(s)" in out
     assert "with >= 3 encounter edges:    1" in out
     assert "detected no vessel" in out, "the attribution block is not optional"
+
+
+# ==========================================================================
+# the freshness split is degenerate on a single snapshot — say so
+# ==========================================================================
+
+def test_one_ofac_snapshot_makes_the_freshness_split_uninformative():
+    """Measured on the live run: 53 of 53 landed in one bucket.
+
+    `sanctions_as_of` is our download date, not OFAC's designation date, and a
+    GFW identity interval always starts before we downloaded. The split can
+    only answer one way, so it is not evidence.
+    """
+    rows = [_match(vessel_id=f"v{i}") for i in range(5)]
+    usable, reason = rg.freshness_is_informative(rows)
+    assert usable is False
+    assert "ONE OFAC snapshot" in reason
+
+
+def test_two_snapshots_make_it_informative():
+    rows = [_match(vessel_id="a"),
+            _match(vessel_id="b", sanctions_as_of=AS_OF - timedelta(days=30))]
+    usable, reason = rg.freshness_is_informative(rows)
+    assert usable is True
+    assert "2 OFAC snapshots" in reason
+
+
+def test_the_report_refuses_to_present_a_degenerate_split(landed, capsys):
+    landed([{"vessel_id": "v1", "record_kind": "registry",
+             "ship_name": "NEW NAME", "valid_from": T0}],
+           "gfw_vessel_identity", ("vessel_id", "valid_from"), "valid_from")
+    landed([_match(confidence=0.95)], "sanctioned_vessel_matches",
+           ("vessel_id", "ofac_ent_num", "match_tier"), "sanctions_as_of")
+    assert rg.main([]) == 0
+    out = capsys.readouterr().out
+    assert "THE SPLIT ABOVE CARRIES NO SIGNAL" in out
+
+
+# ==========================================================================
+# a zero needs a denominator
+# ==========================================================================
+
+def test_the_gap_census_separates_null_from_explicitly_false(landed):
+    """0 flagged out of 5 nulls and 0 out of 5 assessed mean different things."""
+    landed([{"event_id": "g1", "vessel_id": "v1", "start_time": T0,
+             "gfw_intentional_disabling": None},
+            {"event_id": "g2", "vessel_id": "v1", "start_time": T0,
+             "gfw_intentional_disabling": False},
+            {"event_id": "g3", "vessel_id": None, "start_time": T0,
+             "gfw_intentional_disabling": True}],
+           "gfw_ais_gaps", ("event_id",), "start_time")
+    c = rg.gap_flag_census()
+    assert c == {"total": 3, "flagged_true": 1, "explicit_false": 1, "null": 1,
+                 "with_vessel_id": 2}
+
+
+def test_an_all_null_verdict_column_is_called_out_as_possible_mapping_bug(
+        landed, capsys):
+    landed([{"event_id": f"g{i}", "vessel_id": "v1", "start_time": T0,
+             "gfw_intentional_disabling": None} for i in range(5)],
+           "gfw_ais_gaps", ("event_id",), "start_time")
+    landed([_match(confidence=0.95)], "sanctioned_vessel_matches",
+           ("vessel_id", "ofac_ent_num", "match_tier"), "sanctions_as_of")
+    assert rg.main([]) == 0
+    out = capsys.readouterr().out
+    assert "Every landed gap has a NULL verdict" in out
+    assert "AIS gap rows landed in total          : 5" in out
+
+
+def test_an_empty_gap_table_is_a_missing_input_not_a_null_result(landed, capsys):
+    landed([_match(confidence=0.95)], "sanctioned_vessel_matches",
+           ("vessel_id", "ofac_ent_num", "match_tier"), "sanctions_as_of")
+    assert rg.main([]) == 0
+    out = capsys.readouterr().out
+    assert "missing-input condition, not a null result" in out
+
+
+def test_a_zero_from_an_empty_side_is_labelled_a_weaker_null(landed, capsys):
+    """'Both populations exist and do not overlap' is a real finding.
+    'One side was empty' is not, and must not be reported as though it were."""
+    landed([{"vessel_id": "v1", "record_kind": "registry",
+             "ship_name": "NEW NAME", "valid_from": T0}],
+           "gfw_vessel_identity", ("vessel_id", "valid_from"), "valid_from")
+    landed([{"event_id": "g1", "vessel_id": "v1", "start_time": T0,
+             "gfw_intentional_disabling": False}],
+           "gfw_ais_gaps", ("event_id",), "start_time")
+    landed([_match(confidence=0.95)], "sanctioned_vessel_matches",
+           ("vessel_id", "ofac_ent_num", "match_tier"), "sanctions_as_of")
+    assert rg.main([]) == 0
+    out = capsys.readouterr().out
+    assert "one side of this cross-reference is empty" in out.lower()
