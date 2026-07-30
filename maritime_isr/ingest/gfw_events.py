@@ -30,6 +30,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from ..config import AOI_V1
 from . import gfw_client as gc
+from .checks import landed, report_landed
 from .landing import land_raw_json, land_table, stamp_envelope, stamp_h3
 
 SOURCE_ID = "gfw-events"
@@ -322,14 +323,13 @@ def run(kind: str | None = None, weeks: int = 8) -> int:
             written = land_table(
                 rows, table=spec["table"], key_fields=("event_id",), day_field="start_time",
             )
-            n = sum(written.values())
-            print(f"[gfw-events] {k}: landed {len(rows)} rows into {spec['table']} "
-                  f"({len(written)} day partitions, {n} rows total after merge)")
+            n = landed(written)
+            report_landed(f"gfw-events {k}", spec["table"], written, len(rows))
+            total += n
         else:
             print(f"[gfw-events] {k}: no events in window")
         if skipped:
             print(f"[gfw-events] {k}: skipped {skipped} unusable/out-of-AOI records")
-        total += len(rows)
 
-    print(f"[gfw-events] done — {total} event rows landed")
+    print(f"[gfw-events] done — {total:,} event rows landed")
     return 0

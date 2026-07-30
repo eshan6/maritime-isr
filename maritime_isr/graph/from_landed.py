@@ -1,0 +1,463 @@
+"""Populate the object graph from landed real data. No synthetic edges.
+
+Everything here comes from a Parquet table that a connector wrote. If a fact
+is not in a landed table it does not become an edge — which is why several
+things the roadmap expects are simply absent:
+
+- **No `owned-by` edges.** GFW registry ownership is 0.66% (ADR-016), and
+  OFAC's `vessel_owner` is a free-text string on the sanctioned hull, not a
+  resolved corporate entity. Building an ownership graph out of either would
+  be synthesising the thing we have already recorded that we do not have.
+- **No `detected-by` or `resolved-from` edges.** We have run no SAR and built
+  no tracks from real AIS (ADR-013, ADR-017).
+
+**Attribution, which is the point of the props on every edge.** GFW detected
+these vessels, GFW assessed which AIS gaps look intentional, and OFAC decided
+who is sanctioned. We matched hulls to a sanctions list. Every edge carries the
+`source` that asserted it so that a UI can say *whose* claim it is showing, and
+nothing in this module lets our matching be mistaken for our detection.
+
+**Node identity.** Nodes are keyed by GFW's `vessel_id`, not by IMO. IMO is the
+better key in principle — it is the hull — but under half of the landed identity
+records carry one, and GFW's event tables reference their own id. Keying on
+anything else would split one hull across two nodes and silently halve its
+degree, which is precisely what the connectivity measurement is trying to read.
+IMO, MMSI and name travel in node props.
+
+**Decay is real here.** `docked-at` has a 2-day half-life, so an 8-week-old port
+visit is worth ~2^-28 of its base confidence — effectively gone. That is the
+intended behaviour of a *state* edge (ADR/ontology): "this ship is at this port"
+rots fast because it stops being true fast. Reporting how many edges have
+decayed below a usable threshold is one of the honest measurements of whether
+this graph is worth looking at yet.
+"""
+from __future__ import annotations
+
+import time
+from datetime import datetime, timezone
+
+from ..ingest.landing import read_table
+from ..ingest.sanctions_match import (MATCH_TABLE, TIER_CONFIDENCE,
+                                     normalise_name)
+
+AUTHORITY_OFAC = "authority:OFAC"
+
+#: Confidence for an edge whose source stated none. The store requires a number
+#: on every edge, so silence has to become one — but it must not become a
+#: flattering one, and it must stay distinguishable from a stated value. Every
+#: edge built this way carries `confidence_stated: False` in its props, so a
+#: query can exclude them and a reader can tell the difference.
+UNSTATED_CONFIDENCE = 0.5
+
+#: A GFW AIS gap becomes its own node rather than a vessel property. The verdict
+#: "this looked intentional" is GFW's assessment of a specific gap, and hanging
+#: it on a node keeps it attributable to them. Written as a vessel property it
+#: would read as our claim about the ship, which is exactly the overclaim
+#: ADR-018's framing rule forbids.
+GAP_NODE_TYPE = "ais_gap"
+GAP_EDGE_TYPE = "reported-gap"
+GAP_EDGE_SPEC = dict(src=["vessel"], dst=[GAP_NODE_TYPE],
+                     half_life_days=None, kind="event")
+
+
+def vessel_node_id(gfw_vessel_id: str) -> str:
+    return f"vessel:gfw:{gfw_vessel_id}"
+
+
+def _epoch(v, default: float | None = None) -> float | None:
+    """Landed timestamps arrive as datetimes or ISO strings depending on reader."""
+    if v is None:
+        return default
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str):
+        try:
+            v = datetime.fromisoformat(v.replace("Z", "+00:00"))
+        except ValueError:
+            return default
+    if isinstance(v, datetime):
+        if v.tzinfo is None:
+            v = v.replace(tzinfo=timezone.utc)
+        return v.timestamp()
+    return default
+
+
+def _conf(row: dict, default: float = UNSTATED_CONFIDENCE) -> tuple[float, bool]:
+    """(confidence, stated_by_source). A null column is not zero confidence."""
+    v = row.get("confidence")
+    if v is None:
+        return default, False
+    try:
+        return float(v), True
+    except (TypeError, ValueError):
+        return default, False
+
+
+def ensure_ontology(store) -> None:
+    """Register the gap types if this store predates them. Ontology is data."""
+    if GAP_NODE_TYPE not in store.node_registry():
+        store.migrate_add_node_type(GAP_NODE_TYPE)
+    if GAP_EDGE_TYPE not in store.edge_registry():
+        store.migrate_add_edge_type(GAP_EDGE_TYPE, GAP_EDGE_SPEC)
+
+
+def ensure_authorities(store) -> None:
+    store.upsert_node(AUTHORITY_OFAC, "sanctions_authority",
+                      dict(name="OFAC", full_name="US Treasury OFAC SDN list"))
+
+
+# --------------------------------------------------------------------------
+# vessels and their identities
+# --------------------------------------------------------------------------
+
+def load_vessels() -> dict[str, dict]:
+    """One record per GFW vessel id, folded from its identity intervals.
+
+    The *latest* interval by `valid_from` supplies the display identity; every
+    interval is kept for the rename analysis. A vessel that appears only in the
+    event tables and never in identity still becomes a node, with empty props —
+    dropping it would understate connectivity.
+    """
+    out: dict[str, dict] = {}
+    for r in read_table("gfw_vessel_identity"):
+        vid = r.get("vessel_id")
+        if not vid:
+            continue
+        rec = out.setdefault(vid, {"vessel_id": vid, "intervals": []})
+        rec["intervals"].append(r)
+    for rec in out.values():
+        rec["intervals"].sort(key=lambda r: _epoch(r.get("valid_from")) or 0.0)
+        latest = rec["intervals"][-1]
+        rec.update({k: latest.get(k) for k in
+                    ("imo", "mmsi", "ship_name", "flag", "call_sign")})
+    return out
+
+
+def add_vessels(store, vessels: dict[str, dict]) -> int:
+    for vid, rec in vessels.items():
+        store.upsert_node(vessel_node_id(vid), "vessel", dict(
+            gfw_vessel_id=vid, imo=rec.get("imo"), mmsi=rec.get("mmsi"),
+            name=rec.get("ship_name"), flag=rec.get("flag"),
+            n_identity_records=len(rec.get("intervals", [])),
+        ))
+    return len(vessels)
+
+
+def add_flagged_to(store, vessels: dict[str, dict]) -> int:
+    """One flagged-to edge per distinct flag a vessel has carried.
+
+    A vessel with two flags across its intervals gets two edges with different
+    time scopes — that is a reflagging, and it is a first-class fact rather than
+    a conflict to resolve away.
+    """
+    n = 0
+    for vid, rec in vessels.items():
+        seen: set[str] = set()
+        for iv in rec.get("intervals", []):
+            flag = iv.get("flag")
+            if not flag or flag in seen:
+                continue
+            seen.add(flag)
+            t0 = _epoch(iv.get("valid_from"))
+            if t0 is None:
+                continue
+            fid = f"flag:{flag}"
+            store.upsert_node(fid, "flag_state", dict(code=flag))
+            store.add_edge(
+                "flagged-to", vessel_node_id(vid), fid,
+                t_start=t0, t_end=_epoch(iv.get("valid_to")),
+                confidence=0.9 if iv.get("record_kind") == "registry" else 0.7,
+                observed_at=t0, source="gfw-vessels",
+                source_ref=str(iv.get("source_ref") or f"{vid}:flag:{flag}"),
+                props=dict(record_kind=iv.get("record_kind"), flag=flag),
+            )
+            n += 1
+    return n
+
+
+def add_identities(store, vessels: dict[str, dict]) -> tuple[int, int]:
+    """identified-as edges; a closed interval is the roadmap's formerly-.
+
+    Returns (total edges, closed edges). GFW supplies `valid_to` on an identity
+    record that has stopped transmitting, so the closure is *their* record of
+    the interval ending, not our inference from two snapshots.
+    """
+    total = closed = 0
+    for vid, rec in vessels.items():
+        for iv in rec.get("intervals", []):
+            name = iv.get("ship_name")
+            if not name:
+                continue
+            t0 = _epoch(iv.get("valid_from"))
+            if t0 is None:
+                continue
+            t1 = _epoch(iv.get("valid_to"))
+            nid = f"id:name:{normalise_name(name)}"
+            store.upsert_node(nid, "identity", dict(kind="name", value=name))
+            store.add_edge(
+                "identified-as", vessel_node_id(vid), nid,
+                t_start=t0, t_end=t1,
+                confidence=0.9 if iv.get("record_kind") == "registry" else 0.7,
+                observed_at=t0, source="gfw-vessels",
+                source_ref=str(iv.get("source_ref") or f"{vid}:name:{name}"),
+                props=dict(kind="name", value=name,
+                           record_kind=iv.get("record_kind")),
+            )
+            total += 1
+            if t1 is not None:
+                closed += 1
+    return total, closed
+
+
+# --------------------------------------------------------------------------
+# behavioural edges
+# --------------------------------------------------------------------------
+
+def add_encounters(store, known: set[str]) -> tuple[int, int]:
+    """met-with, vessel to vessel. Returns (edges, skipped).
+
+    Skipped means the counterpart has no vessel id in the landed row — GFW
+    records some encounters against a single vessel. An encounter with an
+    unnamed partner is not an edge; inventing a placeholder node for it would
+    inflate exactly the connectivity number this exists to measure.
+    """
+    n = skipped = 0
+    for r in read_table("gfw_encounters"):
+        a, b = r.get("vessel_id"), r.get("counterpart_vessel_id")
+        if not a or not b:
+            skipped += 1
+            continue
+        t0 = _epoch(r.get("start_time"))
+        if t0 is None:
+            skipped += 1
+            continue
+        for v in (a, b):
+            if v not in known:
+                store.upsert_node(vessel_node_id(v), "vessel",
+                                  dict(gfw_vessel_id=v, from_event_only=True))
+                known.add(v)
+        conf, stated = _conf(r)
+        store.add_edge(
+            "met-with", vessel_node_id(a), vessel_node_id(b),
+            t_start=t0, t_end=_epoch(r.get("end_time")),
+            confidence=conf,
+            observed_at=t0, source="gfw-events:encounters",
+            source_ref=str(r.get("event_id")),
+            props=dict(event_id=r.get("event_id"),
+                       duration_hours=r.get("duration_hours"),
+                       lat=r.get("lat"), lon=r.get("lon"),
+                       h3_r6=r.get("h3_r6"),
+                       encounter_type=r.get("encounter_type"),
+                       confidence_stated=stated,
+                       gfw_confidence_raw=r.get("gfw_confidence_raw")),
+        )
+        n += 1
+    return n, skipped
+
+
+def add_port_visits(store, known: set[str]) -> tuple[int, int]:
+    """docked-at, vessel to port. Returns (edges, skipped)."""
+    n = skipped = 0
+    for r in read_table("gfw_port_visits"):
+        v = r.get("vessel_id")
+        pid = r.get("port_id") or r.get("port_name")
+        t0 = _epoch(r.get("start_time"))
+        if not v or not pid or t0 is None:
+            skipped += 1
+            continue
+        if v not in known:
+            store.upsert_node(vessel_node_id(v), "vessel",
+                              dict(gfw_vessel_id=v, from_event_only=True))
+            known.add(v)
+        node = f"port:{pid}"
+        store.upsert_node(node, "port", dict(
+            port_id=r.get("port_id"), name=r.get("port_name"),
+            flag=r.get("anchorage_flag"), lat=r.get("lat"), lon=r.get("lon")))
+        conf, stated = _conf(r)
+        store.add_edge(
+            "docked-at", vessel_node_id(v), node,
+            t_start=t0, t_end=_epoch(r.get("end_time")),
+            confidence=conf,
+            observed_at=t0, source="gfw-events:port_visits",
+            source_ref=str(r.get("event_id")),
+            props=dict(event_id=r.get("event_id"),
+                       duration_hours=r.get("duration_hours"),
+                       confidence_stated=stated,
+                       port_name=r.get("port_name")),
+        )
+        n += 1
+    return n, skipped
+
+
+def add_gaps(store, known: set[str], *, only_intentional: bool = True
+             ) -> tuple[int, int]:
+    """reported-gap, vessel to the gap GFW recorded. Returns (edges, skipped).
+
+    `only_intentional` keeps to gaps GFW flagged as looking like deliberate
+    disabling. The unflagged remainder is not "not intentional" — GFW simply
+    has no verdict — so landing all of them as equal edges would assert
+    something nobody claimed.
+    """
+    n = skipped = 0
+    for r in read_table("gfw_ais_gaps"):
+        v = r.get("vessel_id")
+        t0 = _epoch(r.get("start_time"))
+        intentional = r.get("gfw_intentional_disabling")
+        if only_intentional and not intentional:
+            skipped += 1
+            continue
+        if not v or t0 is None:
+            skipped += 1
+            continue
+        if v not in known:
+            store.upsert_node(vessel_node_id(v), "vessel",
+                              dict(gfw_vessel_id=v, from_event_only=True))
+            known.add(v)
+        gid = f"gap:{r.get('event_id')}"
+        store.upsert_node(gid, GAP_NODE_TYPE, dict(
+            event_id=r.get("event_id"),
+            duration_hours=r.get("gap_duration_hours") or r.get("duration_hours"),
+            off_lat=r.get("gap_off_lat"), off_lon=r.get("gap_off_lon"),
+            on_lat=r.get("gap_on_lat"), on_lon=r.get("gap_on_lon"),
+            distance_km=r.get("gap_distance_km"),
+            implied_speed_kn=r.get("gap_implied_speed_kn"),
+            # GFW's verdict, labelled as GFW's.
+            gfw_intentional_disabling=bool(intentional),
+            assessed_by="global-fishing-watch"))
+        conf, stated = _conf(r)
+        store.add_edge(
+            GAP_EDGE_TYPE, vessel_node_id(v), gid,
+            t_start=t0, t_end=_epoch(r.get("end_time")),
+            confidence=conf,
+            observed_at=t0, source="gfw-events:gaps",
+            source_ref=str(r.get("event_id")),
+            props=dict(event_id=r.get("event_id"),
+                       gfw_intentional_disabling=bool(intentional),
+                       confidence_stated=stated,
+                       assessed_by="global-fishing-watch"),
+        )
+        n += 1
+    return n, skipped
+
+
+def add_sanctions(store, known: set[str]) -> tuple[int, int]:
+    """sanctioned-under, from our OFAC matches. Returns (findings, candidates).
+
+    **Findings and candidates both become edges, at their own confidence.** The
+    tier travels in props and in the base confidence, so a name-only candidate
+    at 0.35 can never be read as a finding — that is what the confidence is for.
+    Dropping candidates would hide leads; promoting them would be ADR-004's
+    cardinal error.
+    """
+    ensure_authorities(store)
+    findings = candidates = 0
+    skipped_tiers: set = set()
+    for r in read_table(MATCH_TABLE):
+        v = r.get("vessel_id")
+        t0 = _epoch(r.get("sanctions_as_of"))
+        if not v or t0 is None:
+            continue
+        if v not in known:
+            store.upsert_node(vessel_node_id(v), "vessel",
+                              dict(gfw_vessel_id=v, from_event_only=True))
+            known.add(v)
+        # The envelope confidence is the tier confidence, but a row landed
+        # before ADR-018 may carry a null there. Falling back to the tier is
+        # exact, not a guess — the tier IS what set it. A tier we do not
+        # recognise is skipped loudly rather than given a number.
+        tier = r.get("match_tier")
+        conf = r.get("confidence")
+        if conf is None:
+            conf = TIER_CONFIDENCE.get(tier)
+        if conf is None:
+            skipped_tiers.add(tier)
+            continue
+        conf = float(conf)
+        store.add_edge(
+            "sanctioned-under", vessel_node_id(v), AUTHORITY_OFAC,
+            # An OFAC listing has no recorded end in the SDN snapshot; t_end is
+            # left open and the snapshot's as_of bounds what we can claim.
+            t_start=t0, t_end=None, confidence=conf, observed_at=t0,
+            source="ofac-vessel-match", source_ref=str(r.get("source_ref") or v),
+            props=dict(match_tier=r.get("match_tier"),
+                       is_finding=bool(r.get("is_finding")),
+                       ofac_ent_num=r.get("ofac_ent_num"),
+                       ofac_name=r.get("ofac_name"),
+                       ofac_program=r.get("ofac_program"),
+                       ofac_owner=r.get("ofac_owner"),
+                       ofac_imo=r.get("ofac_imo"),
+                       sanctions_as_of=str(r.get("sanctions_as_of")),
+                       matched_by="maritime-isr",
+                       listed_by="us-treasury-ofac"),
+        )
+        if r.get("is_finding"):
+            findings += 1
+        else:
+            candidates += 1
+    if skipped_tiers:
+        print(f"[graph] skipped match rows with unrecognised tier(s) "
+              f"{sorted(skipped_tiers)} — re-run the matcher (ADR-018)")
+    return findings, candidates
+
+
+# --------------------------------------------------------------------------
+# the whole thing
+# --------------------------------------------------------------------------
+
+def populate(store, *, only_intentional_gaps: bool = True) -> dict[str, int]:
+    """Fill the graph from every landed table. Returns a count per step.
+
+    Safe to re-run: the store is append-only and resolves latest-per-triple, so
+    a second run re-asserts rather than duplicating. Re-asserting advances
+    `observed_at`, which is also how a state edge's decay is refreshed.
+    """
+    ensure_ontology(store)
+    ensure_authorities(store)
+
+    vessels = load_vessels()
+    known = set(vessels)
+    counts = {"vessels_from_identity": add_vessels(store, vessels)}
+    counts["flagged_to"] = add_flagged_to(store, vessels)
+    ident_total, ident_closed = add_identities(store, vessels)
+    counts["identified_as"] = ident_total
+    counts["identified_as_closed"] = ident_closed
+    counts["met_with"], counts["encounters_skipped"] = add_encounters(store, known)
+    counts["docked_at"], counts["port_visits_skipped"] = add_port_visits(store, known)
+    counts["reported_gap"], counts["gaps_skipped"] = add_gaps(
+        store, known, only_intentional=only_intentional_gaps)
+    counts["sanctioned_findings"], counts["sanctioned_candidates"] = add_sanctions(
+        store, known)
+    counts["vessel_nodes_total"] = store.n_nodes("vessel")
+    counts["edges_total"] = store.n_edges()
+    return counts
+
+
+def decay_summary(store, *, at: float | None = None,
+                  usable: float = 0.5) -> dict:
+    """How much of the graph has rotted, by edge type.
+
+    `usable` is the confidence below which an edge should not carry an
+    analyst-facing claim on its own. There is nothing sacred about 0.5 — it is
+    stated here rather than buried so the number can be argued with.
+    """
+    at = time.time() if at is None else at
+    reg = store.edge_registry()
+    rows = store._con.execute(
+        "SELECT edge_type, base_confidence, observed_at FROM edges").fetchall()
+    out: dict[str, dict] = {}
+    for etype, base, observed in rows:
+        hl = reg.get(etype, {}).get("half_life_days")
+        if hl is None:
+            conf = base
+        else:
+            conf = base * 0.5 ** ((max(0.0, at - observed) / 86400.0) / hl)
+        d = out.setdefault(etype, {"n": 0, "below_usable": 0, "conf_sum": 0.0,
+                                   "half_life_days": hl})
+        d["n"] += 1
+        d["conf_sum"] += conf
+        if conf < usable:
+            d["below_usable"] += 1
+    for d in out.values():
+        d["mean_confidence"] = d["conf_sum"] / d["n"] if d["n"] else 0.0
+        del d["conf_sum"]
+    return out

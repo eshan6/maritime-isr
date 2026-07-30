@@ -13,12 +13,17 @@ ownership edge at all, and OFAC's own `vessel_owner` column supplies the
 organisation side — the org graph is built from the sanctions list rather than
 from GFW.
 
-**Match precedence is load-bearing: IMO > call sign > name.**
+**Match precedence is load-bearing: IMO > call sign + name > call sign > name.**
 
 - **IMO** is a permanent hull number. It survives renaming and reflagging, and
   is the only identifier here that is hard to fake. An IMO match is a finding.
-- **Call sign** is assigned by the flag state and changes on reflagging. Good,
-  not certain.
+- **Call sign + name agreement** is two independent identifiers agreeing. Weaker
+  than an IMO but strong enough to assert: a finding.
+- **Call sign alone** is *not*. Call signs are assigned by the flag state, are
+  **reused after reassignment**, and short ones collide internationally — a
+  four-character call sign is not a globally unique key and never was. So a
+  call-sign-only hit is a **CANDIDATE**, promoting to a finding only when the
+  name corroborates it.
 - **Name** is freely changeable and collides constantly — real fleets contain
   many hulls called some variant of OCEAN STAR. **A name-only match is a
   CANDIDATE, never a finding**, and carries low confidence per CLAUDE.md §4.3.
@@ -37,6 +42,7 @@ from datetime import datetime, timezone
 
 from ..config import cfg
 from ..db import connect
+from .checks import check_coverage, report_landed
 from .landing import land_table, read_table, stamp_envelope
 
 SOURCE_ID = "ofac-vessel-match"
@@ -44,13 +50,23 @@ MATCH_TABLE = "sanctioned_vessel_matches"
 
 # Confidence by match tier. Deliberately wide gaps — the tiers are not
 # interchangeable and the numbers should make that obvious downstream.
+#
+# `call_sign` sits BELOW the finding threshold on purpose. Call signs are
+# flag-state assigned and reused after reassignment, so a bare call-sign hit is
+# a lead, not an assertion. It becomes `call_sign_name` — and a finding — only
+# when the vessel name agrees too, which is two independent identifiers.
 TIER_CONFIDENCE = {
     "imo": 0.95,
-    "call_sign": 0.75,
+    "call_sign_name": 0.80,
+    "call_sign": 0.40,
     "name": 0.35,
 }
 # Below this, a row is a candidate for review rather than an assertion.
 FINDING_THRESHOLD = 0.50
+
+# Ordered strongest-first, so downstream code can rank tiers without hard-coding
+# the confidence numbers.
+TIER_ORDER = ("imo", "call_sign_name", "call_sign", "name")
 
 # Vessel-type prefixes that carry no identifying information, in the form they
 # take AFTER punctuation has become whitespace — "M/V" normalises to "M V", so
@@ -99,17 +115,44 @@ def normalise_call_sign(cs: str | None) -> str | None:
     return s or None
 
 
-def normalise_imo(imo) -> str | None:
+def imo_checksum_ok(digits: str) -> bool:
+    """Validate an IMO number's check digit.
+
+    The seventh digit is a checksum: multiply the first six by 7, 6, 5, 4, 3, 2,
+    sum them, and the last digit of that sum must equal the seventh digit.
+
+    This is **independent evidence** from the extraction check. Verifying we
+    read the right characters out of OFAC's remarks says nothing about whether
+    the number itself is a real IMO — a transcription error in OFAC's own text
+    would pass extraction and still be wrong. Measured here: the checksum
+    rejects 90.3% of random 7-digit strings, so a passing number is very
+    unlikely to be a typo.
+    """
+    if len(digits) != 7 or not digits.isdigit():
+        return False
+    d = [int(c) for c in digits]
+    return sum(d[i] * (7 - i) for i in range(6)) % 10 == d[6]
+
+
+def normalise_imo(imo, *, require_checksum: bool = True) -> str | None:
     """IMO is 7 digits, sometimes prefixed 'IMO'. Return the bare digits.
 
-    A value that is not 7 digits is rejected rather than matched loosely — a
-    wrong IMO match would be reported at 0.95 confidence, which is exactly the
-    kind of confident error that is worse than no answer at all.
+    A value that is not 7 digits, or that fails its check digit, is rejected
+    rather than matched loosely — a wrong IMO match would be reported at 0.95
+    confidence, which is exactly the kind of confident error that is worse than
+    no answer at all.
+
+    `require_checksum=False` exists only so the review tool can count how many
+    values would have been rejected; the matcher always validates.
     """
     if imo is None:
         return None
     digits = re.sub(r"\D", "", str(imo))
-    return digits if len(digits) == 7 else None
+    if len(digits) != 7:
+        return None
+    if require_checksum and not imo_checksum_ok(digits):
+        return None
+    return digits
 
 
 # --------------------------------------------------------------------------
@@ -202,19 +245,27 @@ def match_one(vessel: dict, ofac_by_imo: dict, ofac_by_cs: dict,
     """Return (ofac_row, tier) for the strongest match, or None.
 
     Precedence is checked in order and the first hit wins. It never falls
-    through to a weaker tier after a stronger one matched, and never combines
-    tiers — a name agreement adds nothing to an IMO match and must not inflate
-    its confidence.
+    through to a weaker tier after a stronger one matched — a name agreement
+    adds nothing to an IMO match and must not inflate its confidence.
+
+    The one place tiers *do* combine is the call sign. A call-sign hit is
+    checked against the name on the same OFAC row: agreement promotes it to
+    `call_sign_name` (a finding), disagreement or a missing name on either side
+    leaves it at `call_sign` (a candidate). Absence of a name is not evidence
+    against, so it does not demote further — it just fails to promote.
     """
     imo = normalise_imo(vessel.get("imo"))
     if imo and imo in ofac_by_imo:
         return ofac_by_imo[imo], "imo"
 
+    nk = normalise_name(vessel.get("ship_name"))
+
     cs = normalise_call_sign(vessel.get("call_sign"))
     if cs and cs in ofac_by_cs:
-        return ofac_by_cs[cs], "call_sign"
+        row = ofac_by_cs[cs]
+        corroborated = bool(nk) and nk == row.get("_name_key")
+        return row, "call_sign_name" if corroborated else "call_sign"
 
-    nk = normalise_name(vessel.get("ship_name"))
     if nk and nk in ofac_by_name:
         return ofac_by_name[nk], "name"
 
@@ -273,7 +324,7 @@ def run(as_of: datetime | None = None) -> int:
           f"vessels (IMO index {len(by_imo)}, call sign {len(by_cs)}, name {len(by_name)})")
 
     rows: list[dict] = []
-    tiers = {"imo": 0, "call_sign": 0, "name": 0}
+    tiers = {t: 0 for t in TIER_ORDER}
     for v in vessels:
         hit = match_one(v, by_imo, by_cs, by_name)
         if hit is None:
@@ -334,19 +385,24 @@ def run(as_of: datetime | None = None) -> int:
     # entity via both its registry AND self-reported identity records collapses
     # to a single row. On the first live run that gap was 173 built vs 127
     # landed — printing the pre-merge count overstated the result by 36%.
-    landed = sum(written.values())
+    report_landed("ofac-match", MATCH_TABLE, written, len(rows), noun="match")
+
+    problems = check_coverage(MATCH_TABLE, rows)
+    for p in problems:
+        print(f"[ofac-match] COVERAGE FAILURE: {p}")
+
     findings = sum(1 for r in rows if r["is_finding"])
-    print(f"[ofac-match] landed {landed} match(es) into {MATCH_TABLE}")
-    if landed != len(rows):
-        print(f"[ofac-match]   ({len(rows)} candidate rows collapsed to {landed} on the "
-              "natural key — the same hull matched via several identity records)")
     print(f"[ofac-match]   {len({r['vessel_id'] for r in rows})} distinct vessel(s), "
           f"{len({r['ofac_ent_num'] for r in rows})} distinct sanctioned entit(ies)")
-    print(f"[ofac-match]   by IMO: {tiers['imo']}   by call sign: {tiers['call_sign']}   "
-          f"by name only: {tiers['name']}")
+    print("[ofac-match]   by tier: " + "   ".join(
+        f"{t}: {tiers[t]}" for t in TIER_ORDER))
     print(f"[ofac-match]   {findings} finding(s), {len(rows) - findings} candidate(s) "
           "needing review")
     if tiers["name"]:
         print("[ofac-match]   NOTE: name-only matches are CANDIDATES, not findings. "
               "Vessel names change and collide; treat them as leads to verify.")
+    if tiers["call_sign"]:
+        print("[ofac-match]   NOTE: call-sign-only matches are CANDIDATES. Call signs "
+              "are reassigned and short ones collide; only call sign WITH name "
+              "agreement is a finding.")
     return 0

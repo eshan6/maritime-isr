@@ -33,7 +33,7 @@ def _ofac(**over):
         "ofac_ent_num": "9639", "ofac_name": "SEA HARRIER", "ofac_program": "IRAN",
         "ofac_call_sign": "ATF123", "ofac_vessel_type": "Cargo", "ofac_tonnage": "1,900",
         "ofac_gross_tonnage": "2,100", "ofac_flag": "Panama",
-        "ofac_owner": "BLUEWATER HOLDINGS", "ofac_imo": "9111222",
+        "ofac_owner": "BLUEWATER HOLDINGS", "ofac_imo": "9111228",
         "sanctions_as_of": AS_OF,
     }
     r.update(over)
@@ -74,11 +74,53 @@ def test_normalise_name_returns_none_for_noise_only():
 def test_normalise_imo_accepts_only_seven_digits():
     """A loose IMO match would be reported at 0.95 confidence — a confident
     error is worse than no answer."""
-    assert sm.normalise_imo("9111222") == "9111222"
-    assert sm.normalise_imo("IMO 9111222") == "9111222"
+    assert sm.normalise_imo("9111228") == "9111228"
+    assert sm.normalise_imo("IMO 9111228") == "9111228"
     assert sm.normalise_imo("911122") is None      # six digits
-    assert sm.normalise_imo("91112223") is None    # eight digits
+    assert sm.normalise_imo("91112283") is None    # eight digits
     assert sm.normalise_imo(None) is None
+
+
+# ---- IMO check digit ------------------------------------------------------
+
+def test_imo_checksum_accepts_real_imo_numbers():
+    """Real IMOs taken from the live OFAC match set (2026-07-29 snapshot)."""
+    for real in ("9179842", "9220641", "9369722", "9349289", "9161003",
+                 "9305207", "9284154", "9264893", "8400945", "8818843",
+                 "8519966", "9008108", "9034705"):
+        assert sm.imo_checksum_ok(real), f"{real} is a real IMO and must pass"
+
+
+def test_imo_checksum_rejects_the_overwhelming_majority_of_random_digits():
+    """Quantifies what the check is worth, rather than assuming it.
+
+    If this ever drops, the checksum has stopped being evidence and the 0.95
+    tier is resting on less than we claim it is.
+    """
+    import random
+
+    rng = random.Random(20260730)
+    n = 20_000
+    passing = sum(1 for _ in range(n)
+                  if sm.imo_checksum_ok(f"{rng.randrange(1_000_000, 10_000_000)}"))
+    rate = passing / n
+    assert rate < 0.15, f"checksum only rejects {1 - rate:.1%} of random digits"
+
+
+def test_normalise_imo_rejects_a_failing_check_digit():
+    """Seven digits is not enough. 9111222 has the wrong check digit."""
+    assert sm.imo_checksum_ok("9111222") is False
+    assert sm.normalise_imo("9111222") is None
+    # ...but the review tool must still be able to see what was rejected.
+    assert sm.normalise_imo("9111222", require_checksum=False) == "9111222"
+
+
+def test_a_checksum_failure_cannot_reach_the_finding_tier():
+    """The end the checksum exists to serve: no 0.95 row on a bad number."""
+    by_imo, by_cs, by_name = sm.build_indexes([_ofac(ofac_imo="9111222")])
+    hit = sm.match_one({"imo": "9111222", "ship_name": "SOMETHING ELSE"},
+                       by_imo, by_cs, by_name)
+    assert hit is None, "a bad-check-digit IMO must not produce an IMO finding"
 
 
 def test_normalise_call_sign_strips_separators():
@@ -91,7 +133,7 @@ def test_normalise_call_sign_strips_separators():
 
 def test_imo_match_wins_and_is_a_finding():
     by_imo, by_cs, by_name = sm.build_indexes([_ofac()])
-    hit = sm.match_one({"imo": "9111222", "ship_name": "SOMETHING ELSE"},
+    hit = sm.match_one({"imo": "9111228", "ship_name": "SOMETHING ELSE"},
                        by_imo, by_cs, by_name)
     assert hit is not None
     _, tier = hit
@@ -99,9 +141,39 @@ def test_imo_match_wins_and_is_a_finding():
     assert sm.TIER_CONFIDENCE["imo"] >= sm.FINDING_THRESHOLD
 
 
-def test_call_sign_match_when_imo_absent():
+def test_call_sign_alone_is_a_candidate_not_a_finding():
+    """Call signs are flag-state assigned, reused after reassignment, and short
+    ones collide internationally. Alone, one is a lead."""
     by_imo, by_cs, by_name = sm.build_indexes([_ofac()])
     hit = sm.match_one({"call_sign": "ATF123"}, by_imo, by_cs, by_name)
+    assert hit[1] == "call_sign"
+    assert sm.TIER_CONFIDENCE["call_sign"] < sm.FINDING_THRESHOLD, (
+        "a call-sign-only match must never reach finding confidence"
+    )
+
+
+def test_call_sign_plus_name_agreement_is_a_finding():
+    """Two independent identifiers agreeing is enough to assert."""
+    by_imo, by_cs, by_name = sm.build_indexes([_ofac()])
+    hit = sm.match_one({"call_sign": "ATF123", "ship_name": "M/V Sea Harrier"},
+                       by_imo, by_cs, by_name)
+    assert hit[1] == "call_sign_name"
+    assert sm.TIER_CONFIDENCE["call_sign_name"] >= sm.FINDING_THRESHOLD
+
+
+def test_call_sign_with_a_disagreeing_name_stays_a_candidate():
+    """A different name is the collision case the demotion exists for."""
+    by_imo, by_cs, by_name = sm.build_indexes([_ofac()])
+    hit = sm.match_one({"call_sign": "ATF123", "ship_name": "OCEAN PEARL"},
+                       by_imo, by_cs, by_name)
+    assert hit[1] == "call_sign"
+
+
+def test_a_missing_name_does_not_demote_below_call_sign():
+    """Absence of a name is not evidence against; it just fails to promote."""
+    by_imo, by_cs, by_name = sm.build_indexes([_ofac(ofac_name=None)])
+    hit = sm.match_one({"call_sign": "ATF123", "ship_name": "SEA HARRIER"},
+                       by_imo, by_cs, by_name)
     assert hit[1] == "call_sign"
 
 
@@ -116,23 +188,38 @@ def test_name_only_match_is_a_candidate_not_a_finding():
 
 
 def test_confidence_is_strictly_ordered_by_tier():
-    assert (sm.TIER_CONFIDENCE["imo"]
-            > sm.TIER_CONFIDENCE["call_sign"]
-            > sm.TIER_CONFIDENCE["name"])
+    confs = [sm.TIER_CONFIDENCE[t] for t in sm.TIER_ORDER]
+    assert confs == sorted(confs, reverse=True), (
+        f"TIER_ORDER {sm.TIER_ORDER} does not match the confidences {confs}"
+    )
+    assert set(sm.TIER_ORDER) == set(sm.TIER_CONFIDENCE), (
+        "every tier needs a confidence and a place in the order"
+    )
+
+
+def test_the_finding_threshold_falls_between_call_sign_and_call_sign_name():
+    """Where the line sits is the policy. Stating it as a test makes moving it
+    a deliberate act rather than a side effect of tuning a number."""
+    assert (sm.TIER_CONFIDENCE["call_sign"]
+            < sm.FINDING_THRESHOLD
+            <= sm.TIER_CONFIDENCE["call_sign_name"])
+    findings = {t for t in sm.TIER_ORDER
+                if sm.TIER_CONFIDENCE[t] >= sm.FINDING_THRESHOLD}
+    assert findings == {"imo", "call_sign_name"}
 
 
 def test_stronger_tier_is_not_inflated_by_weaker_agreement():
     """A name that also agrees adds nothing to an IMO match."""
     by_imo, by_cs, by_name = sm.build_indexes([_ofac()])
-    both = sm.match_one({"imo": "9111222", "call_sign": "ATF123",
+    both = sm.match_one({"imo": "9111228", "call_sign": "ATF123",
                          "ship_name": "SEA HARRIER"}, by_imo, by_cs, by_name)
-    imo_only = sm.match_one({"imo": "9111222"}, by_imo, by_cs, by_name)
+    imo_only = sm.match_one({"imo": "9111228"}, by_imo, by_cs, by_name)
     assert both[1] == imo_only[1] == "imo"
 
 
 def test_no_match_returns_none():
     by_imo, by_cs, by_name = sm.build_indexes([_ofac()])
-    assert sm.match_one({"imo": "9999999", "ship_name": "UNRELATED"},
+    assert sm.match_one({"imo": "9999993", "ship_name": "UNRELATED"},
                         by_imo, by_cs, by_name) is None
 
 
@@ -175,13 +262,13 @@ def test_ofac_imo_is_extracted_from_remarks(tmp_path):
     con = duckdb.connect(str(tmp_path / "t.duckdb"))
     reg._ensure_snapshot_meta(con)
     csv = ('9639,"SEA HARRIER","vessel","IRAN","-0-","ATF123","Cargo","1,900","2,100",'
-           '"Panama","BLUEWATER HOLDINGS","Vessel Registration Identification IMO 9111222"\n')
+           '"Panama","BLUEWATER HOLDINGS","Vessel Registration Identification IMO 9111228"\n')
     reg._fetch = lambda *a, **k: csv.encode()
     reg.refresh_ofac(con, AS_OF)
 
     rows = sm.load_ofac_vessels(con, AS_OF)
     assert len(rows) == 1
-    assert rows[0]["ofac_imo"] == "9111222"
+    assert rows[0]["ofac_imo"] == "9111228"
     assert rows[0]["ofac_owner"] == "BLUEWATER HOLDINGS"
     con.close()
 
@@ -234,18 +321,18 @@ def test_end_to_end_lands_matches_with_tiers(tmp_path, monkeypatch, capsys):
     from maritime_isr.ingest.landing import read_table
 
     _land_identity([
-        {"vessel_id": "v-imo", "imo": "9111222", "ship_name": "RENAMED HULL",
+        {"vessel_id": "v-imo", "imo": "9111228", "ship_name": "RENAMED HULL",
          "call_sign": None, "mmsi": "419000001", "flag": "IND"},
         {"vessel_id": "v-name", "imo": None, "ship_name": "OCEAN PEARL",
          "call_sign": None, "mmsi": "419000002", "flag": "PAN"},
-        {"vessel_id": "v-clean", "imo": "9999999", "ship_name": "HONEST TRADER",
+        {"vessel_id": "v-clean", "imo": "9999993", "ship_name": "HONEST TRADER",
          "call_sign": "ZZZ999", "mmsi": "419000003", "flag": "IND"},
     ])
 
     con = duckdb.connect(str(tmp_path / "m.duckdb"))
     reg._ensure_snapshot_meta(con)
     csv = ('9639,"SEA HARRIER","vessel","IRAN","-0-","ATF123","Cargo","1,900","2,100",'
-           '"Panama","BLUEWATER HOLDINGS","IMO 9111222"\n'
+           '"Panama","BLUEWATER HOLDINGS","IMO 9111228"\n'
            '9640,"OCEAN PEARL","vessel","IRAN","-0-","ATF999","Tanker","5,000","6,100",'
            '"Iran","MERIDIAN SHIPPING","-0-"\n')
     monkeypatch.setattr(reg, "_fetch", lambda *a, **k: csv.encode())
@@ -278,13 +365,13 @@ def test_every_match_row_carries_provenance(tmp_path, monkeypatch):
     from maritime_isr.ingest import registries as reg
     from maritime_isr.ingest.landing import read_table
 
-    _land_identity([{"vessel_id": "v1", "imo": "9111222", "ship_name": "X",
+    _land_identity([{"vessel_id": "v1", "imo": "9111228", "ship_name": "X",
                      "call_sign": None, "mmsi": "1", "flag": "IND"}])
     con = duckdb.connect(str(tmp_path / "p.duckdb"))
     reg._ensure_snapshot_meta(con)
     monkeypatch.setattr(reg, "_fetch", lambda *a, **k: (
         '9639,"SEA HARRIER","vessel","IRAN","-0-","CS1","Cargo","1","2",'
-        '"Panama","OWNER","IMO 9111222"\n').encode())
+        '"Panama","OWNER","IMO 9111228"\n').encode())
     reg.refresh_ofac(con, AS_OF)
     monkeypatch.setattr(sm, "connect", lambda *a, **k: con)
     sm.run()
@@ -346,16 +433,16 @@ def test_reported_count_is_what_landed_not_what_was_built(tmp_path, monkeypatch,
 
     # same vessel, same IMO, two identity records -> two candidate rows, one landed
     _land_identity([
-        {"vessel_id": "v1", "imo": "9111222", "ship_name": "OLD NAME",
+        {"vessel_id": "v1", "imo": "9111228", "ship_name": "OLD NAME",
          "call_sign": None, "mmsi": "1", "flag": "IND", "record_kind": "registry"},
-        {"vessel_id": "v1", "imo": "9111222", "ship_name": "NEW NAME",
+        {"vessel_id": "v1", "imo": "9111228", "ship_name": "NEW NAME",
          "call_sign": None, "mmsi": "2", "flag": "PAN", "record_kind": "self_reported"},
     ])
     con = duckdb.connect(str(tmp_path / "d.duckdb"))
     reg._ensure_snapshot_meta(con)
     monkeypatch.setattr(reg, "_fetch", lambda *a, **k: (
         '9639,"SEA HARRIER","vessel","IRAN","-0-","CS1","Cargo","1","2",'
-        '"Panama","OWNER","Registration Identification IMO 9111222"\n').encode())
+        '"Panama","OWNER","Registration Identification IMO 9111228"\n').encode())
     reg.refresh_ofac(con, AS_OF)
     monkeypatch.setattr(sm, "connect", lambda *a, **k: con)
 
@@ -365,5 +452,6 @@ def test_reported_count_is_what_landed_not_what_was_built(tmp_path, monkeypatch,
 
     assert landed == 1, "both identity records match the same entity — one row"
     assert f"landed {landed} match" in out, f"reported count must equal landed count:\n{out}"
-    assert "collapsed to" in out, "the collapse must be explained, not hidden"
+    assert "2 built" in out, "the gap between built and landed must be explained, not hidden"
+    assert "landed 2 match" not in out, "the built count must never be the headline"
     con.close()

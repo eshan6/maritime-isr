@@ -8,8 +8,11 @@ session. `CLAUDE.md`, `ARCHITECTURE.md`, `DECISIONS.md` are stable contracts;
 > between status buckets, record what was verified vs assumed, log anything now
 > broken, and set "Next up." If you don't update it, the next session starts blind.
 
-**Last updated:** 2026-07-29, after the repair + download-only ingest rework
-(spec units 0.1 / 0.3 / 0.4) **ran live on the laptop and landed real data.**
+**Last updated:** 2026-07-30. Matcher corrections landed (ADR-018), the
+reported-vs-landed bug class turned into a check (`ingest/checks.py`), Phase 1
+and xView3 recorded as deferred (ADR-017), and the graph populator plus two
+analytics written **but not yet run on the real data** — that is Eshan's next
+run, see "Next up".
 
 ---
 
@@ -130,40 +133,62 @@ steps personally.
 
 ## Next up
 
-Ingest units 0.1 and 0.4 are closed. The three queued fixes are **done**
-(2026-07-29): event mapping gaps, direct OFAC matching, H3 unification.
+**Everything below is built and sandbox-green. None of it has run on the real
+landed tables** — those live on Eshan's laptop, not in the sandbox. The numbers
+these produce are the point; do not quote any of them until he pastes a run back.
 
-**One thing needs your decision before work starts:**
+### Run these four, in this order, and paste the output back
 
-1. **Phase 1 — units 1.1 to 1.4** (land mask, CFAR detector, xView3 chip
-   pipeline, CNN false-positive killer, evaluation harness). Unblocked by
-   ADR-013: needs no AIS and no VM. Exit test is F1 >= 0.75 on xView3 held-out.
-   **Blocker to raise first:** unit 1.2 downloads xView3, which is tens of GB
-   and breaks the 1 GB budget outright. That needs an explicit decision — a
-   budget exception for training data, an external drive, or a subset. Do not
-   silently exceed the budget.
+    1. maritime-isr ingest sanctions-match
+    2. python tools/review_matches.py
+    3. python tools/analytic_rename_gap.py
+    4. maritime-isr graph-populate
 
-**Ready to run whenever the publisher is back:**
+**1 — re-run the matcher.** Required, not optional: ADR-018 changed what a match
+means. IMO numbers are now check-digit validated and the call-sign tier split in
+two, so rows landed before today carry retired semantics. *Success:* it prints
+`landed N match(es)`, then a tier breakdown including `call_sign_name`.
+*Failure:* `no vessel identity landed` — the connectors have not run.
 
-2. `maritime-isr ingest registries --only wpi` — NGA's MSI portal is under
-   maintenance; every URL variant returns 503. `tools/probe_wpi.py` finds a
-   working URL when they recover, or import a browser download with `--path`.
-   Optional per ADR-016 — GFW's `distances` block already covers the immediate
-   need.
-3. `maritime-isr ingest gfw` — GFW SAR offline upstream since 2026-07-03.
+**2 — review the matches.** Now also validates the check digit on every IMO
+match. *Success:* `98 of 98 IMO matches pass their check digit`. **If any fail,
+they leave the 0.95 tier and the headline number changes** — report the failures
+verbatim.
 
-**Then, once real matches exist:**
+**3 — the rename-then-gap analytic.** Cross-references IMO matches carrying a
+different OFAC name against gaps GFW flagged `intentionalDisabling`, and splits
+the name disagreements by which record is fresher. *Success is any number,
+including zero* — `VESSELS THAT ARE BOTH ... : 0` is a finding about the free
+data, not a failure. Report it as zero if it is zero.
 
-4. **Run `maritime-isr ingest sanctions-match`** on the laptop and report the
-   counts by tier. This is the first thing built specifically against a measured
-   negative finding (0.66% ownership), so its real-data result matters: if it
-   returns zero matches across 9,184 vessels, that is itself a finding about the
-   AOI vessel population and should be recorded, not treated as a bug.
+**4 — populate the graph and measure it.** Writes real edges only (met-with,
+docked-at, flagged-to, sanctioned-under, identified-as, reported-gap) and prints
+node/edge counts, the confidence distribution after decay, and the connectivity
+of the sanctions-matched population. **The number to look for:** how many of the
+IMO-matched vessels have at least one encounter edge. If that is near zero, a
+graph UI has nothing to draw and the next build should be a ranked table, not a
+network view. The report also names the single densest sanctioned neighbourhood
+— the candidate demo vessel.
 
-5. **Adapt the landed ingest tables into the fusion/graph schemas.** Now
-   unblocked — ADR-015 means the joins actually work. Per CLAUDE.md §4.5 the
-   adapter lives on the ingest side and the fusion core learns nothing
-   GFW-specific.
+*Failure mode to watch:* `skipped match rows with unrecognised tier(s)` means
+step 1 was not re-run.
+
+### Deferred, with the reasoning on the record
+
+**Phase 1 (own SAR) and xView3 — deferred, no date (ADR-017).** The 1 GB cap
+stands and nothing new is downloaded. Own-SAR is not on the M6 demo path; GFW's
+SAR datasets are offline and per-detection AOI SAR has no API. Parked code stays
+parked, not deleted. Reverts by un-parking when a deploy host or the GFW datasets
+return.
+
+### Ready to run whenever the publisher is back
+
+`maritime-isr ingest registries --only wpi` — NGA's MSI portal is under
+maintenance; every URL variant returns 503. `tools/probe_wpi.py` finds a working
+URL when they recover, or import a browser download with `--path`. Optional per
+ADR-016 — GFW's `distances` block already covers the immediate need.
+
+`maritime-isr ingest gfw` — GFW SAR offline upstream since 2026-07-03.
 
 ## First analytical result (2026-07-29)
 
@@ -175,11 +200,17 @@ value, 0 questionable. 53 of the 98 carry a different name and often a different
 flag from OFAC's, which is the identity-laundering signature and is exactly what
 an IMO match is for.
 
-**Say:** "98 vessels in GFW's AOI event data match an OFAC-sanctioned hull by
-IMO." **Do not say:** "98 sanctioned vessels detected" — GFW detected them; our
-contribution is the join. And none of this is dark-vessel detection: no SAR is
-involved and nothing was observed going dark by us. Full caveats in
-DATA_SOURCES.md.
+**Say:** "98 vessels matched by us against GFW's event data." **Do not say:**
+"98 sanctioned vessels detected by us." GFW detected the vessels and GFW assessed
+every dark/gap determination; OFAC decided who is sanctioned; our contribution is
+the identity match between the two. No SAR, no dark-vessel detection, nothing
+observed going dark by us. **That attribution travels with the number all the way
+to any UI we build** (ADR-018). Full caveats in DATA_SOURCES.md.
+
+**These figures predate ADR-018 and must be re-measured.** IMO check-digit
+validation can only remove rows from the 0.95 tier, never add them, so 98 is now
+a ceiling rather than a count. Re-run `maritime-isr ingest sanctions-match`
+before quoting anything here.
 
 ---
 
