@@ -126,13 +126,50 @@ def test_a_reflagging_becomes_two_flagged_to_edges(store):
     assert flags == {"flag:IND", "flag:PAN"}
 
 
-def test_a_closed_identity_interval_is_the_formerly_identified_as_edge(store):
+def test_a_superseded_name_is_the_formerly_identified_as_edge(store):
+    """A LATER interval with a DIFFERENT name is what makes one former."""
     counts = fl.populate(store)
     assert counts["identified_as"] == 3
-    assert counts["identified_as_closed"] == 1, "OLD NAME's interval is closed"
+    assert counts["identified_as_superseded"] == 1, "OLD NAME was replaced"
     edges = store.edges(fl.vessel_node_id("v-a"), "identified-as")
-    closed = [e for e in edges if e.t_end is not None]
-    assert [e.props["value"] for e in closed] == ["OLD NAME"]
+    former = [e for e in edges if e.props["superseded_by_later_name"]]
+    assert [e.props["value"] for e in former] == ["OLD NAME"]
+
+
+def test_a_closed_interval_with_no_successor_is_not_a_former_identity(store):
+    """The bug the first live run exposed: 8,724 of 8,724 intervals came back
+    closed, because GFW's transmissionDateTo is the end of the window we
+    queried. Reading closure as replacement labelled the whole fleet as having
+    changed identity."""
+    fl.populate(store)
+    # v-b has one interval, open-ended, and is nobody's predecessor
+    edges = store.edges(fl.vessel_node_id("v-b"), "identified-as")
+    assert len(edges) == 1
+    assert edges[0].props["superseded_by_later_name"] is False
+
+    # and the closed-but-unreplaced case must behave the same way
+    solo = {"v-solo": {"intervals": [
+        {"ship_name": "ONLY NAME", "valid_from": T0,
+         "valid_to": T0 + timedelta(days=5), "record_kind": "registry"}]}}
+    fl.add_vessels(store, solo)
+    total, superseded = fl.add_identities(store, solo)
+    assert total == 1
+    assert superseded == 0, "a closed interval alone is not a rename"
+
+
+def test_re_using_the_same_name_later_is_not_a_supersession(store):
+    """Two intervals, same name — GFW split the record, the ship did not
+    rename."""
+    same = {"v-same": {"intervals": [
+        {"ship_name": "SAME NAME", "valid_from": T0,
+         "valid_to": T0 + timedelta(days=5), "record_kind": "registry"},
+        {"ship_name": "Same  Name", "valid_from": T0 + timedelta(days=6),
+         "valid_to": None, "record_kind": "self_reported"},
+    ]}}
+    fl.add_vessels(store, same)
+    total, superseded = fl.add_identities(store, same)
+    assert total == 2
+    assert superseded == 0
 
 
 def test_no_ownership_edges_are_synthesised(store):
