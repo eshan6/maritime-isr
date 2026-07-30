@@ -17,7 +17,7 @@ from datetime import date, datetime, timezone
 import pandas as pd
 import pyarrow as pa
 
-from .. import tiling
+from .. import h3util as tiling
 from ..config import PIPELINE_VERSION
 from ..provenance import now_iso
 from ..schemas import DETECTION, SANCTIONS_ENTRY

@@ -26,7 +26,7 @@ import pandas as pd
 
 from ..config import (HYPOTHESIS_SPEED_GATE_KN, PIPELINE_VERSION,
                       TRACK_BREAK_DAYS)
-from .. import tiling
+from .. import h3util as tiling
 from .kalman import KN_TO_MS, TrackState, epoch_s, filter_smooth
 
 MIN_REAL_POINTS = 3

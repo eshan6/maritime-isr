@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 import pandas as pd
 import pyarrow as pa
 
-from .. import tiling
+from .. import h3util as tiling
 from ..provenance import now_iso
 from ..schemas import AIS_POSITION
 

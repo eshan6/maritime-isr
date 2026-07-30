@@ -21,7 +21,7 @@ import pandas as pd
 from ..config import (ENCOUNTER_MAX_SOG_KN, ENCOUNTER_MIN_MINUTES,
                       ENCOUNTER_RADIUS_M, LOITER_MAX_SOG_KN, LOITER_MIN_HOURS,
                       PORT_RADIUS_KM)
-from .. import tiling
+from .. import h3util as tiling
 from .kalman import epoch_s
 
 RESAMPLE_S = 300

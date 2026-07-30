@@ -189,9 +189,13 @@ import by hand with `--path`), and GFW SAR (offline upstream since 2026-07-03).
   `bastion-product-roadmap.md` -> `maritime-isr-product-roadmap.md`, which
   completes ADR-012. Reading them produced ADR-014 (Phase 0 criteria amended) and
   upgraded the H3 finding to ADR-015.
-- **TWO H3 helpers at THREE resolutions — a live defect, now ADR-015.** Upgraded
-  from "stray constant" after reading the spec: this is a functional break, not
-  cosmetic.
+- ~~TWO H3 helpers at THREE resolutions.~~ **FIXED 2026-07-29 (ADR-015).**
+  `tiling.py` deleted, `h3util` is the only helper, all five resolutions
+  (4/6/7/8/9) declared there and computed directly from lat/lon.
+  `landing.stamp_h3` now stamps every resolution, so ingest and fusion tables
+  **can** join. Fusion baselines re-measured and unchanged (96.9% / 100% / 75%),
+  as expected from preserving res 6. Guard tests keep it from regressing.
+  Historical detail below.
 
   ```
   tiling.py  res 6 (H3_RESOLUTION)  -> detect/pipeline, fusion/associate,

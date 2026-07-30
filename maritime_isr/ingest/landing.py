@@ -33,7 +33,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from ..config import cfg
-from ..h3util import index_both
+from ..h3util import index_all, index_both
 from ..schemas import git_sha, utcnow
 
 __all__ = [
@@ -103,16 +103,25 @@ def stamp_envelope(
 
 
 def stamp_h3(row: dict, lat_key: str = "lat", lon_key: str = "lon") -> dict:
-    """Stamp h3_r7/h3_r9 from a row's position, if it has one.
+    """Stamp a cell for EVERY project resolution (4, 6, 7, 8, 9) onto a row.
 
-    Rows without a usable position are left alone — a port visit keyed only to a
+    Previously this stamped only res 7 and 9, while the fusion core joins on
+    res 6 — so ingest tables and fusion tables could not be joined at all
+    (ADR-015). Stamping all of them removes the mismatch permanently and, more
+    importantly, removes any future temptation to derive a coarse cell from a
+    fine one, which disagrees with direct computation for ~7% of positions.
+
+    Each resolution is computed independently from lat/lon. The cost is a few
+    short strings per row — negligible against the join correctness it buys.
+
+    Rows without a usable position are left alone: a port visit keyed only to a
     port id has no coordinate of its own until the port table is joined.
     """
     lat, lon = row.get(lat_key), row.get(lon_key)
     if lat is None or lon is None:
         return row
     try:
-        row["h3_r7"], row["h3_r9"] = index_both(float(lat), float(lon))
+        row.update(index_all(float(lat), float(lon)))
     except (TypeError, ValueError):
         pass
     return row

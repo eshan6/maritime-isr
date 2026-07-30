@@ -18,7 +18,7 @@ import pyarrow as pa
 from ..config import PIPELINE_VERSION
 from ..provenance import now_iso
 from ..storage import conformed
-from .. import schemas, tiling
+from .. import h3util as tiling, schemas
 from .builder import BuiltTrack, build_tracks
 from .coverage import CoverageModel, SatPassSchedule, classify_gaps
 from .features import detect_encounters, extract_features

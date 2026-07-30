@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 import numpy as np
 import pyarrow as pa
 
-from .. import tiling
+from .. import h3util as tiling
 from ..config import AOI_V1, PIPELINE_VERSION
 from ..provenance import now_iso, stamp
 from ..schemas import DETECTION

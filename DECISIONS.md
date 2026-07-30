@@ -336,6 +336,47 @@ tables **cannot be joined**, and any attempt to do so silently returns nothing.
 
 ---
 
+### ADR-015 — implemented 2026-07-29
+
+Two corrections to the decision as originally written:
+
+**There are FIVE resolutions in use, not four.** The audit missed
+`COVER_RES = 4` in `tracks/coverage.py` (coverage is a regional property) and
+`ENC_RES = 7` in `tracks/features.py`. The full set is **4, 6, 7, 8, 9**, and
+`h3util.RESOLUTIONS` now declares all of them.
+
+**`DEFAULT_RES` was deliberately kept at 6**, matching the old `tiling.py`
+default. The decision said to fix the structure, not pick a winner, so fusion's
+join resolution is unchanged and its behaviour is untouched by the refactor.
+
+**What actually makes ingest and fusion joinable** is not the single helper on
+its own — it is that `landing.stamp_h3` now stamps a cell at **every** project
+resolution onto each located row. Any consumer joins at the resolution it needs
+and nobody is tempted to derive one. Cost is a few short strings per row.
+
+**Baselines re-measured on the synthetic suite, 2026-07-29, after the change:**
+
+```
+association accuracy   96.9%  (65 non-ambiguous contacts, target >=85%)
+dark-vessel precision  100.0% (6 flagged, exit >=70%)
+dark-vessel recall      75.0% (of 8 ghosts above the size floor)
+```
+
+**Identical to the pre-change figures** — which is the expected result of
+preserving res 6, and is reported here as a re-measurement rather than a
+carry-forward. Had they shifted, that would have signalled an accidental
+behaviour change rather than a clean refactor.
+
+Guarded by tests that assert: `tiling.py` stays deleted; no module outside
+`h3util` computes cells (the one exception, `laptop_doctor`, verifies the h3 v4
+API name exists and is documented as such); `cell_to_parent` appears nowhere;
+and — protecting the *premise* rather than just the conclusion — that
+parent-vs-direct disagreement is still measurably non-zero, so a future h3
+release that made the hierarchy nested would fail the test and prompt revisiting
+this ADR instead of obeying it blindly.
+
+---
+
 ## ADR-016 — Direct sanctions matching replaces ownership traversal on free data *(Accepted)*
 **Amends the Phase 4 exit criterion. Companion to ADR-014.**
 

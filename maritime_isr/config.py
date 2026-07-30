@@ -340,7 +340,10 @@ PORT_RADIUS_KM = 8.0          # inside this of a known port, loitering is a bert
 # H3 resolution 6 ≈ 36 km² cells: coarse enough for cheap spatial joins in
 # Phase 3 gating, fine enough that a cell is smaller than a Sentinel-1
 # uncertainty cone after a few hours of AIS silence.
-H3_RESOLUTION = 6
+# Kept as a name only. The single source of truth for resolutions is
+# h3util.RESOLUTIONS / h3util.DEFAULT_RES (ADR-015) — do not add resolution
+# constants here, and do not hard-code an integer resolution in any module.
+H3_RESOLUTION = 6  # == h3util.R6 / h3util.DEFAULT_RES
 
 
 AOI_V1 = AOI()  # arabian_sea_v1, 5-25N / 60-78E — same locked box as cfg.aoi

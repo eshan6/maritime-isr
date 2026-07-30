@@ -36,7 +36,7 @@ import pandas as pd
 
 from ..config import (DARK_MIN_LENGTH_M, DARK_SCORE_THRESHOLD,
                       STATIC_MIN_SCENES, STATIC_MIN_SPAN_DAYS, STATIC_RADIUS_M)
-from .. import tiling
+from .. import h3util as tiling
 from ..tracks.coverage import CoverageModel
 
 STATIC_RES = 8   # ~460 m cells for static clustering

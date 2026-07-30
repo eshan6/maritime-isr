@@ -23,7 +23,7 @@ import pyarrow as pa
 
 from ..config import PIPELINE_VERSION
 from ..provenance import now_iso
-from .. import schemas, tiling
+from .. import h3util as tiling, schemas
 
 SPIRE_MESSAGES_URL = "https://api.spire.com/vessels/messages"
 

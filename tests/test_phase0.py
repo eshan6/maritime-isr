@@ -9,7 +9,7 @@ import pytest
 from maritime_isr.config import AOI_V1
 from maritime_isr.connectors import ais, registries, sentinel1
 from maritime_isr.storage import raw
-from maritime_isr import tiling
+from maritime_isr import h3util as tiling
 
 TS = datetime(2026, 7, 10, 6, 0, 0, tzinfo=timezone.utc)
 

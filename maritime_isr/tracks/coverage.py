@@ -24,7 +24,7 @@ import numpy as np
 import pandas as pd
 
 from ..config import GAP_MIN_MINUTES, GAP_NOMINAL_MULT
-from .. import tiling
+from .. import h3util as tiling
 from .kalman import epoch_s
 
 COVER_RES = 4          # ~1,770 km² cells: coverage is a regional property

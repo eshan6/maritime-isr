@@ -39,7 +39,7 @@ from scipy.optimize import linear_sum_assignment
 
 from ..config import (ASSOC_AMBIGUITY_MARGIN, ASSOC_GATE_BUFFER_M,
                       ASSOC_MAX_TRACK_AGE_H, ASSOC_SCORE_FLOOR)
-from .. import tiling
+from .. import h3util as tiling
 
 SIGMA_MEAS_M = 60.0        # SAR geolocation + smoothing residual
 LENGTH_REL_SIGMA = 0.25    # SAR length estimate ~18% + registry slop
