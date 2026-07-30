@@ -176,23 +176,38 @@ def add_flagged_to(store, vessels: dict[str, dict]) -> int:
 
 
 def add_identities(store, vessels: dict[str, dict]) -> tuple[int, int]:
-    """identified-as edges; a closed interval is the roadmap's formerly-.
+    """identified-as edges, and the ones that are genuinely *formerly*-.
 
-    Returns (total edges, closed edges). GFW supplies `valid_to` on an identity
-    record that has stopped transmitting, so the closure is *their* record of
-    the interval ending, not our inference from two snapshots.
+    Returns (total edges, superseded edges).
+
+    **A closed interval is NOT a former identity, and treating it as one was
+    wrong.** The first live run made that obvious: 8,724 of 8,724 intervals came
+    back closed — 100%. GFW's `transmissionDateTo` is the last transmission
+    *inside the window we queried*, so every record ends simply because our
+    query ended. Reading that as "this identity was superseded" would have
+    labelled the entire fleet as having changed identity.
+
+    The roadmap's `formerly-identified-as` needs real evidence of replacement:
+    the same vessel carrying a **different** name in a **later** interval. That
+    is what is counted here. An interval closing with no successor means only
+    that GFW stopped hearing that name in our window.
     """
-    total = closed = 0
+    total = superseded = 0
     for vid, rec in vessels.items():
-        for iv in rec.get("intervals", []):
-            name = iv.get("ship_name")
-            if not name:
-                continue
+        intervals = [iv for iv in rec.get("intervals", [])
+                     if iv.get("ship_name") and _epoch(iv.get("valid_from")) is not None]
+        # already sorted by valid_from in load_vessels()
+        for i, iv in enumerate(intervals):
+            name = iv["ship_name"]
+            key = normalise_name(name)
             t0 = _epoch(iv.get("valid_from"))
-            if t0 is None:
-                continue
             t1 = _epoch(iv.get("valid_to"))
-            nid = f"id:name:{normalise_name(name)}"
+            # superseded only if some LATER interval carries a DIFFERENT name
+            later_names = {normalise_name(x["ship_name"])
+                           for x in intervals[i + 1:]}
+            later_names.discard(None)
+            is_superseded = bool(later_names - {key})
+            nid = f"id:name:{key}"
             store.upsert_node(nid, "identity", dict(kind="name", value=name))
             store.add_edge(
                 "identified-as", vessel_node_id(vid), nid,
@@ -201,12 +216,15 @@ def add_identities(store, vessels: dict[str, dict]) -> tuple[int, int]:
                 observed_at=t0, source="gfw-vessels",
                 source_ref=str(iv.get("source_ref") or f"{vid}:name:{name}"),
                 props=dict(kind="name", value=name,
-                           record_kind=iv.get("record_kind")),
+                           record_kind=iv.get("record_kind"),
+                           # the distinction the 100%-closed result forced
+                           superseded_by_later_name=is_superseded,
+                           interval_closed=t1 is not None),
             )
             total += 1
-            if t1 is not None:
-                closed += 1
-    return total, closed
+            if is_superseded:
+                superseded += 1
+    return total, superseded
 
 
 # --------------------------------------------------------------------------
@@ -418,9 +436,11 @@ def populate(store, *, only_intentional_gaps: bool = True) -> dict[str, int]:
     known = set(vessels)
     counts = {"vessels_from_identity": add_vessels(store, vessels)}
     counts["flagged_to"] = add_flagged_to(store, vessels)
-    ident_total, ident_closed = add_identities(store, vessels)
+    ident_total, ident_superseded = add_identities(store, vessels)
     counts["identified_as"] = ident_total
-    counts["identified_as_closed"] = ident_closed
+    # renamed from identified_as_closed: closure is the end of GFW's query
+    # window, not a change of identity. See add_identities().
+    counts["identified_as_superseded"] = ident_superseded
     counts["met_with"], counts["encounters_skipped"] = add_encounters(store, known)
     counts["docked_at"], counts["port_visits_skipped"] = add_port_visits(store, known)
     counts["reported_gap"], counts["gaps_skipped"] = add_gaps(
@@ -433,17 +453,42 @@ def populate(store, *, only_intentional_gaps: bool = True) -> dict[str, int]:
 
 
 def decay_summary(store, *, at: float | None = None,
-                  usable: float = 0.5) -> dict:
+                  usable: float = 0.5, history: bool = False) -> dict:
     """How much of the graph has rotted, by edge type.
 
     `usable` is the confidence below which an edge should not carry an
     analyst-facing claim on its own. There is nothing sacred about 0.5 — it is
     stated here rather than buried so the number can be argued with.
+
+    **Counts the CURRENT graph, not the append-only history.** The store keeps
+    every assertion, so a re-run — or an interrupted run followed by a re-run —
+    leaves several rows per (type, src, dst) and only the newest one is live.
+    Summing over raw rows double-counts: the first live run reported 17,978
+    `flagged-to` edges over 8,989 real ones, and 10,220 "already decayed" over a
+    correspondingly smaller true figure. Both were history, counted as if
+    current. `history=True` gives the raw view when that is what you want.
     """
     at = time.time() if at is None else at
     reg = store.edge_registry()
-    rows = store._con.execute(
-        "SELECT edge_type, base_confidence, observed_at FROM edges").fetchall()
+    if history:
+        rows = store._con.execute(
+            "SELECT edge_type, base_confidence, observed_at FROM edges").fetchall()
+    else:
+        # newest assertion per triple — the same latest-wins rule store.edges()
+        # applies on read, expressed in SQL so it holds over the whole graph
+        rows = store._con.execute(
+            """
+            SELECT e.edge_type, e.base_confidence, e.observed_at
+            FROM edges e
+            JOIN (SELECT edge_type, src, dst, MAX(rowid) AS rid
+                  FROM edges
+                  WHERE (edge_type, src, dst, observed_at) IN
+                        (SELECT edge_type, src, dst, MAX(observed_at)
+                         FROM edges GROUP BY edge_type, src, dst)
+                  GROUP BY edge_type, src, dst) k
+              ON e.rowid = k.rid
+            """
+        ).fetchall()
     out: dict[str, dict] = {}
     for etype, base, observed in rows:
         hl = reg.get(etype, {}).get("half_life_days")

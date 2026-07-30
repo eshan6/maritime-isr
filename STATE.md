@@ -267,11 +267,67 @@ having genuinely assessed gaps and flagged none (a real negative). **Run it agai
 after the fix to see which of the three we are in** — if the column is entirely
 null, the mapping needs checking before any conclusion about vessels.
 
+### 4. THE DECIDING NUMBER — a graph UI has nothing to draw
+
+`python tools/graph_report.py`, 352s over the landed tables:
+
+```
+  IMO-matched (findings): 98 vessel(s)
+      with >= 1 encounter edge :    0  (0%)
+      with >= 3 encounter edges:    0  (0%)
+  all matched (any tier): 126 vessel(s)
+      with >= 1 encounter edge :    0  (0%)
+  126 of 126 matched vessels have NO encounter neighbour at all (100%).
+  DENSEST SANCTIONED NEIGHBOURHOOD: None.
+```
+
+**Answer to the question the exercise was run to settle: do not build a graph
+UI.** Not "not yet" — on this data there is no network. The arithmetic behind it
+is simple and was visible in the ingest counts all along: **14 encounters landed
+for the entire AOI over 8 weeks**, collapsing to 8 distinct vessel pairs, drawn
+from a population of 9,184 vessels. The chance that any of those 8 pairs touches
+the 126 sanctions-matched hulls was always small, and it did not happen.
+
+The graph itself is real and healthy — 17,562 nodes, 20,026 current edges, decay
+running on real observation times. It is simply **star-shaped**: vessels connect
+to flags, ports and identities, and not to each other. Every path between two
+vessels runs through a shared port or flag, which is true of thousands of
+unrelated ships and carries no signal.
+
+**What to build instead: a ranked table.** The product that the landed data
+actually supports is a sorted list of the 98 IMO-matched vessels with their OFAC
+program, name disagreement, flag, and behavioural counts (loitering events, port
+visits, distance from shore), each row expandable to its evidence and export.
+That is the M6 demo path — map, ranked list, plain-English reason, export — with
+the network view removed. Nothing else in the demo definition changes.
+
+**Revisit the graph decision when** encounter volume rises by roughly two orders
+of magnitude: a wider time window, a larger AOI, or a paid feed. The populator
+and the report stay in the tree for exactly that — re-running them is the test.
+
+### Three reporting bugs found in that output, all fixed
+
+1. **Decay counted history as current.** `decay_summary` summed raw rows, so an
+   interrupted run followed by a re-run showed 17,978 `flagged-to` edges over
+   8,989 real ones and 10,220 "already decayed" against a much smaller true
+   figure. Now resolves latest-per-triple, matching what `store.edges()` returns
+   on read. `history=True` gives the raw view deliberately.
+
+2. **"Closed interval = former identity" was wrong.** 8,724 of 8,724 intervals
+   came back closed — 100%, which should have been read as a bug on sight. GFW's
+   `transmissionDateTo` is the last transmission *inside the window we queried*,
+   so every record ends because our query ended. Treating that as supersession
+   labelled the entire fleet as having changed identity. `formerly-identified-as`
+   now requires real evidence: the same vessel carrying a **different** name in a
+   **later** interval. The count is renamed `identified_as_superseded`.
+
+3. **The report did not say when history exceeded current.** It now does, so the
+   append-only store's re-run behaviour is visible rather than confusing.
+
 ### Still outstanding
 
-**The connectivity number does not exist yet.** `graph-populate` did not run —
-the `maritime-isr` console script is not installed on the laptop. Use
-`python tools/graph_report.py`, which is the same code.
+**A second OFAC snapshot.** It unblocks the freshness split (§2) and is the only
+cheap thing on the list — one `registries --only ofac` run on a later date.
 
 ---
 

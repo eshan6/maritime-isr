@@ -91,6 +91,10 @@ def report(store, *, at: float) -> None:
         print(f"  {t:<24} {n:>8,}")
     print(f"  {'TOTAL':<24} {sum(census.values()):>8,}")
     print(f"  {'rows incl. history':<24} {store.n_edges():>8,}")
+    if store.n_edges() > sum(census.values()):
+        print("  (history exceeds current: the store is append-only, so a re-run — or")
+        print("   an interrupted run followed by a re-run — leaves superseded rows.")
+        print("   Every count below is over CURRENT edges, not history.)")
 
     # ---- decay -----------------------------------------------------------
     print("\n" + RULE)
