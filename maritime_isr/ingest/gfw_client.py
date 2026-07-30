@@ -142,11 +142,22 @@ def post_paginated(path: str, body: dict, *, limit: int = PAGE_SIZE) -> Iterator
             return
         for e in entries:
             yield e
-        if len(entries) < limit:
-            return
         offset += len(entries)
 
-    print(f"[gfw] WARNING: hit MAX_PAGES ({MAX_PAGES}) on {path} — results may be truncated")
+        # Progress, because silence during a long pull is indistinguishable from
+        # a hang. A 24,153-row loitering pull printed nothing for eight minutes
+        # on the first live run and looked stuck.
+        total = payload.get("total")
+        if total:
+            print(f"[gfw]   {path}: {offset:,} of {total:,} fetched")
+        else:
+            print(f"[gfw]   {path}: {offset:,} fetched")
+
+        if len(entries) < limit:
+            return
+
+    print(f"[gfw] WARNING: hit MAX_PAGES ({MAX_PAGES}) on {path} after {offset:,} rows "
+          "— results are TRUNCATED. Narrow the window or raise MAX_PAGES.")
 
 
 def get_json(path: str, params: dict | None = None) -> Any:

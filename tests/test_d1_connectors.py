@@ -472,3 +472,140 @@ def test_no_connector_writes_into_the_fusion_stores():
         assert "write_detections" not in src, (
             f"{module.__name__} must not write into the detections store — "
             "a schema adapter is a separate, deliberate step")
+
+
+# ==========================================================================
+# mapping gaps found on the first live run, 2026-07-29
+#
+# These fixtures are copied from ACTUAL landed payloads, not invented. The
+# previous fixtures encoded my own assumptions and so could not catch a wrong
+# field name — which is exactly how these four gaps survived to production.
+# ==========================================================================
+
+LIVE_GAP = {
+    "id": "bad1088734ad2b7ac86d16d9e72e6e0e",
+    "type": "gap",
+    "start": "2026-06-08T01:45:37.000Z",
+    "end": "2026-06-08T14:04:36.000Z",
+    "position": {"lat": 10.1007, "lon": 60.6156},
+    "distances": {"startDistanceFromPortKm": 1015.078, "endDistanceFromPortKm": 1054.43575,
+                  "startDistanceFromShoreKm": 691, "endDistanceFromShoreKm": 742},
+    "gap": {"distanceKm": "53.329081410422006", "durationHours": 12.3,
+            "impliedSpeedKnots": "2.34108945769118", "intentionalDisabling": True,
+            "positions12HoursBeforeSat": "14", "positionsPerDaySatReception": 104.86736686956927,
+            "offPosition": {"lat": 10.10, "lon": 60.61},
+            "onPosition": {"lat": 10.42, "lon": 60.93}},
+    "vessel": {"id": "324afd84e-ee92-ee99-0bf7-c56a66f99624", "ssvid": "636026120",
+               "flag": None, "name": None, "type": None},
+}
+
+LIVE_PORT_VISIT = {
+    "id": "b3f54b1b1e183603802b107d3a0766b0",
+    "type": "port_visit",
+    "start": "2012-01-04T06:18:14.000Z",
+    "end": "2026-06-06T12:01:31.000Z",
+    "position": {"lat": 22.5032, "lon": 69.6557},
+    "distances": {"startDistanceFromPortKm": 0, "endDistanceFromPortKm": 0,
+                  "startDistanceFromShoreKm": 9, "endDistanceFromShoreKm": 5},
+    "port_visit": {
+        "confidence": "3", "durationHrs": 126413.7213888889,
+        "visitId": "cc6a1dcf47308613d2cbe43685a4d297",
+        "startAnchorage": {"anchorageId": "39572851", "id": "ind-mundra", "name": "MUNDRA",
+                           "flag": "IND", "lat": 22.74, "lon": 69.70, "atDock": True,
+                           "distanceFromShoreKm": 2},
+        "intermediateAnchorage": {"anchorageId": "3956df43", "id": "ind-vadinar",
+                                  "name": "VADINAR", "flag": "IND", "lat": 22.35, "lon": 69.72},
+        "endAnchorage": {"anchorageId": "3956df43", "id": "ind-vadinar", "name": "VADINAR",
+                         "flag": "IND", "lat": 22.35, "lon": 69.72},
+    },
+    "vessel": {"id": "d88dfa283-31bc-8e02-088c-206c25c73d59", "ssvid": "419759000",
+               "flag": "IND", "name": None, "type": "other"},
+}
+
+
+def test_gap_captures_gfw_intentional_disabling():
+    """GFW's own dark-vessel judgement was being dropped entirely."""
+    r = gfw_events.map_event(LIVE_GAP, "gaps")
+    assert r["gfw_intentional_disabling"] is True
+
+
+def test_gap_captures_gfw_coverage_evidence():
+    """The basis for GFW's judgement — how much they could actually hear.
+
+    Per CLAUDE.md §6 we must never re-assert a gap as our own finding, so
+    keeping GFW's evidence alongside their verdict is what makes that possible.
+    """
+    r = gfw_events.map_event(LIVE_GAP, "gaps")
+    assert r["gap_positions_12h_before_sat"] == 14.0
+    assert r["gap_positions_per_day_sat"] == pytest.approx(104.867, rel=1e-4)
+
+
+def test_gap_coerces_gfw_string_numerics():
+    """GFW returns distanceKm and impliedSpeedKnots as STRINGS."""
+    r = gfw_events.map_event(LIVE_GAP, "gaps")
+    assert isinstance(r["gap_distance_km"], float)
+    assert r["gap_distance_km"] == pytest.approx(53.329, rel=1e-4)
+    assert isinstance(r["gap_implied_speed_kn"], float)
+
+
+def test_gap_captures_off_and_on_positions():
+    r = gfw_events.map_event(LIVE_GAP, "gaps")
+    assert r["gap_off_lat"] == 10.10
+    assert r["gap_on_lon"] == 60.93
+
+
+@pytest.mark.parametrize("payload,kind", [(LIVE_GAP, "gaps"), (LIVE_PORT_VISIT, "port_visits")])
+def test_distances_are_captured_on_every_event_type(payload, kind):
+    """This block is what makes loitering interpretable, and removes the WPI
+    dependency (ADR-016). It is present on every event type."""
+    r = gfw_events.map_event(payload, kind)
+    assert r["start_distance_from_port_km"] is not None
+    assert r["end_distance_from_shore_km"] is not None
+
+
+def test_port_visit_confidence_is_found_where_it_actually_lives():
+    """Only port visits carry confidence, nested at port_visit.confidence.
+
+    Reading ev["confidence"] wrote null on ~99% of rows while the envelope
+    looked populated.
+    """
+    r = gfw_events.map_event(LIVE_PORT_VISIT, "port_visits")
+    assert r["gfw_confidence_raw"] == "3"
+    assert r["confidence"] == 0.6
+
+
+def test_gap_and_loitering_have_no_event_level_confidence():
+    """Confirms the negative: absence here is GFW's, not a mapping bug."""
+    r = gfw_events.map_event(LIVE_GAP, "gaps")
+    assert r["gfw_confidence_raw"] is None
+    assert r["confidence"] is None
+
+
+def test_port_visit_captures_all_three_anchorages():
+    """3,000 port visits x 3 anchorages is a port gazetteer for the AOI."""
+    r = gfw_events.map_event(LIVE_PORT_VISIT, "port_visits")
+    assert r["start_anchorage_id"] == "ind-mundra"
+    assert r["start_anchorage_name"] == "MUNDRA"
+    assert r["start_anchorage_lat"] == 22.74
+    assert r["start_anchorage_at_dock"] is True
+    assert r["anchorage_id"] == "ind-vadinar"
+    assert r["end_anchorage_name"] == "VADINAR"
+    assert r["port_visit_id"] == "cc6a1dcf47308613d2cbe43685a4d297"
+
+
+def test_anchorage_fields_are_present_even_when_absent():
+    """Stable schema: a gap has no anchorages but must still have the columns,
+    or Parquet partitions land with different schemas and the union breaks."""
+    r = gfw_events.map_event(LIVE_GAP, "gaps")
+    for f in ("start_anchorage_id", "anchorage_name", "end_anchorage_lat"):
+        assert f in r and r[f] is None
+
+
+def test_live_payloads_still_land_cleanly():
+    from maritime_isr.ingest.landing import land_table, read_table
+
+    rows = [gfw_events.map_event(LIVE_GAP, "gaps")]
+    land_table(rows, table="gfw_ais_gaps", key_fields=("event_id",), day_field="start_time")
+    got = read_table("gfw_ais_gaps")
+    assert len(got) == 1
+    assert got[0]["gfw_intentional_disabling"] is True

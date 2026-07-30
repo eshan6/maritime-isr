@@ -113,6 +113,54 @@ def _counterpart_vessel(ev: dict) -> dict:
     return {}
 
 
+def _f(v) -> float | None:
+    """Coerce to float. GFW returns some numerics as strings, e.g. distanceKm."""
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _confidence_raw(ev: dict):
+    """Find GFW's confidence, which is NOT where the docs imply.
+
+    Measured on live payloads 2026-07-29: encounters, loitering and gaps carry
+    **no** event-level `confidence` at all. Only port visits do, nested at
+    `port_visit.confidence`. Reading `ev["confidence"]` therefore wrote null on
+    ~99% of rows while the envelope looked populated — worse than an obvious
+    gap, because it reads as "GFW had no opinion" rather than "we looked in the
+    wrong place."
+    """
+    if ev.get("confidence") is not None:
+        return ev["confidence"]
+    pv = ev.get("port_visit") or ev.get("portVisit")
+    if isinstance(pv, dict) and pv.get("confidence") is not None:
+        return pv["confidence"]
+    enc = ev.get("encounter")
+    if isinstance(enc, dict) and enc.get("confidence") is not None:
+        return enc["confidence"]
+    return None
+
+
+def _anchorage_fields(anch, prefix: str) -> dict:
+    """Flatten one GFW anchorage record under `prefix`."""
+    if not isinstance(anch, dict):
+        return {f"{prefix}_{k}": None
+                for k in ("id", "name", "flag", "lat", "lon", "at_dock",
+                          "distance_from_shore_km")}
+    return {
+        f"{prefix}_id": anch.get("id"),
+        f"{prefix}_name": anch.get("name"),
+        f"{prefix}_flag": anch.get("flag"),
+        f"{prefix}_lat": _f(anch.get("lat")),
+        f"{prefix}_lon": _f(anch.get("lon")),
+        f"{prefix}_at_dock": anch.get("atDock"),
+        f"{prefix}_distance_from_shore_km": _f(anch.get("distanceFromShoreKm")),
+    }
+
+
 def map_event(ev: dict, kind: str) -> dict | None:
     """Map one GFW event into a canonical row. Returns None if unusable."""
     event_id = ev.get("id") or ev.get("eventId")
@@ -131,8 +179,13 @@ def map_event(ev: dict, kind: str) -> dict | None:
 
     vessel = _primary_vessel(ev)
     other = _counterpart_vessel(ev)
-    conf_raw = ev.get("confidence")
+    conf_raw = _confidence_raw(ev)
     confidence = _CONFIDENCE_MAP.get(conf_raw)
+    dist = ev.get("distances") or {}
+    gap = ev.get("gap") if isinstance(ev.get("gap"), dict) else {}
+    pv = ev.get("port_visit") or ev.get("portVisit") or {}
+    if not isinstance(pv, dict):
+        pv = {}
 
     duration_h = ev.get("durationHours")
     if duration_h is None and start and end:
@@ -161,18 +214,53 @@ def map_event(ev: dict, kind: str) -> dict | None:
         "counterpart_flag": other.get("flag"),
         "encounter_type": (ev.get("encounter") or {}).get("type") if isinstance(
             ev.get("encounter"), dict) else None,
-        # port visits
-        "port_id": (ev.get("port_visit") or ev.get("portVisit") or {}).get("intermediateAnchorage",
-                                                                          {}).get("id")
-        if isinstance(ev.get("port_visit") or ev.get("portVisit"), dict) else None,
-        "port_name": (ev.get("port_visit") or ev.get("portVisit") or {}).get("intermediateAnchorage",
-                                                                            {}).get("name")
-        if isinstance(ev.get("port_visit") or ev.get("portVisit"), dict) else None,
-        # gaps: how far the vessel moved while silent, if GFW said
-        "gap_distance_km": (ev.get("gap") or {}).get("distanceKm") if isinstance(
-            ev.get("gap"), dict) else None,
-        "gap_implied_speed_kn": (ev.get("gap") or {}).get("impliedSpeedKnots") if isinstance(
-            ev.get("gap"), dict) else None,
+
+        # ---- distance context, present on EVERY event type ------------------
+        # This is what makes "loitering" interpretable. Slow 2 km off Mumbai is
+        # an anchorage queue; slow 400 km offshore is worth looking at. GFW
+        # pre-computes both, which removes our dependency on the World Port
+        # Index for this purpose entirely (ADR-016).
+        "start_distance_from_port_km": _f(dist.get("startDistanceFromPortKm")),
+        "end_distance_from_port_km": _f(dist.get("endDistanceFromPortKm")),
+        "start_distance_from_shore_km": _f(dist.get("startDistanceFromShoreKm")),
+        "end_distance_from_shore_km": _f(dist.get("endDistanceFromShoreKm")),
+
+        # ---- port visits: full anchorage records ----------------------------
+        # Each carries lat/lon, name and flag, so 3,000 port visits are also a
+        # port gazetteer for the AOI — better targeted than WPI, because these
+        # are the anchorages actually in use here.
+        "port_visit_id": pv.get("visitId"),
+        **_anchorage_fields(pv.get("startAnchorage"), "start_anchorage"),
+        **_anchorage_fields(pv.get("intermediateAnchorage"), "anchorage"),
+        **_anchorage_fields(pv.get("endAnchorage"), "end_anchorage"),
+        # kept for backwards compatibility with rows landed before 2026-07-29
+        "port_id": (pv.get("intermediateAnchorage") or {}).get("id")
+        if isinstance(pv.get("intermediateAnchorage"), dict) else None,
+        "port_name": (pv.get("intermediateAnchorage") or {}).get("name")
+        if isinstance(pv.get("intermediateAnchorage"), dict) else None,
+
+        # ---- gaps ----------------------------------------------------------
+        "gap_distance_km": _f(gap.get("distanceKm")),
+        "gap_implied_speed_kn": _f(gap.get("impliedSpeedKnots")),
+        "gap_duration_hours": _f(gap.get("durationHours")),
+        # GFW'S OWN dark-vessel judgement. Arguably the single most valuable
+        # field in the entire pull, and it was being dropped on the floor.
+        # Recorded as GFW's assertion, never re-asserted as ours: per
+        # CLAUDE.md §6 a gap outside demonstrated coverage is not evidence of
+        # intentional silence, and GFW's coverage model is not ours.
+        "gfw_intentional_disabling": gap.get("intentionalDisabling"),
+        # GFW's coverage evidence for that judgement — how much they could hear.
+        "gap_positions_12h_before_sat": _f(gap.get("positions12HoursBeforeSat")),
+        "gap_positions_per_day_sat": _f(gap.get("positionsPerDaySatReception")),
+        "gap_off_lat": (gap.get("offPosition") or {}).get("lat")
+        if isinstance(gap.get("offPosition"), dict) else None,
+        "gap_off_lon": (gap.get("offPosition") or {}).get("lon")
+        if isinstance(gap.get("offPosition"), dict) else None,
+        "gap_on_lat": (gap.get("onPosition") or {}).get("lat")
+        if isinstance(gap.get("onPosition"), dict) else None,
+        "gap_on_lon": (gap.get("onPosition") or {}).get("lon")
+        if isinstance(gap.get("onPosition"), dict) else None,
+
         "gfw_confidence_raw": str(conf_raw) if conf_raw is not None else None,
     }
 
