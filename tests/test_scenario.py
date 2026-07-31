@@ -591,3 +591,101 @@ def test_synthetic_gaps_carry_no_gfw_verdict(world):
         assert g.props.get("gfw_intentional_disabling") is None, (
             "a synthetic gap carries a GFW verdict — GFW did not assess these, "
             "and a detector reading that column would be handed the answer")
+
+
+# --------------------------------------------------------------------------
+# 8. real-corpus alignment (added after the operator's profile landed)
+# --------------------------------------------------------------------------
+
+def test_synthetic_null_rates_match_the_real_corpus():
+    """Synthetic rows must not be separable by a single IS NOT NULL filter.
+
+    Measured on the operator's corpus: `gfw_encounters.imo` is 100% null,
+    `gfw_vessel_identity.length_m` 98.6%, `imo` there 74.8%. The generator
+    populated all of them, so `WHERE imo IS NOT NULL` was a perfect synthetic
+    detector and any precision measured on a combined corpus would have been
+    measuring that filter. The track-level separability test passed throughout —
+    the distinction leaked through the columns instead.
+
+    Skipped when no profile is present, because there is then nothing to match.
+    """
+    from maritime_isr.scenario.nulls import NullMask
+
+    profile = CorpusProfile.load()
+    if not profile.known_tables():
+        pytest.skip("no corpus profile — nothing to match null rates against")
+
+    w = ScenarioWorld.new(7, profile)
+    build_cast(w)
+    run_all(w)
+    w.identity.close_window(w.t1)
+
+    from maritime_isr.scenario.land import land_world
+    import maritime_isr.scenario.land as land_mod
+
+    mask = NullMask(profile)
+    # Exercise the mask directly on identity rows rather than landing to disk.
+    rows = []
+    for v in list(w.vessels.values()):
+        row = dict(vessel_id=v.entity_id, imo=str(v.imo), length_m=v.length_m,
+                   tonnage_gt=v.dwt, call_sign=v.call_sign, mmsi=str(v.mmsi))
+        mask.apply(row, table="gfw_vessel_identity", key=v.entity_id)
+        rows.append(row)
+
+    problems = mask.verify()
+    assert not problems, "null rates diverge from the real corpus:\n" + "\n".join(problems)
+
+    # And the specific field that made the whole thing separable.
+    populated = sum(1 for r in rows if r["imo"] is not None)
+    assert populated < len(rows), (
+        "every synthetic identity row carries an IMO; the real corpus leaves "
+        "74.8% of them null, so this column alone separates the two")
+
+
+def test_mmsi_is_never_masked():
+    """Masking the MMSI would break row identity and the track engine."""
+    from maritime_isr.scenario.nulls import NullMask, NEVER_MASK
+    assert "mmsi" in NEVER_MASK
+    assert "vessel_id" in NEVER_MASK and "event_id" in NEVER_MASK
+    p = CorpusProfile.load()
+    m = NullMask(p)
+    assert m.rate("gfw_vessel_identity", "mmsi") is None
+
+
+@pytest.mark.slow
+def test_generation_is_robust_across_seeds():
+    """A corpus that only validates at one seed is not reproducible.
+
+    Seed 8 overran the corpus window through background port calls, because the
+    measured dwell distribution reaches 336 h and a call started three weeks
+    from the end could run past it. Seed 7 happened to fit. Several seeds are
+    checked so a seed-dependent overrun cannot pass again.
+    """
+    for seed in (7, 8, 11, 42):
+        w = ScenarioWorld.new(seed, CorpusProfile.load())
+        build_cast(w)
+        run_all(w)
+        w.identity.close_window(w.t1)
+        rep = validate_world(w)
+        assert rep.ok, f"seed {seed} failed validation:\n{rep.format()}"
+        assert len(w.truth) == 40, f"seed {seed} produced {len(w.truth)} scenarios"
+
+
+def test_measured_tails_are_truncated_with_a_stated_reason():
+    """A 2.3-year 'port visit' is a data artefact, and must be recorded as one.
+
+    The operator's `gfw_port_visits` has p95 = 20,254 hours. The distribution is
+    still used — its body is real and informative — but the implausible tail is
+    rejected and the provenance report says so, rather than silently capping or
+    silently sampling a two-year berth.
+    """
+    p = CorpusProfile.load()
+    if "port_call_dwell_hours" not in (p.raw.get("distributions") or {}):
+        pytest.skip("no measured port-call distribution in the profile")
+    param = p.quantiles("port_call_dwell_hours")
+    assert param.measured
+    assert max(param.value.values()) <= 24 * 14 + 1e-6
+    assert "truncated" in param.rationale, (
+        "the tail was clamped without saying so — a silent cap is how a data "
+        "artefact becomes an unexamined assumption")
+    assert "MEASURED" in param.describe() and "truncated" in param.describe()

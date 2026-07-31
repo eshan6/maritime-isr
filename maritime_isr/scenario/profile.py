@@ -53,7 +53,8 @@ class Param:
 
     def describe(self) -> str:
         if self.measured:
-            return f"MEASURED from {self.n_rows:,} rows of {self.source_table}"
+            base = f"MEASURED from {self.n_rows:,} rows of {self.source_table}"
+            return base + (f" ({self.rationale})" if self.rationale else "")
         return f"ASSUMED — {self.rationale}"
 
 
@@ -163,6 +164,44 @@ DURATION_PRIORS: dict[str, dict] = {
 }
 
 
+#: Physically plausible upper bounds, per distribution. A measured quantile
+#: above these is a data artefact, not a long tail.
+#:
+#: **Measured on the operator's corpus, `port_call_dwell_hours` has p75 = 1,263
+#: hours (52 days) and p95 = 20,254 hours — 2.3 years.** A port visit does not
+#: last 2.3 years. Something in GFW's port-visit events produces degenerate
+#: durations, and sampling from that tail produced background vessels sitting
+#: alongside for months and overrunning the corpus window.
+#:
+#: The distribution is still used — it is real, and its body is informative.
+#: Only the implausible tail is rejected, the truncation is recorded, and the
+#: provenance report says the figure is measured **with its tail truncated**
+#: rather than pretending either that the tail is fine or that the whole
+#: distribution is unusable.
+PLAUSIBLE_MAX_HOURS: dict[str, float] = {
+    "encounter_duration_hours": 72.0,      # 3 days alongside is already extreme
+    "loiter_duration_hours": 24.0 * 30,
+    "port_call_dwell_hours": 24.0 * 14,    # a fortnight alongside is the limit
+    "anchorage_wait_hours": 24.0 * 45,
+    "gap_duration_hours": 24.0 * 30,
+}
+
+
+def truncate_quantiles(key: str, q: dict) -> tuple[dict, float | None]:
+    """Clamp a quantile map to its plausible maximum. Returns (map, rejected).
+
+    `rejected` is the original maximum when truncation occurred, so the caller
+    can say what was thrown away instead of silently discarding it.
+    """
+    cap = PLAUSIBLE_MAX_HOURS.get(key)
+    if cap is None:
+        return q, None
+    worst = max(float(v) for v in q.values())
+    if worst <= cap:
+        return q, None
+    return {k: min(float(v), cap) for k, v in q.items()}, worst
+
+
 def sample_quantiles(q: dict, rng) -> float:
     """Inverse-CDF sample from a quantile map, linearly interpolated.
 
@@ -245,9 +284,15 @@ class CorpusProfile:
         """Quantile map for `key`, measured if the profile carries one."""
         d = self._dist(key)
         if d and d.get("quantiles"):
-            p = Param(key, {float(k): float(v) for k, v in d["quantiles"].items()},
-                      measured=True, n_rows=int(d["n_rows"]),
-                      source_table=d.get("source_table", "?"))
+            raw = {float(k): float(v) for k, v in d["quantiles"].items()}
+            clamped, rejected = truncate_quantiles(key, raw)
+            p = Param(key, clamped, measured=True, n_rows=int(d["n_rows"]),
+                      source_table=d.get("source_table", "?"),
+                      rationale=("" if rejected is None else
+                                 f"tail truncated at "
+                                 f"{PLAUSIBLE_MAX_HOURS[key]:.0f}h; real max "
+                                 f"was {rejected:.0f}h, which is a data "
+                                 f"artefact rather than a duration"))
         else:
             prior = DURATION_PRIORS.get(key)
             if prior is None:
@@ -303,6 +348,38 @@ class CorpusProfile:
                 return k
         return keys[-1]
 
+    # ---- real schemas: types and null rates ----
+    def schema(self, table: str) -> dict:
+        return (self.raw.get("schemas", {}) or {}).get(table, {}) or {}
+
+    def null_rate(self, table: str, field: str) -> float | None:
+        """How often this field is null in the REAL corpus, or None if unknown.
+
+        **This is what stops synthetic rows being separable by a one-line
+        filter.** Measured on the operator's corpus: `gfw_encounters.imo` is
+        100% null, `gfw_vessel_identity.length_m` is 98.6% null, `imo` there is
+        74.8% null. A generator that populates all of them makes
+        `WHERE imo IS NOT NULL` a perfect synthetic detector, which would
+        invalidate every precision figure measured on a combined corpus — the
+        track-level separability test passes while the distinction leaks
+        through the columns instead.
+        """
+        col = (self.schema(table).get("columns", {}) or {}).get(field)
+        if not col:
+            return None
+        try:
+            return float(col["null_rate"])
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def real_types(self, table: str, field: str) -> list:
+        col = (self.schema(table).get("columns", {}) or {}).get(field)
+        return list(col.get("types", [])) if col else []
+
+    def known_tables(self) -> list[str]:
+        return sorted(t for t, d in (self.raw.get("schemas", {}) or {}).items()
+                      if d.get("n_rows"))
+
     # ---- identifiers, for the collision guard ----
     def real_imos(self) -> list:
         return self.raw.get("identifiers", {}).get("real_imos", [])
@@ -319,8 +396,11 @@ class CorpusProfile:
         out = []
         for key in sorted(self._used):
             p = self._used[key]
+            detail = p.source_table if p.measured else p.rationale
+            if p.measured and p.rationale:
+                detail = f"{p.source_table} — {p.rationale}"
             out.append((key, "MEASURED" if p.measured else "ASSUMED",
-                        p.n_rows, p.source_table if p.measured else p.rationale))
+                        p.n_rows, detail))
         return out
 
     def summary(self) -> dict:

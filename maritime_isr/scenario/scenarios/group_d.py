@@ -88,7 +88,7 @@ def d2_corporate_phoenix(world: ScenarioWorld) -> None:
         scenario_id="D2", scenario_family=FAMILY_GRAPH,
         truth_class=TRUE_ANOMALY,
         entity_ids=[ORG_PHOENIX_OLD, ORG_PHOENIX_NEW, *fleet],
-        t_start=old.dissolved, t_end=week(8, hours=100),
+        t_start=old.dissolved, t_end=min(week(8, hours=100), world.t1),
         expected_detection=True,
         expected_anomaly_types=["identity_then_anomaly"],
         notes=(f"{old.name} is designated, dissolves on "

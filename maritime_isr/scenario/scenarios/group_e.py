@@ -152,7 +152,11 @@ def e3_exercise_area_intrusion(world: ScenarioWorld) -> None:
 def e4_port_call_laundering(world: ScenarioWorld) -> None:
     r = world.rng
     v = V(world, "spine")
-    t0 = week(8, hours=4)
+    # Starts late in week 7 so the four-call sequence *completes* in week 8.
+    # The corpus window now ends at the real corpus maximum (2026-07-25 22:00,
+    # five days earlier than the old T1), which leaves week 8 too short to
+    # contain a ~5-day laundering sequence from its own start.
+    t0 = week(7, hours=48)
     track = world.track_of(v.entity_id)
     start = (track[-1].lat, track[-1].lon) if track else PORTS["Karachi"]
 
@@ -213,7 +217,8 @@ def e5_floating_storage(world: ScenarioWorld) -> None:
     world.truth.add(ScenarioTruth(
         scenario_id="E5", scenario_family=FAMILY_BEHAVIOURAL,
         truth_class=DECOY, entity_ids=entities,
-        t_start=t0, t_end=week(8, hours=100), expected_detection=False,
+        t_start=t0, t_end=min(week(8, hours=100), world.t1),
+        expected_detection=False,
         notes=("Six tankers at anchor off Gujarat for 30+ days. This is "
                "commercially normal — floating storage against a contango "
                "market — and it is also a documented evasion pattern, and the "

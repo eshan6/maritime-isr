@@ -31,8 +31,18 @@ from .primitives.vessel import SyntheticVessel
 from .truth import TruthLedger
 
 #: The real corpus window. Every generated event lands inside it.
+#:
+#: T1 is the **real corpus maximum**, measured from the operator's landed
+#: events: 2026-07-25 22:53. The generator previously ran to 07-30, five days
+#: past the last real event, which would have put scenario rows in day
+#: partitions where the real data has nothing at all — making the combined
+#: corpus visibly bimodal at the tail and any "same tables" claim hollow.
+#:
+#: The real corpus *starts* in 2012 (a handful of long-tail identity and
+#: loitering records), but the eight-week narrative deliberately sits at the
+#: dense end where the bulk of the real events are.
 T0 = datetime(2026, 6, 4, 0, 0, tzinfo=timezone.utc)
-T1 = datetime(2026, 7, 30, 0, 0, tzinfo=timezone.utc)
+T1 = datetime(2026, 7, 25, 22, 0, tzinfo=timezone.utc)
 
 WINDOW_DAYS = (T1 - T0).days
 
@@ -126,6 +136,8 @@ class ScenarioWorld:
     #: entity_id -> [(t_start, t_end, label)] — the occupancy calendar that
     #: keeps one hull from being in two places at once.
     _segments: dict = field(default_factory=dict, repr=False)
+    #: Set by `land_world`; carries the achieved-vs-real null rates.
+    null_mask: object = None
 
     # ---- construction ----
     @classmethod

@@ -8,8 +8,13 @@ session. `CLAUDE.md`, `ARCHITECTURE.md`, `DECISIONS.md` are stable contracts;
 > between status buckets, record what was verified vs assumed, log anything now
 > broken, and set "Next up." If you don't update it, the next session starts blind.
 
-**Last updated:** 2026-07-31. Synthetic scenario corpus built and landed
-(ADR-019): 40 scenarios in the same tables as real data, flagged `is_synthetic`,
+**Last updated:** 2026-07-31 (second pass). The real corpus profile landed
+from the laptop and **found six defects in the generator**, all now fixed —
+most seriously, synthetic rows were separable from real ones by a single
+`IS NOT NULL` filter. Seven of fifteen parameters are now MEASURED from 12,483
+real rows. See "Real-corpus alignment" below.
+
+Synthetic scenario corpus built and landed (ADR-019): 40 scenarios in the same tables as real data, flagged `is_synthetic`,
 exercising the identical code path. Validators green, determinism and
 truth-isolation tests passing, full suite 379 green. The pipeline ran over the
 corpus and produced the first measured detection numbers — **precision 100%,
@@ -77,7 +82,7 @@ prototype remains green in-sandbox and every metric it produces is synthetic.
 | GFW SAR (gridded + portal CSV) | ⬜ | Upstream offline since 2026-07-03. Both paths degrade cleanly. |
 | Ingest report | ✅ | Prints real counts, date ranges, AOI checks and disk usage. |
 
-**Test tally:** 379 tests passing in-sandbox (377 fast + 2 slow determinism). Sandbox-green ≠ host-verified — do
+**Test tally:** 390 tests passing in-sandbox. Sandbox-green ≠ host-verified — do
 **not** report this as "273 tests prove it works on real data." Every number the
 system has ever produced comes from synthetic fixtures or fixture-driven tests.
 
@@ -470,6 +475,95 @@ turns that guess into a check.
 - **Re-run the collision guard where the corpus lives.** In the sandbox it fell
   back to the profile and reported `0 real IMOs known` — it says so rather than
   claiming a clean check.
+
+---
+
+## Real-corpus alignment (2026-07-31, second pass)
+
+`tools/corpus_profile.py` ran on the laptop and produced
+`data_profiles/real_corpus_profile.json` (159 KB, committed). It carries
+distributions, **table schemas with per-column types and null rates**, and the
+identifier lists the collision guard needs. Running the generator against it
+found six defects.
+
+### Six defects in the generator, found by the real profile
+
+1. **Synthetic rows were separable by a single `IS NOT NULL` filter.** The real
+   corpus leaves `gfw_encounters.imo` **100% null**,
+   `gfw_vessel_identity.length_m` and `tonnage_gt` **98.6%**, `imo` there
+   **74.8%**, `call_sign` **55.3%**. The generator populated all of them. Any
+   precision measured on a combined corpus would have been measuring that
+   filter. **The track-level separability test passed the whole time** — it
+   compares cadence, noise and speed, and the distinction leaked through the
+   *columns*. Fixed: `scenario/nulls.py` masks each field at its measured rate,
+   deterministically, with a declared exemption set for the handful of hulls
+   whose scenarios need a field present. `verify()` checks the achieved rate
+   against the real one and a test locks it in.
+2. **`sanctions` was an invented table.** The generator wrote a conformed
+   `sanctions` table. There is no such table — real OFAC lives in **DuckDB as
+   `ofac_sdn`**. Renamed to `scenario_sanctions`.
+3. **The collision guard had the wrong denominator.** It read
+   `read_table("sanctions")`, found nothing, and reported clean. Now reads the
+   real OFAC snapshot from DuckDB via `ingest/ofac_lookup.py`.
+4. **The corpus window ran five days past the real data.** T1 was 2026-07-30;
+   the last real event is **2026-07-25 22:53**. Pulled back; E4 and two truth
+   windows rescheduled to fit.
+5. **Generation was seed-dependent.** Seed 8 overran the window through
+   background port calls, because the measured dwell distribution reaches 336 h.
+   Seed 7 happened to fit. Background calls are now bounded by the remaining
+   window and seeds 7/8/11/42 all validate.
+6. **A 2.3-year "port visit" was being sampled as a duration.** See below.
+
+### Two findings in the REAL data
+
+**`gfw_port_visits` durations have a broken tail.** p50 = 107 h, p75 = **1,263 h
+(52 days)**, p95 = **20,254 h — 2.3 years**. A port visit does not last 2.3
+years. Something in the GFW port-visit ingest produces degenerate durations
+across the 3,000-row table. The generator now truncates the tail at 14 days and
+**says so in the provenance report** rather than capping silently; the body of
+the distribution is still used because it is real. **Worth investigating on the
+ingest side — this is a real-data defect, not a scenario one.**
+
+**The landed events carry only `h3_r7` and `h3_r9`.** ADR-015 requires all five
+resolutions, and the code does that now — but these rows were landed **before**
+the fix, so the ingest↔fusion join at res 6 still returns nothing. New tool:
+`python tools/restamp_h3.py --dry-run` reports, without `--dry-run` recomputes
+the missing cells from lat/lon. This is legitimate rather than a patch of the
+conformed layer: an H3 cell is a pure function of the row's own coordinates, so
+recomputing produces exactly what re-running the connector would. It also flags
+any cell that is present but *wrong*, which would mean something derived a cell
+instead of computing it (the 7.2% ADR-015 measured).
+
+### Parameters now measured (7 of 15, from 12,483 real rows)
+
+| Parameter | Old prior | Measured | Rows |
+|---|---|---|---|
+| flag distribution | IND 8% | **IND 72.5%** | 9,315 |
+| port-call dwell (median) | 26 h | **107 h** (tail truncated) | 3,000 |
+| loiter duration (median) | 10 h | 5.8 h | 24,153 |
+| encounter duration (median) | 6.5 h | 9.2 h | 14 |
+| fishing length (median) | 27 m | 14.1 m | 60 |
+| bulker / general cargo length | 225 / 120 m | 171.7 m | 46 |
+| reefer length | 145 m | 141.1 m | 2 |
+
+Still ASSUMED: all four tanker classes, dhow, naval, encounter separation,
+anchorage wait. GFW's `vessel_type` taxonomy is too coarse to separate VLCC from
+Suezmax, and 98.6% of identity rows have no length at all — so those stay
+published priors and the report says so.
+
+### Measured results after alignment
+
+```
+true anomalies:  22   DETECTED 3   MISSED 19
+decoys:          16   FALSE POSITIVE 0
+deliberate misses: 2   correctly silent 2
+precision 100%   recall 14%
+```
+
+Recall moved 18% -> 14% between passes. That is **not** a regression to chase:
+the null masking removed IMO and length from most rows, which is what the real
+data looks like, so the identity-based detectors have less to work with. The
+earlier 18% was measured against a corpus that was easier than reality.
 
 ---
 

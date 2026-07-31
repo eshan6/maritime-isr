@@ -29,6 +29,7 @@ from datetime import timezone
 from ..ingest.landing import land_table, stamp_envelope, stamp_h3
 from ..ingest.sanctions_match import MATCH_TABLE
 from .identifiers import SYNTHETIC_SOURCE_ID
+from .nulls import NullMask
 from .truth import TABLE as TRUTH_TABLE
 from .world import ScenarioWorld
 
@@ -40,7 +41,11 @@ T_PORT_VISITS = "gfw_port_visits"
 T_GAPS = "gfw_ais_gaps"
 T_POSITIONS = "ais_position"
 T_DETECTIONS = "scenario_detections"
-T_SANCTIONS = "sanctions"
+#: Scenario sanctions listings. **Deliberately NOT "sanctions".** The real OFAC
+#: snapshot lives in DuckDB as `ofac_sdn` with an entirely different shape, and
+#: there is no conformed `sanctions` table on the operator's machine at all —
+#: writing one would have invented a table the real system does not have.
+T_SANCTIONS = "scenario_sanctions"
 T_ORGS = "scenario_organizations"
 T_OWNERSHIP = "scenario_ownership"
 
@@ -77,8 +82,17 @@ def land_world(world: ScenarioWorld) -> dict[str, int]:
     here: `scenario status` reads these tables back from disk.
     """
     written: dict[str, int] = {}
+    # Null-rate matching against the real corpus. Without this, synthetic rows
+    # are separable from real ones by a single IS NOT NULL filter on any field
+    # the real data leaves empty — see nulls.py.
+    mask = NullMask(world.profile)
+    world.null_mask = mask
 
     def land(rows: list[dict], table: str, key_fields, day_field="acquired_at"):
+        for r in rows:
+            mask.apply(r, table=table,
+                       key=str(r.get("vessel_id") or r.get("event_id")
+                               or r.get("source_ref") or ""))
         if not rows:
             written.setdefault(table, 0)
             return

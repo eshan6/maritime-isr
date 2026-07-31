@@ -108,7 +108,7 @@ def _read(table: str) -> list[dict]:
 #: synthetic rows can merge into the same day partitions as real rows.
 SHARED_TABLES = ("gfw_vessel_identity", "gfw_encounters", "gfw_loitering",
                  "gfw_port_visits", "gfw_ais_gaps", "sanctioned_vessel_matches",
-                 "sanctions", "ais_position")
+                 "ais_position")
 
 
 def dump_schemas() -> dict:
@@ -285,12 +285,17 @@ def build_profile() -> dict:
                          if r.get("mmsi") not in (None, "")})
     ofac_imos = sorted({str(r["ofac_imo"]).strip() for r in matches
                         if r.get("ofac_imo") not in (None, "")})
+    # The full OFAC snapshot is a DuckDB table (`ofac_sdn`), not a conformed
+    # parquet table — there is no `sanctions` directory at all. Reading the
+    # wrong place gave the collision guard a denominator of 121 (only the IMOs
+    # that happened to match) instead of the full ~1,500-vessel list.
     try:
-        for r in _read("sanctions"):
-            if r.get("imo") not in (None, ""):
-                ofac_imos.append(str(r["imo"]).strip())
-    except Exception:                                          # noqa: BLE001
-        pass
+        from maritime_isr.ingest.ofac_lookup import ofac_imos_from_duckdb
+        duck = ofac_imos_from_duckdb()
+        print(f"  ofac_sdn (duckdb)            {len(duck):>8,} vessel IMO(s)")
+        ofac_imos.extend(duck)
+    except Exception as exc:                                   # noqa: BLE001
+        print(f"  ofac_sdn (duckdb)            unavailable ({exc})")
     ofac_imos = sorted(set(ofac_imos))
 
     # ---- corpus window ----

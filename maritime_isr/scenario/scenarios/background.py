@@ -54,11 +54,23 @@ def background_traffic(world: ScenarioWorld) -> None:
         pos = PORTS[origin] if origin else NW_ENTRY
         t = week(first_week, hours=r.uniform(2, 40))
         for port in ports:
+            # **Bound the call by what is left of the window.** The measured
+            # dwell distribution reaches 336 h (the truncated tail of GFW's
+            # port-visit durations), so a call started three weeks before the
+            # end can run past it — which raised on seed 8 while seed 7 happened
+            # to fit. A scenario corpus that only works at one seed is not
+            # reproducible, and the window check would have caught it as an
+            # error rather than as the scheduling problem it is.
+            remaining_h = (world.t1 - t).total_seconds() / 3600.0
+            if remaining_h < 30.0:
+                break
+            wait = min(world.profile.sample("anchorage_wait_hours", r) * 0.25,
+                       max(remaining_h * 0.15, 1.0))
+            dwell = min(world.profile.sample("port_call_dwell_hours", r),
+                        max(remaining_h - wait - 24.0, 2.0))
             pts, spec = build_port_call(
                 v, port, arrive_from=pos, t_start=t, rng=r,
-                anchorage_hours=world.profile.sample("anchorage_wait_hours", r)
-                * 0.25,
-                berth_hours=world.profile.sample("port_call_dwell_hours", r))
+                anchorage_hours=wait, berth_hours=dwell)
             emit(world, key, pts)
             add_port_visit(world, "BG", key, spec)
             pos = (pts[-1].lat, pts[-1].lon)

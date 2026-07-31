@@ -195,7 +195,17 @@ def _real_identifiers_from_corpus() -> tuple[set, set, set] | None:
         if r.get("mmsi") not in (None, ""):
             mmsis.add(str(r["mmsi"]).strip())
 
-    for table in ("sanctions", "sanctioned_vessel_matches"):
+    # The full OFAC snapshot lives in DuckDB, not in a conformed table.
+    try:
+        from ..ingest.ofac_lookup import ofac_imos_from_duckdb
+        from_duck = ofac_imos_from_duckdb()
+        if from_duck:
+            ofac_imos |= from_duck
+            saw_any = True
+    except Exception:                                       # noqa: BLE001
+        pass
+
+    for table in ("sanctioned_vessel_matches",):
         try:
             rows = read_table(table)
         except Exception:
