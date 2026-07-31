@@ -56,3 +56,26 @@ git add maritime_isr/infra/install_snap.sh \
         maritime_isr/cli.py tests/test_preprocess.py
 git commit -m "0.2: SNAP preprocessing chain (pyroSAR gpt), sigma0 validator, doctor, memory-capped install"
 ```
+
+---
+
+# Scenario corpus (ADR-019)
+
+```
+git add maritime_isr/scenario/ tools/corpus_profile.py \
+        tools/run_scenario_pipeline.py tests/test_scenario.py \
+        maritime_isr/ingest/landing.py maritime_isr/graph/store.py \
+        maritime_isr/graph/from_landed.py maritime_isr/graph/identity.py \
+        maritime_isr/cli.py DECISIONS.md STATE.md COMMITS.md
+git commit -m "scenario: synthetic corpus in the real tables, flagged is_synthetic (ADR-019)"
+```
+
+Run order on a machine that holds the real data:
+
+```
+python tools/corpus_profile.py                      # measure the real corpus
+python -m maritime_isr.cli scenario generate --seed 7
+python -m maritime_isr.cli scenario status
+python tools/run_scenario_pipeline.py               # pipeline + measurement
+python -m maritime_isr.cli scenario clear           # remove every synthetic row
+```

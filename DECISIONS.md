@@ -535,3 +535,109 @@ eventually build.**
 tier semantics and any unvalidated IMOs; re-running the matcher is required
 before its output is quoted. The review tool flags unrecognised tiers for exactly
 this reason.
+
+---
+
+## ADR-019 — Scenario data lives in the real tables, distinguished by `is_synthetic` *(Accepted)*
+**Operator decision, 2026-07-31. Companion to ADR-011 and ADR-018.**
+
+**Context.** The graph populated from real landed data is real but **star-shaped**
+(STATE.md, 2026-07-30): 17,562 nodes and 20,026 current edges, and **0 of 98
+OFAC-matched vessels have a single encounter edge**. There are **zero** GFW-flagged
+`intentionalDisabling` gaps in the whole corpus. Fourteen encounters landed for the
+entire AOI over eight weeks. Every path between two vessels runs through a shared
+port or flag, which thousands of unrelated ships also share.
+
+That is a true finding about free data, not a bug, and it stands. But it leaves the
+fusion core, the traversal budget, the decay policy, the anomaly library and the
+risk scorer with **almost nothing to exercise** — code that has never met a
+multi-hop chain, an identity break, or a decoy that should not fire.
+
+**Decision — four parts.**
+
+**(a) Synthetic scenario data lands in the SAME tables as real data**, flagged
+`is_synthetic BOOLEAN NOT NULL DEFAULT FALSE`, and carrying `source_id
+"synthetic-scenario"` in the existing provenance envelope. Not separate tables, not
+views, not a parallel schema.
+
+*Reason:* scenario data must exercise the **identical code path** as real data —
+`from_landed.populate`, the track engine, decay, the anomaly library, risk scoring —
+or it proves nothing about the real system. A parallel schema would only prove the
+parallel schema works. This is already vindicated: landing here surfaced four real
+defects (see Consequences).
+
+**(b) The flag and the source id can never disagree.** `stamp_envelope` and
+`GraphStore.add_edge` both **refuse the write** when they do. Two markers for one
+fact are safer than one only if they cannot drift; a row flagged synthetic with a
+real source would make every split silently wrong in a way no row count reveals.
+
+**(c) Reserved identifier ranges, recorded here so they are never re-litigated:**
+
+| Space | Reservation | Why it is safe |
+|---|---|---|
+| MMSI | `999000000`–`999999999` | 999 is not an assignable Maritime Identification Digit. The block is **structurally unreachable** by a real transmitting vessel, and stays so as new ships register. |
+| IMO | `1000000`–`1999999`, **checksum-valid** | IMO ship numbers run from 5000000 upward. Checksum-valid so they exercise `normalise_imo`'s check-digit path exactly as a real number would. |
+| Sanctions | `SCENARIO-SDN-nnnn` | A fictional list. A synthetic designation **never** points at a real OFAC entry number, and terminates on its own `authority:SCENARIO-SDN` node rather than on `authority:OFAC`. |
+
+The ranges are defence in depth. The actual guarantee is `assert_no_collisions`,
+which checks every generated identifier against the landed corpus at generation
+time, falls back to the corpus profile when the corpus is absent, and **reports
+which of the two it used** — a check that silently degrades to checking nothing is
+the failure this project has already hit four times.
+
+**(d) `scenario_truth` is ground truth and no detection, fusion, graph, scoring or
+alerting code may read it.** A test parses those packages with `ast` and fails the
+build on any import or live reference (docstrings that *document* the rule are
+excluded — a grep cannot tell a promise not to read something from a read, and the
+test carries its own negative control).
+
+**Alternatives rejected.** *Separate tables or a synthetic-only view* — rejected: it
+tests the synthetic path, which is not the product. *Real identifiers so the data
+"looks realistic"* — rejected outright: a synthetic hull wearing a real IMO is a
+false accusation sitting in the same table as our findings, and no downstream filter
+undoes it once quoted. *Generate decoys more cheaply than true positives* —
+rejected: a detector would separate them on craftsmanship and the precision figure
+would measure the generator. A statistical separability test enforces this.
+
+**Consequences.**
+
+**Framing, which travels with every number.** Real findings and scenario data are
+reported as **separate lines, never blended**. `scenario status` and the pipeline
+report print every count split, and there is no combined total anywhere in the
+output by design. The demo is pitched openly as containing scenario data.
+
+**The real-data findings are unchanged and still stand.** 98 IMO matches, 0 of 98
+with an encounter edge, 0 flagged gaps, 14 real encounters. Nothing here improves
+them and the split makes that checkable.
+
+**Four defects found by landing scenario data through the real path**, none visible
+before:
+1. `GraphStore.__init__` would **crash on any existing graph** — the `is_synthetic`
+   index was declared in `_SCHEMA`, which runs before the migration that adds the
+   column. Every pre-migration `graph.sqlite` would have raised `no such column`.
+2. **The pipeline uses two vessel keyspaces that do not join.** `from_landed` keys
+   hulls `vessel:gfw:<vessel_id>`; `graph.identity.resolve_mmsi` mints
+   `vessel:mmsi:<mmsi>`. Alerts land on nodes the landed graph has never heard of.
+   This is the ADR-015 failure class again — two modules, two keys, joins silently
+   empty. **Not fixed in this session**; the measurement bridges it explicitly and
+   reports it. It is the highest-value next fix.
+3. `VoyagePlan` had no initial speed, so every leg boundary restarted the vessel
+   from a dead stop — a 165° course change inside one 60 s step on a hull limited
+   to 0.25 °/s.
+4. Landing merges on a natural key *within a day partition*, so a scenario whose
+   timing shifted between runs landed twice. `generate` now clears first.
+
+**Migration is zero-recompute.** SQLite `ADD COLUMN` with a constant default is
+schema-only: no existing row is read or rewritten, and every pre-existing row is
+real, for which `FALSE` is correct. This matters because the graph accumulates
+history that cannot be backfilled (ADR-011). Parquet partitions written before the
+column existed are **not rewritten**; `read_table` defaults the missing value to
+`False` on read.
+
+**Cast size deviates from the plan, deliberately.** The build plan asked for 45–60
+vessels; the corpus has **74 principals plus a 40-vessel fishing fleet**. The
+catalogue is 29 scenarios plus 12 decoy families, and a vessel cannot be in two
+places at once — `world.add_track` now refuses overlapping segments and
+implausible repositioning, which is what forced the honest count. The
+fleet-aggregation decoy is sized to the phenomenon: eight vessels would not resemble
+the mass rendezvous it exists to test.

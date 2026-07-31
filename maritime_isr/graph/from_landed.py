@@ -42,6 +42,12 @@ from ..ingest.sanctions_match import (MATCH_TABLE, TIER_CONFIDENCE,
 
 AUTHORITY_OFAC = "authority:OFAC"
 
+#: Scenario designations point here and never at OFAC. A synthetic
+#: `sanctioned-under` edge terminating on the real authority node would place a
+#: fabricated finding under a real regulator's name in the same table as our
+#: genuine matches — the hard ban this separation exists to enforce (ADR-019).
+AUTHORITY_SCENARIO = "authority:SCENARIO-SDN"
+
 #: Confidence for an edge whose source stated none. The store requires a number
 #: on every edge, so silence has to become one — but it must not become a
 #: flattering one, and it must stay distinguishable from a stated value. Every
@@ -82,6 +88,23 @@ def _epoch(v, default: float | None = None) -> float | None:
     return default
 
 
+def _syn(row: dict) -> bool:
+    """Is this landed row scenario data? Missing column means real (ADR-019)."""
+    return bool(row.get("is_synthetic"))
+
+
+def _src(row: dict, real_source: str) -> str:
+    """The edge source, which must agree with the synthetic flag.
+
+    A scenario row's edges are sourced `synthetic-scenario:<connector>` rather
+    than the connector name alone, so the graph store's agreement check passes
+    and a reader can still see which connector shape the row took. The store
+    rejects any edge whose flag and source disagree, so this is the single
+    place the two are kept in step.
+    """
+    return f"synthetic-scenario:{real_source}" if _syn(row) else real_source
+
+
 def _conf(row: dict, default: float = UNSTATED_CONFIDENCE) -> tuple[float, bool]:
     """(confidence, stated_by_source). A null column is not zero confidence."""
     v = row.get("confidence")
@@ -104,6 +127,12 @@ def ensure_ontology(store) -> None:
 def ensure_authorities(store) -> None:
     store.upsert_node(AUTHORITY_OFAC, "sanctions_authority",
                       dict(name="OFAC", full_name="US Treasury OFAC SDN list"))
+    store.upsert_node(
+        AUTHORITY_SCENARIO, "sanctions_authority",
+        dict(name="SCENARIO-SDN",
+             full_name="Fictional scenario sanctions list — not a real list",
+             fictional=True),
+        is_synthetic=True)
 
 
 # --------------------------------------------------------------------------
@@ -162,14 +191,17 @@ def add_flagged_to(store, vessels: dict[str, dict]) -> int:
             if t0 is None:
                 continue
             fid = f"flag:{flag}"
+            # A flag_state node is shared between real and scenario vessels —
+            # PAN is PAN — so it is created as real and never demoted.
             store.upsert_node(fid, "flag_state", dict(code=flag))
             store.add_edge(
                 "flagged-to", vessel_node_id(vid), fid,
                 t_start=t0, t_end=_epoch(iv.get("valid_to")),
                 confidence=0.9 if iv.get("record_kind") == "registry" else 0.7,
-                observed_at=t0, source="gfw-vessels",
+                observed_at=t0, source=_src(iv, "gfw-vessels"),
                 source_ref=str(iv.get("source_ref") or f"{vid}:flag:{flag}"),
                 props=dict(record_kind=iv.get("record_kind"), flag=flag),
+                is_synthetic=_syn(iv),
             )
             n += 1
     return n
@@ -208,18 +240,20 @@ def add_identities(store, vessels: dict[str, dict]) -> tuple[int, int]:
             later_names.discard(None)
             is_superseded = bool(later_names - {key})
             nid = f"id:name:{key}"
-            store.upsert_node(nid, "identity", dict(kind="name", value=name))
+            store.upsert_node(nid, "identity", dict(kind="name", value=name),
+                              is_synthetic=_syn(iv))
             store.add_edge(
                 "identified-as", vessel_node_id(vid), nid,
                 t_start=t0, t_end=t1,
                 confidence=0.9 if iv.get("record_kind") == "registry" else 0.7,
-                observed_at=t0, source="gfw-vessels",
+                observed_at=t0, source=_src(iv, "gfw-vessels"),
                 source_ref=str(iv.get("source_ref") or f"{vid}:name:{name}"),
                 props=dict(kind="name", value=name,
                            record_kind=iv.get("record_kind"),
                            # the distinction the 100%-closed result forced
                            superseded_by_later_name=is_superseded,
                            interval_closed=t1 is not None),
+                is_synthetic=_syn(iv),
             )
             total += 1
             if is_superseded:
@@ -252,14 +286,15 @@ def add_encounters(store, known: set[str]) -> tuple[int, int]:
         for v in (a, b):
             if v not in known:
                 store.upsert_node(vessel_node_id(v), "vessel",
-                                  dict(gfw_vessel_id=v, from_event_only=True))
+                                  dict(gfw_vessel_id=v, from_event_only=True),
+                                  is_synthetic=_syn(r))
                 known.add(v)
         conf, stated = _conf(r)
         store.add_edge(
             "met-with", vessel_node_id(a), vessel_node_id(b),
             t_start=t0, t_end=_epoch(r.get("end_time")),
             confidence=conf,
-            observed_at=t0, source="gfw-events:encounters",
+            observed_at=t0, source=_src(r, "gfw-events:encounters"),
             source_ref=str(r.get("event_id")),
             props=dict(event_id=r.get("event_id"),
                        duration_hours=r.get("duration_hours"),
@@ -268,6 +303,7 @@ def add_encounters(store, known: set[str]) -> tuple[int, int]:
                        encounter_type=r.get("encounter_type"),
                        confidence_stated=stated,
                        gfw_confidence_raw=r.get("gfw_confidence_raw")),
+            is_synthetic=_syn(r),
         )
         n += 1
     return n, skipped
@@ -285,9 +321,12 @@ def add_port_visits(store, known: set[str]) -> tuple[int, int]:
             continue
         if v not in known:
             store.upsert_node(vessel_node_id(v), "vessel",
-                              dict(gfw_vessel_id=v, from_event_only=True))
+                              dict(gfw_vessel_id=v, from_event_only=True),
+                              is_synthetic=_syn(r))
             known.add(v)
         node = f"port:{pid}"
+        # Ports are real places whether a real or a scenario vessel calls
+        # there, so the node stays real and only the edge carries the flag.
         store.upsert_node(node, "port", dict(
             port_id=r.get("port_id"), name=r.get("port_name"),
             flag=r.get("anchorage_flag"), lat=r.get("lat"), lon=r.get("lon")))
@@ -296,12 +335,13 @@ def add_port_visits(store, known: set[str]) -> tuple[int, int]:
             "docked-at", vessel_node_id(v), node,
             t_start=t0, t_end=_epoch(r.get("end_time")),
             confidence=conf,
-            observed_at=t0, source="gfw-events:port_visits",
+            observed_at=t0, source=_src(r, "gfw-events:port_visits"),
             source_ref=str(r.get("event_id")),
             props=dict(event_id=r.get("event_id"),
                        duration_hours=r.get("duration_hours"),
                        confidence_stated=stated,
                        port_name=r.get("port_name")),
+            is_synthetic=_syn(r),
         )
         n += 1
     return n, skipped
@@ -329,7 +369,8 @@ def add_gaps(store, known: set[str], *, only_intentional: bool = True
             continue
         if v not in known:
             store.upsert_node(vessel_node_id(v), "vessel",
-                              dict(gfw_vessel_id=v, from_event_only=True))
+                              dict(gfw_vessel_id=v, from_event_only=True),
+                              is_synthetic=_syn(r))
             known.add(v)
         gid = f"gap:{r.get('event_id')}"
         store.upsert_node(gid, GAP_NODE_TYPE, dict(
@@ -341,18 +382,24 @@ def add_gaps(store, known: set[str], *, only_intentional: bool = True
             implied_speed_kn=r.get("gap_implied_speed_kn"),
             # GFW's verdict, labelled as GFW's.
             gfw_intentional_disabling=bool(intentional),
-            assessed_by="global-fishing-watch"))
+            reception_at_off=r.get("reception_at_off"),
+            assessed_by=("maritime-isr-scenario" if _syn(r)
+                         else "global-fishing-watch")),
+            is_synthetic=_syn(r))
         conf, stated = _conf(r)
         store.add_edge(
             GAP_EDGE_TYPE, vessel_node_id(v), gid,
             t_start=t0, t_end=_epoch(r.get("end_time")),
             confidence=conf,
-            observed_at=t0, source="gfw-events:gaps",
+            observed_at=t0, source=_src(r, "gfw-events:gaps"),
             source_ref=str(r.get("event_id")),
             props=dict(event_id=r.get("event_id"),
-                       gfw_intentional_disabling=bool(intentional),
+                       gfw_intentional_disabling=bool(intentional)
+                       if intentional is not None else None,
                        confidence_stated=stated,
-                       assessed_by="global-fishing-watch"),
+                       assessed_by=("maritime-isr-scenario" if _syn(r)
+                                    else "global-fishing-watch")),
+            is_synthetic=_syn(r),
         )
         n += 1
     return n, skipped
@@ -377,7 +424,8 @@ def add_sanctions(store, known: set[str]) -> tuple[int, int]:
             continue
         if v not in known:
             store.upsert_node(vessel_node_id(v), "vessel",
-                              dict(gfw_vessel_id=v, from_event_only=True))
+                              dict(gfw_vessel_id=v, from_event_only=True),
+                              is_synthetic=_syn(r))
             known.add(v)
         # The envelope confidence is the tier confidence, but a row landed
         # before ADR-018 may carry a null there. Falling back to the tier is
@@ -391,12 +439,18 @@ def add_sanctions(store, known: set[str]) -> tuple[int, int]:
             skipped_tiers.add(tier)
             continue
         conf = float(conf)
+        # A scenario designation points at the fictional SCENARIO-SDN authority,
+        # never at OFAC. Attaching synthetic rows to the real authority node
+        # would put fabricated findings under a real regulator's name — the one
+        # thing the hard bans forbid outright.
+        authority = AUTHORITY_SCENARIO if _syn(r) else AUTHORITY_OFAC
         store.add_edge(
-            "sanctioned-under", vessel_node_id(v), AUTHORITY_OFAC,
+            "sanctioned-under", vessel_node_id(v), authority,
             # An OFAC listing has no recorded end in the SDN snapshot; t_end is
             # left open and the snapshot's as_of bounds what we can claim.
             t_start=t0, t_end=None, confidence=conf, observed_at=t0,
-            source="ofac-vessel-match", source_ref=str(r.get("source_ref") or v),
+            source=_src(r, "ofac-vessel-match"),
+            source_ref=str(r.get("source_ref") or v),
             props=dict(match_tier=r.get("match_tier"),
                        is_finding=bool(r.get("is_finding")),
                        ofac_ent_num=r.get("ofac_ent_num"),
@@ -406,7 +460,9 @@ def add_sanctions(store, known: set[str]) -> tuple[int, int]:
                        ofac_imo=r.get("ofac_imo"),
                        sanctions_as_of=str(r.get("sanctions_as_of")),
                        matched_by="maritime-isr",
-                       listed_by="us-treasury-ofac"),
+                       listed_by=("scenario-sdn-fictional" if _syn(r)
+                                  else "us-treasury-ofac")),
+            is_synthetic=_syn(r),
         )
         if r.get("is_finding"):
             findings += 1

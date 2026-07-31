@@ -87,6 +87,13 @@ def fold_registry_snapshot(store, snapshot: dict, *, source_ref: str) -> list[di
     return events
 
 
+#: The scenario MMSI reservation. Duplicated as literals rather than imported
+#: from `scenario/` so the graph layer keeps no dependency on the generator —
+#: this rule must hold in a checkout where the scenario package is absent.
+_RESERVED_MMSI_MIN = 999_000_000
+_RESERVED_MMSI_MAX = 999_999_999
+
+
 def resolve_mmsi(store, mmsi: int, at: float | None = None) -> str:
     """MMSI + time → vessel entity id. Walks identified-as edges INTO the
     id:mmsi node, honoring time scopes, so a track under a swapped-away
@@ -102,12 +109,27 @@ def resolve_mmsi(store, mmsi: int, at: float | None = None) -> str:
             return sorted(cands, key=lambda e: e.observed_at)[-1].src
     vid = vessel_id(None, mmsi)
     if store.node(vid) is None:
-        store.upsert_node(vid, "vessel", dict(mmsi=mmsi, provisional=True))
-        store.upsert_node(iid, "identity", dict(kind="mmsi", value=mmsi))
+        # An MMSI in the reserved 999xxxxxx block cannot belong to a real
+        # vessel: 999 is not an assignable Maritime Identification Digit, so
+        # the block is structurally unreachable by a transmitting ship
+        # (ADR-019). A provisional entity minted from one is therefore
+        # scenario data, and saying so here is what keeps the real/synthetic
+        # split honest all the way through to the alert table.
+        #
+        # This is a fact about the *identifier*, not about ground truth — no
+        # scenario_truth is consulted and none could be.
+        synthetic = _RESERVED_MMSI_MIN <= int(mmsi) <= _RESERVED_MMSI_MAX
+        store.upsert_node(vid, "vessel", dict(mmsi=mmsi, provisional=True),
+                          is_synthetic=synthetic)
+        store.upsert_node(iid, "identity", dict(kind="mmsi", value=mmsi),
+                          is_synthetic=synthetic)
         store.add_edge("identified-as", vid, iid, t_start=0.0, t_end=None,
                        confidence=0.5, observed_at=at,
-                       source="ais_provisional", source_ref="mmsi_only",
-                       props=dict(kind="mmsi", value=mmsi))
+                       source=("synthetic-scenario:ais_provisional" if synthetic
+                               else "ais_provisional"),
+                       source_ref="mmsi_only",
+                       props=dict(kind="mmsi", value=mmsi),
+                       is_synthetic=synthetic)
     return vid
 
 

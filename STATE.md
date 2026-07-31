@@ -8,11 +8,14 @@ session. `CLAUDE.md`, `ARCHITECTURE.md`, `DECISIONS.md` are stable contracts;
 > between status buckets, record what was verified vs assumed, log anything now
 > broken, and set "Next up." If you don't update it, the next session starts blind.
 
-**Last updated:** 2026-07-30. Matcher corrections landed (ADR-018), the
-reported-vs-landed bug class turned into a check (`ingest/checks.py`), Phase 1
-and xView3 recorded as deferred (ADR-017), and the graph populator plus two
-analytics written **but not yet run on the real data** — that is Eshan's next
-run, see "Next up".
+**Last updated:** 2026-07-31. Synthetic scenario corpus built and landed
+(ADR-019): 40 scenarios in the same tables as real data, flagged `is_synthetic`,
+exercising the identical code path. Validators green, determinism and
+truth-isolation tests passing, full suite 379 green. The pipeline ran over the
+corpus and produced the first measured detection numbers — **precision 100%,
+recall 18%** on the synthetic suite. Four real defects in the existing codebase
+were found by landing scenario data through the real path; one of them is still
+open and is the highest-value next fix. See "Scenario corpus" below.
 
 ---
 
@@ -74,7 +77,7 @@ prototype remains green in-sandbox and every metric it produces is synthetic.
 | GFW SAR (gridded + portal CSV) | ⬜ | Upstream offline since 2026-07-03. Both paths degrade cleanly. |
 | Ingest report | ✅ | Prints real counts, date ranges, AOI checks and disk usage. |
 
-**Test tally:** 273 tests passing in-sandbox. Sandbox-green ≠ host-verified — do
+**Test tally:** 379 tests passing in-sandbox (377 fast + 2 slow determinism). Sandbox-green ≠ host-verified — do
 **not** report this as "273 tests prove it works on real data." Every number the
 system has ever produced comes from synthetic fixtures or fixture-driven tests.
 
@@ -328,6 +331,112 @@ and the report stay in the tree for exactly that — re-running them is the test
 
 **A second OFAC snapshot.** It unblocks the freshness split (§2) and is the only
 cheap thing on the list — one `registries --only ofac` run on a later date.
+
+---
+
+## Scenario corpus (2026-07-31) — ADR-019
+
+**What was built.** `maritime_isr/scenario/`, a two-layer generator. Layer 1 is
+primitives with no idea what a scenario means — vessel factory, great-circle
+track integrator with per-class acceleration and turn-rate limits, an AIS
+emitter following ITU-R M.1371 intervals with reception thinning and heavy-tailed
+position noise, rendezvous, gaps, port calls, identity events, corporate
+structure. Layer 2 composes them into 40 scenarios, each writing exactly one
+`scenario_truth` row.
+
+**Landed, read back from disk (not what was built — what exists):**
+
+```
+ais_position               97,314 synthetic        0 real
+gfw_loitering                  51 synthetic        0 real
+gfw_port_visits                45 synthetic        0 real
+gfw_vessel_identity           122 synthetic        0 real
+gfw_ais_gaps                   12 synthetic        0 real
+gfw_encounters                  6 synthetic        0 real
+scenario_truth                 40 synthetic        0 real
+scenario_organizations         11 | scenario_ownership 37 | detections 6
+```
+
+The `0 real` column is not a claim that real data vanished — **the real corpus
+is on Eshan's laptop and was never in this sandbox** (`data/` is gitignored).
+Every figure below is scenario-only and must be re-run where the real data lives
+to produce a genuinely combined view.
+
+**Catalogue:** 22 true anomalies, 16 decoys, 2 deliberate misses. Cast is 74
+principal vessels plus a 40-vessel fishing fleet — over the 45-60 the plan asked
+for, deliberately, because a hull cannot be in two places at once and the
+catalogue needs the hulls. See ADR-019.
+
+### Measured detection results — the honest numbers
+
+```
+true anomalies    :  22   DETECTED 4   MISSED 18
+decoys            :  16   FALSE POSITIVE 0   correctly quiet 16
+deliberate misses :   2   correctly silent 2
+
+precision 100%    recall 18%     (ADR-004 target: precision >= 70%)
+of 4 detections, 2 came from the rule the scenario expected
+alerts on entities with no truth row (background traffic): 1
+```
+
+By family: identity_manipulation P100/R33, spoofing P100/R33,
+graph_ownership P100/R50, dark_transfer P n/a / **R 0%**,
+behavioural_geographic P n/a / **R 0%**.
+
+**Read this as tuning information, not as failure — and no thresholds were
+touched this session** (measure first, tune as a separate decision).
+
+**Why recall is 18% — four causes, all diagnosable:**
+
+1. **The vessel-keyspace split (the big one).** `from_landed` keys hulls
+   `vessel:gfw:<vessel_id>`; `graph.identity.resolve_mmsi` mints
+   `vessel:mmsi:<mmsi>`. Alerts land on nodes the landed graph has never heard
+   of. This is the **ADR-015 failure class again**. The measurement bridges it
+   with an explicit alias map and says so; the defect itself is **not fixed**.
+   **This is the highest-value next fix in the repo.**
+2. **Every gap classified `COVERAGE_GAP`, none `INTENTIONAL_SILENCE`** (2,276 of
+   2,276). The coverage model learns reception from our own emitted data, and
+   our modelled reception is terrestrial-only (ADR-005), so no silence is
+   attributable anywhere. That is the honesty rule working exactly as designed —
+   and it means the whole `dark_transfer` family (A1-A5) cannot currently fire.
+3. **6,438 encounters detected by the track engine, 6 `met-with` edges in the
+   graph.** The graph populator reads landed `gfw_encounters` only; the track
+   engine's own encounters are never fed to it. Another seam.
+4. **The fusion path was not exercised** — `dark_vessel` needs association
+   verdicts, which need SAR scenes we do not process (ADR-017). The 6 synthetic
+   SAR contacts land but nothing consumes them yet.
+
+**What did work.** Zero false positives across all 16 decoys, including the
+clean-vessel-dirty-neighbour case (proximity is not association), the legitimate
+bunkering built by the same primitive call as the illicit transfer, and the
+40-vessel fishing aggregation. Both deliberate misses stayed correctly silent
+with their capability boundary recorded and a number attached.
+
+### Four defects found in the EXISTING codebase by landing through the real path
+
+1. **`GraphStore.__init__` would crash on any existing graph.** The
+   `is_synthetic` index was declared in `_SCHEMA`, which runs *before* the
+   migration adding the column, so every pre-migration `graph.sqlite` would
+   raise `no such column: is_synthetic`. **Fixed.**
+2. **Two vessel keyspaces that do not join** (above). **Open.**
+3. **`VoyagePlan` had no initial speed**, so every leg boundary restarted the
+   vessel from rest — 165 degrees of course change in one 60 s step on a hull
+   limited to 0.25 deg/s. **Fixed.**
+4. **Landing merges within a day partition only**, so a re-run whose timing
+   shifted landed duplicate truth rows. **Fixed** — `generate` clears first.
+
+### Still to do here
+
+- **Run `tools/corpus_profile.py` on the laptop.** Every generator parameter is
+  currently an ASSUMED published prior, and the generation report says so in a
+  measured-vs-assumed table with a row count behind each. The profiler reads the
+  real tables and emits `data_profiles/real_corpus_profile.json` (~100-200 KB,
+  committable), after which the same parameters are re-sampled from real
+  distributions with no code change. **Until then, no distribution in this
+  corpus is measured.**
+- **Re-run the collision guard where the corpus lives.** In the sandbox it fell
+  back to the profile and reported `0 real IMOs known` — it says so rather than
+  claiming a clean check.
 
 ---
 

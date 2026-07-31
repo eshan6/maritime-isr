@@ -1,0 +1,284 @@
+"""Write a generated world into the same tables real data lands in.
+
+**Same tables, one flag.** Scenario rows go into `gfw_encounters`,
+`gfw_loitering`, `gfw_port_visits`, `gfw_ais_gaps`, `gfw_vessel_identity`,
+`ais_position` and `sanctioned_vessel_matches` — the exact tables the connectors
+write and the exact tables the graph populator, the track engine and the fusion
+core read. They are distinguished only by `is_synthetic` and by a
+`synthetic-scenario` source id, which the envelope stamper refuses to let
+disagree.
+
+The reason is in ADR-019 and is worth restating: data in a parallel schema
+proves nothing about the real system. If scenario rows took a different path —
+their own tables, their own views, their own reader — then a green scenario run
+would only demonstrate that the scenario path works. Landing them here means a
+bug in the real reader breaks the scenario run, which is the entire point.
+
+**Every table gets all five H3 resolutions**, computed from lat/lon by the one
+shared helper, never derived from one another (ADR-015). `stamp_h3` already does
+this; the discipline here is simply to call it on every positioned row and to
+have the validator check the result rather than trusting the call.
+
+`scenario_truth` lands too, in its own table, and is the one thing here that no
+detection code may read.
+"""
+from __future__ import annotations
+
+from datetime import timezone
+
+from ..ingest.landing import land_table, stamp_envelope, stamp_h3
+from ..ingest.sanctions_match import MATCH_TABLE
+from .identifiers import SYNTHETIC_SOURCE_ID
+from .truth import TABLE as TRUTH_TABLE
+from .world import ScenarioWorld
+
+#: Table names, all shared with the real connectors except the truth table.
+T_IDENTITY = "gfw_vessel_identity"
+T_ENCOUNTERS = "gfw_encounters"
+T_LOITERING = "gfw_loitering"
+T_PORT_VISITS = "gfw_port_visits"
+T_GAPS = "gfw_ais_gaps"
+T_POSITIONS = "ais_position"
+T_DETECTIONS = "scenario_detections"
+T_SANCTIONS = "sanctions"
+T_ORGS = "scenario_organizations"
+T_OWNERSHIP = "scenario_ownership"
+
+EVENT_TABLES = {
+    "encounters": T_ENCOUNTERS,
+    "loitering": T_LOITERING,
+    "port_visits": T_PORT_VISITS,
+    "gaps": T_GAPS,
+}
+
+#: Every table the generator writes. `scenario clear` uses this list, so a new
+#: table added above is cleared automatically — a clear that silently missed a
+#: table would leave orphan synthetic rows behind and quietly poison the next
+#: real-vs-synthetic split.
+ALL_TABLES = (T_IDENTITY, *EVENT_TABLES.values(), T_POSITIONS, T_DETECTIONS,
+              T_SANCTIONS, T_ORGS, T_OWNERSHIP, MATCH_TABLE, TRUTH_TABLE)
+
+
+def _stamp(row: dict, *, source_ref: str, acquired_at, confidence=None) -> dict:
+    """Envelope + H3, the two things no row may land without."""
+    stamp_envelope(row, source_id=SYNTHETIC_SOURCE_ID, source_ref=source_ref,
+                   acquired_at=acquired_at.astimezone(timezone.utc),
+                   confidence=confidence, is_synthetic=True)
+    return stamp_h3(row)
+
+
+def land_world(world: ScenarioWorld) -> dict[str, int]:
+    """Land everything. Returns rows **actually written**, per table.
+
+    The count comes back from `land_table`, which reports the size of each
+    partition after the merge — not the number of rows handed to it. Reporting
+    what we attempted rather than what landed is a bug class this codebase has
+    already produced four times (STATE.md), and it is not going to be repeated
+    here: `scenario status` reads these tables back from disk.
+    """
+    written: dict[str, int] = {}
+
+    def land(rows: list[dict], table: str, key_fields, day_field="acquired_at"):
+        if not rows:
+            written.setdefault(table, 0)
+            return
+        w = land_table(rows, table=table, key_fields=key_fields,
+                       day_field=day_field)
+        written[table] = written.get(table, 0) + sum(w.values())
+
+    # ---- identity intervals ----
+    identity_rows = []
+    for v in world.vessels.values():
+        ivs = world.identity.for_vessel(v.entity_id)
+        # Fold the per-field intervals into the row shape GFW lands: one record
+        # per distinct identity state, carrying name, flag, mmsi, imo together.
+        boundaries = sorted({iv.valid_from for iv in ivs}
+                            | {iv.valid_to for iv in ivs if iv.valid_to})
+        for i, t in enumerate(boundaries[:-1] if len(boundaries) > 1
+                              else boundaries):
+            snap = world.identity.snapshot_at(v.entity_id, t)
+            nxt = boundaries[i + 1] if i + 1 < len(boundaries) else world.t1
+            superseded = any(
+                iv.superseded for iv in ivs
+                if iv.valid_to is not None and iv.valid_to == nxt)
+            row = dict(
+                vessel_id=v.entity_id,
+                record_kind="registry",
+                mmsi=str(snap.get("mmsi") or ""),
+                imo=str(snap.get("imo") or ""),
+                ship_name=snap.get("name"),
+                normalised_name=(snap.get("name") or "").upper() or None,
+                call_sign=snap.get("call_sign"),
+                flag=snap.get("flag"),
+                length_m=v.length_m,
+                width_m=v.beam_m,
+                draught_m=v.draught_m,
+                tonnage_gt=v.dwt,
+                vessel_class=v.vessel_class,
+                gear_types=None,
+                registry_source="synthetic-scenario",
+                valid_from=t,
+                valid_to=nxt,
+                # The distinction the real populator had to learn: an interval
+                # that ends because the identity changed, versus one that ends
+                # because the window did.
+                interval_superseded=bool(superseded),
+            )
+            identity_rows.append(_stamp(
+                row, source_ref=f"{v.entity_id}:identity:{i}", acquired_at=t))
+    land(identity_rows, T_IDENTITY,
+         ("vessel_id", "record_kind", "mmsi", "ship_name", "valid_from"),
+         day_field="valid_from")
+
+    # ---- behaviour events ----
+    by_kind: dict[str, list[dict]] = {k: [] for k in EVENT_TABLES}
+    for ev in world.events:
+        v = world.vessels.get(ev.entity_id)
+        row = dict(
+            event_id=ev.event_id,
+            event_kind=ev.kind,
+            event_type=ev.kind.rstrip("s").upper(),
+            start_time=ev.t_start,
+            end_time=ev.t_end,
+            lat=ev.lat, lon=ev.lon,
+            vessel_id=ev.entity_id,
+            mmsi=str(v.mmsi) if v else None,
+            imo=str(v.imo) if v else None,
+            ship_name=v.name if v else None,
+            flag=v.flag if v else None,
+            vessel_type=v.vessel_class if v else None,
+            counterpart_vessel_id=ev.counterpart_entity_id,
+            counterpart_mmsi=(str(world.vessels[ev.counterpart_entity_id].mmsi)
+                              if ev.counterpart_entity_id in world.vessels
+                              else None),
+            counterpart_name=(world.vessels[ev.counterpart_entity_id].name
+                              if ev.counterpart_entity_id in world.vessels
+                              else None),
+            counterpart_flag=(world.vessels[ev.counterpart_entity_id].flag
+                              if ev.counterpart_entity_id in world.vessels
+                              else None),
+            **ev.props,
+        )
+        row.setdefault("duration_hours",
+                       (ev.t_end - ev.t_start).total_seconds() / 3600.0)
+        by_kind[ev.kind].append(_stamp(
+            row, source_ref=ev.event_id, acquired_at=ev.t_start,
+            confidence=None))
+    for kind, table in EVENT_TABLES.items():
+        land(by_kind[kind], table, ("event_id",), day_field="start_time")
+
+    # ---- AIS positions ----
+    pos_rows = []
+    for eid_, reports in world.ais.items():
+        v = world.vessels[eid_]
+        for rep in reports:
+            # The MMSI on a position row is the one in force at that instant,
+            # which is what makes B1's phoenix and B5's clone land correctly:
+            # the same hull broadcasts different numbers at different times.
+            mmsi_at = world.identity.current(eid_, "mmsi", at=rep.t)
+            row = dict(
+                mmsi=int(mmsi_at.value if mmsi_at else v.mmsi),
+                imo=int(v.imo),
+                lat=rep.lat, lon=rep.lon,
+                sog_kn=rep.sog_kn, cog_deg=rep.cog_deg,
+                heading_deg=rep.heading_deg,
+                nav_status=rep.nav_status,
+                msg_type=1,
+                ts=rep.t,
+                receiver=rep.receiver,
+                n_receipts=1,
+                vessel_id=eid_,
+            )
+            pos_rows.append(_stamp(
+                row, source_ref=f"{eid_}:{rep.t.isoformat()}",
+                acquired_at=rep.t))
+    land(pos_rows, T_POSITIONS, ("mmsi", "ts", "lat", "lon"), day_field="ts")
+
+    # ---- SAR contacts ----
+    det_rows = []
+    for c in world.sar_contacts:
+        row = dict(
+            detection_id=c.detection_id, lat=c.lat, lon=c.lon, ts=c.t,
+            length_m=c.length_m, score=0.9, scene_id=c.scene_id,
+            matched_mmsi=None,
+        )
+        det_rows.append(_stamp(row, source_ref=c.detection_id, acquired_at=c.t,
+                               confidence=0.9))
+    land(det_rows, T_DETECTIONS, ("detection_id",), day_field="ts")
+
+    # ---- sanctions listings and vessel matches ----
+    sanc_rows, match_rows = [], []
+    designated_orgs = {s["target_entity_id"]: s for s in world.sanctions
+                       if s.get("target_entity_id")}
+    for s in world.sanctions:
+        row = dict(registry=s["registry"], entry_id=s["entry_id"],
+                   name=s["name"], entry_type=s["entry_type"],
+                   imo=s.get("imo"), flag=s.get("flag"),
+                   program=s["program"], as_of=s["as_of"],
+                   valid_from=s["as_of"], valid_to=None,
+                   target_entity_id=s.get("target_entity_id"))
+        sanc_rows.append(_stamp(row, source_ref=s["entry_id"],
+                                acquired_at=s["as_of"]))
+    land(sanc_rows, T_SANCTIONS, ("registry", "entry_id", "as_of"),
+         day_field="as_of")
+
+    # A vessel is matched when its operator or owner is a designated org. The
+    # tier is `imo` because the link runs through a hull we minted — but the
+    # authority is the fictional list, never OFAC.
+    for e in world.corporate.edges:
+        if e.dst not in designated_orgs or not e.src.startswith("vessel:"):
+            continue
+        v = world.vessels.get(e.src)
+        if v is None:
+            continue
+        s = designated_orgs[e.dst]
+        row = dict(
+            vessel_id=v.entity_id, match_tier="imo", is_finding=True,
+            ofac_ent_num=s["entry_id"], ofac_name=s["name"],
+            ofac_program=s["program"], ofac_owner=s["name"],
+            ofac_imo=None, sanctions_as_of=s["as_of"],
+            vessel_name=v.name, vessel_imo=str(v.imo), vessel_flag=v.flag,
+            registry=s["registry"],
+        )
+        match_rows.append(_stamp(row, source_ref=f"{v.entity_id}:{s['entry_id']}",
+                                 acquired_at=s["as_of"], confidence=0.95))
+    land(match_rows, MATCH_TABLE, ("vessel_id", "ofac_ent_num"),
+         day_field="sanctions_as_of")
+
+    # ---- corporate structure ----
+    org_rows = []
+    for o in world.corporate.orgs.values():
+        row = dict(
+            org_id=o.entity_id, name=o.name, jurisdiction=o.jurisdiction,
+            registered_agent=o.registered_agent,
+            registered_agent_name=world.corporate.agents.get(o.registered_agent),
+            address_id=o.address,
+            address_text=world.corporate.addresses.get(o.address),
+            role=o.role, designated=o.designated,
+            incorporated=o.incorporated, dissolved=o.dissolved,
+            successor_of=o.successor_of, notes=o.notes,
+        )
+        org_rows.append(_stamp(row, source_ref=o.entity_id,
+                               acquired_at=o.incorporated or world.t0))
+    land(org_rows, T_ORGS, ("org_id",), day_field="acquired_at")
+
+    own_rows = []
+    for i, e in enumerate(world.corporate.edges):
+        row = dict(edge_kind=e.kind, src=e.src, dst=e.dst,
+                   valid_from=e.valid_from, valid_to=e.valid_to,
+                   share=e.share, notes=e.notes)
+        own_rows.append(_stamp(row, source_ref=f"own:{i}",
+                               acquired_at=max(e.valid_from, world.t0),
+                               confidence=e.confidence))
+    land(own_rows, T_OWNERSHIP, ("edge_kind", "src", "dst", "valid_from"),
+         day_field="acquired_at")
+
+    # ---- ground truth, quarantined ----
+    truth_rows = []
+    for t in world.truth:
+        row = t.as_row()
+        truth_rows.append(_stamp(row, source_ref=t.scenario_id,
+                                 acquired_at=t.t_start))
+    land(truth_rows, TRUTH_TABLE, ("scenario_id",), day_field="t_start")
+
+    return written

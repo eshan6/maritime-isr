@@ -331,6 +331,40 @@ def cmd_feedback(args):
     g.close()
 
 
+def cmd_scenario(args):
+    """Generate, clear or report the synthetic scenario corpus (ADR-019).
+
+    Scenario data lands in the SAME tables as real data, flagged is_synthetic,
+    so it exercises the identical code path. Every count this prints is split
+    real versus synthetic — a blended total is never printed, because any
+    number that could be quoted externally has to be splittable.
+    """
+    from .scenario import (clear, format_generation, format_status, generate,
+                           status)
+    if args.action == "generate":
+        res = generate(seed=args.seed)
+        print(format_generation(res))
+        if not res.validation.ok:
+            print(f"\nVALIDATION FAILED: {len(res.validation.violations)} "
+                  f"violation(s). The corpus was landed but must not be "
+                  f"trusted until these are fixed.", file=sys.stderr)
+            return 1
+        return 0
+    if args.action == "clear":
+        removed = clear()
+        if not removed:
+            print("no synthetic rows found")
+            return 0
+        for table, n in sorted(removed.items()):
+            print(f"  removed {n:>8,} synthetic row(s) from {table}")
+        print(f"total {sum(removed.values()):,} row(s) removed")
+        return 0
+    if args.action == "status":
+        print(format_status(status()))
+        return 0
+    raise SystemExit(f"unknown scenario action {args.action!r}")
+
+
 def cmd_status(args):
     with cat.connect() as con:
         print(f"pipeline {PIPELINE_VERSION} | AOI {AOI_V1.name}")
@@ -537,6 +571,13 @@ def main():
     p = sub.add_parser("eval-report")
     p.add_argument("-n", type=int, default=10)
     p.set_defaults(fn=cmd_eval_report)
+
+    p = sub.add_parser("scenario",
+                       help="synthetic scenario corpus: generate / clear / status")
+    p.add_argument("action", choices=["generate", "clear", "status"])
+    p.add_argument("--seed", type=int, default=7,
+                   help="generation seed; the same seed reproduces the corpus")
+    p.set_defaults(fn=cmd_scenario)
 
     p = sub.add_parser("status")
     p.set_defaults(fn=cmd_status)

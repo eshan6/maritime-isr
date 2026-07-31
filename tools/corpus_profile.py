@@ -1,0 +1,277 @@
+"""Measure the real landed corpus into a small, committable profile.
+
+**Run this on the machine that holds the data.** It reads the landed conformed
+tables, derives the distributions the scenario generator needs, and writes
+`data_profiles/real_corpus_profile.json` — quantiles and counts, not rows. The
+output is on the order of a hundred kilobytes and contains no narrative content:
+durations, dimensions, flag frequencies, and the identifier lists the collision
+guard needs to prove no synthetic hull wears a real number.
+
+    python tools/corpus_profile.py
+
+*Success* looks like a table of distributions each with a non-zero row count,
+ending in `wrote data_profiles/real_corpus_profile.json`.
+
+*Failure* looks like `no landed tables found` — that means the connectors have
+not run on this machine, or `MISR_DATA_ROOT` points somewhere else.
+
+**A distribution backed by zero rows is not written.** The generator treats a
+missing distribution as "fall back to a published prior and say so", which is
+the honest outcome; writing an empty quantile map would let a fallback
+masquerade as a measurement. Every distribution that *is* written carries the
+count behind it, and that count travels all the way into the generation report.
+
+**Why quantiles rather than the raw values.** Five numbers preserve the shape of
+a distribution including its right tail, which is where the interesting
+behaviour lives — loitering durations are not symmetric, and a mean and standard
+deviation would erase exactly the part a scenario needs to reproduce.
+"""
+from __future__ import annotations
+
+import json
+import sys
+from collections import Counter, defaultdict
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from maritime_isr.config import PIPELINE_VERSION, repo_root          # noqa: E402
+from maritime_isr.ingest.landing import read_table                   # noqa: E402
+from maritime_isr.scenario.profile import CLASS_PRIORS               # noqa: E402
+
+OUT_PATH = repo_root() / "data_profiles" / "real_corpus_profile.json"
+
+QUANTILES = (0.05, 0.25, 0.50, 0.75, 0.95)
+
+#: How GFW's free-text `vessel_type` maps onto the classes the generator builds.
+#: GFW's taxonomy is coarse (CARGO, FISHING, TANKER...), so this cannot recover a
+#: VLCC/Suezmax split — the tanker classes share whatever the tanker rows say and
+#: the class priors keep them distinguishable. Recorded rather than hidden: the
+#: profile marks tanker sub-class dimensions as measured only when the corpus
+#: genuinely separates them.
+TYPE_MAP = {
+    "TANKER": ["product_tanker"],
+    "CARGO": ["general_cargo", "bulker"],
+    "BULK": ["bulker"],
+    "FISHING": ["fishing"],
+    "REEFER": ["reefer"],
+    "CARRIER": ["reefer"],
+    "PASSENGER": [],
+    "SUPPORT": [],
+}
+
+
+def _num(v):
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if f == f and abs(f) != float("inf") else None
+
+
+def quantiles_of(values: list[float]) -> dict | None:
+    """Quantile map, or None when there is nothing to measure."""
+    vals = sorted(v for v in values if v is not None)
+    if not vals:
+        return None
+    out = {}
+    for q in QUANTILES:
+        if len(vals) == 1:
+            out[str(q)] = vals[0]
+            continue
+        pos = q * (len(vals) - 1)
+        lo = int(pos)
+        hi = min(lo + 1, len(vals) - 1)
+        f = pos - lo
+        out[str(q)] = vals[lo] + f * (vals[hi] - vals[lo])
+    return out
+
+
+def _read(table: str) -> list[dict]:
+    try:
+        rows = read_table(table)
+    except Exception as exc:                                  # noqa: BLE001
+        print(f"  {table:<28} unreadable ({type(exc).__name__}: {exc})")
+        return []
+    # Real rows only. Once the generator has run, the same tables hold synthetic
+    # rows too, and profiling those would make the generator sample from its own
+    # output — a feedback loop that would drift further from reality every run.
+    real = [r for r in rows if not r.get("is_synthetic")]
+    print(f"  {table:<28} {len(real):>8,} real row(s)"
+          + (f"  ({len(rows) - len(real):,} synthetic excluded)"
+             if len(rows) != len(real) else ""))
+    return real
+
+
+def build_profile() -> dict:
+    print("reading landed tables:")
+    identity = _read("gfw_vessel_identity")
+    encounters = _read("gfw_encounters")
+    loitering = _read("gfw_loitering")
+    port_visits = _read("gfw_port_visits")
+    gaps = _read("gfw_ais_gaps")
+    matches = _read("sanctioned_vessel_matches")
+
+    if not any((identity, encounters, loitering, port_visits)):
+        print("\nno landed tables found — have the connectors run on this "
+              "machine, and does MISR_DATA_ROOT point at the data?")
+        return {}
+
+    dists: dict[str, dict] = {}
+
+    def add(key: str, values: list, source_table: str) -> None:
+        q = quantiles_of([_num(v) for v in values])
+        n = len([v for v in values if _num(v) is not None])
+        if q and n:
+            dists[key] = dict(n_rows=n, source_table=source_table, quantiles=q)
+            print(f"  + {key:<32} n={n:<8,} median={q['0.5']:.2f}")
+        else:
+            print(f"  - {key:<32} no usable rows — generator will use its prior")
+
+    # ---- behavioural durations ----
+    add("encounter_duration_hours",
+        [r.get("duration_hours") for r in encounters], "gfw_encounters")
+    add("loiter_duration_hours",
+        [r.get("duration_hours") for r in loitering], "gfw_loitering")
+    add("port_call_dwell_hours",
+        [r.get("duration_hours") for r in port_visits], "gfw_port_visits")
+
+    # Port calls per vessel over the corpus window. The denominator is vessels
+    # that made at least one call — vessels with zero calls are not in this
+    # table at all, so including an implicit zero for the whole fleet would
+    # measure our query's scope rather than vessel behaviour.
+    per_vessel = Counter(r.get("vessel_id") for r in port_visits
+                         if r.get("vessel_id"))
+    add("port_calls_per_vessel", list(per_vessel.values()), "gfw_port_visits")
+
+    # ---- distance context, useful for placing loiters honestly ----
+    add("loiter_distance_from_shore_km",
+        [r.get("start_distance_from_shore_km") for r in loitering],
+        "gfw_loitering")
+    add("encounter_distance_from_shore_km",
+        [r.get("start_distance_from_shore_km") for r in encounters],
+        "gfw_encounters")
+    add("gap_duration_hours",
+        [r.get("gap_duration_hours") or r.get("duration_hours") for r in gaps],
+        "gfw_ais_gaps")
+
+    # ---- dimensions by class ----
+    # One length distribution per class the corpus can speak to. GFW's
+    # vessel_type is coarse, so several generator classes may share a source
+    # distribution; the class prior still supplies beam, draught and speed,
+    # which GFW does not carry at all.
+    lengths_by_class: dict[str, list] = defaultdict(list)
+    tonnage_by_class: dict[str, list] = defaultdict(list)
+    type_by_vessel = {}
+    for r in encounters + loitering + port_visits:
+        if r.get("vessel_id") and r.get("vessel_type"):
+            type_by_vessel[r["vessel_id"]] = str(r["vessel_type"]).upper()
+
+    for r in identity:
+        vt = type_by_vessel.get(r.get("vessel_id"), "")
+        classes = []
+        for token, mapped in TYPE_MAP.items():
+            if token in vt:
+                classes = mapped
+                break
+        for c in classes:
+            if _num(r.get("length_m")):
+                lengths_by_class[c].append(_num(r["length_m"]))
+            if _num(r.get("tonnage_gt")):
+                tonnage_by_class[c].append(_num(r["tonnage_gt"]))
+
+    for c in sorted(CLASS_PRIORS):
+        lens = lengths_by_class.get(c, [])
+        tons = tonnage_by_class.get(c, [])
+        if not lens:
+            print(f"  - class_dims:{c:<22} no corpus rows — prior only")
+            continue
+        dims = {}
+        ql = quantiles_of(lens)
+        # (low, typical, high) in the shape the class prior uses, so the
+        # generator's sampler needs no special case for a measured class.
+        dims["length_m"] = [ql["0.05"], ql["0.5"], ql["0.95"]]
+        if tons:
+            qt = quantiles_of(tons)
+            dims["tonnage_gt"] = [qt["0.05"], qt["0.5"], qt["0.95"]]
+        dists[f"class_dims:{c}"] = dict(
+            n_rows=len(lens), source_table="gfw_vessel_identity", dims=dims)
+        print(f"  + class_dims:{c:<22} n={len(lens):<8,} "
+              f"median length={ql['0.5']:.1f} m")
+
+    # ---- flags ----
+    flags = Counter(str(r["flag"]).strip().upper() for r in identity
+                    if r.get("flag"))
+    if flags:
+        total = sum(flags.values())
+        dists["flag_distribution"] = dict(
+            n_rows=total, source_table="gfw_vessel_identity",
+            weights={k: v / total for k, v in flags.most_common(40)})
+        print(f"  + flag_distribution              n={total:<8,} "
+              f"top={flags.most_common(3)}")
+
+    # ---- identifiers, for the collision guard ----
+    real_imos = sorted({str(r["imo"]).strip() for r in identity
+                        if r.get("imo") not in (None, "")})
+    real_mmsis = sorted({str(r["mmsi"]).strip() for r in identity
+                         if r.get("mmsi") not in (None, "")})
+    ofac_imos = sorted({str(r["ofac_imo"]).strip() for r in matches
+                        if r.get("ofac_imo") not in (None, "")})
+    try:
+        for r in _read("sanctions"):
+            if r.get("imo") not in (None, ""):
+                ofac_imos.append(str(r["imo"]).strip())
+    except Exception:                                          # noqa: BLE001
+        pass
+    ofac_imos = sorted(set(ofac_imos))
+
+    # ---- corpus window ----
+    times = []
+    for rows, key in ((encounters, "start_time"), (loitering, "start_time"),
+                      (port_visits, "start_time"), (gaps, "start_time")):
+        for r in rows:
+            v = r.get(key)
+            if isinstance(v, datetime):
+                times.append(v)
+            elif isinstance(v, str) and len(v) >= 10:
+                times.append(v)
+    window = {}
+    if times:
+        as_str = sorted(str(t) for t in times)
+        window = dict(start=as_str[0][:19], end=as_str[-1][:19])
+
+    return dict(
+        generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        pipeline_version=PIPELINE_VERSION,
+        corpus_window=window,
+        distributions=dists,
+        identifiers=dict(real_imos=real_imos, real_mmsis=real_mmsis,
+                         ofac_imos=ofac_imos),
+    )
+
+
+def main() -> int:
+    prof = build_profile()
+    if not prof:
+        return 1
+    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    OUT_PATH.write_text(json.dumps(prof, indent=1, sort_keys=True),
+                        encoding="utf-8")
+    n_dist = len(prof["distributions"])
+    ids = prof["identifiers"]
+    size_kb = OUT_PATH.stat().st_size / 1024
+    print(f"\n{n_dist} distribution(s), "
+          f"{len(ids['real_imos'])} real IMO(s), "
+          f"{len(ids['real_mmsis'])} real MMSI(s), "
+          f"{len(ids['ofac_imos'])} OFAC IMO(s)")
+    print(f"corpus window: {prof['corpus_window'].get('start')} .. "
+          f"{prof['corpus_window'].get('end')}")
+    print(f"wrote {OUT_PATH} ({size_kb:.0f} KB)")
+    print("\nCommit this file — it is what lets the generator say "
+          "'sampled from N real rows' and have it be true.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
