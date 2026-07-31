@@ -4,23 +4,25 @@
     python tools/rebuild_conformed.py                    # rewrite the tables
     python tools/rebuild_conformed.py --kind port_visits # one kind
 
-**Why this exists.** Profiling the real corpus turned up port visits lasting
-20,253 hours — 2.3 years — with a 75th percentile of 52 days. That looked like
-bad data. It is not: it is a table written by an older mapper that dropped the
-three fields which tell you what a port visit's time span actually measures.
+**Why this exists.** The conformed GFW tables were written by a mapper the code
+has since outgrown. Measured on the operator's corpus, `confidence` and
+`gfw_confidence_raw` are null on **100%** of the 3,000 port visits — GFW's own
+judgement about how much of each visit they actually saw was being dropped on
+the floor — and the three anchorage records that say *where* the visit happened
+were never landed at all. The mapper was fixed on 2026-07-29. The landed rows
+were not, and cannot fix themselves.
 
-A GFW port visit is stitched from up to four sub-events (entry, stop, gap,
-exit) and the event's `start`..`end` covers whichever of them GFW observed. It
-is time alongside only when the vessel stopped *and* the anchorage it entered is
-the anchorage it left. The mapper in use when those 3,000 rows landed recorded
-neither the stop nor the anchorages nor GFW's own confidence in the visit —
-measured on the landed corpus, `confidence` and `gfw_confidence_raw` are null on
-100% of port visits and `port_name` on 46%. With those fields gone there is no
-way to tell a dwell from a stitch, so every span read as a dwell and a quarter
-of the table read as ships moored for months.
+The immediate motivation was port visits lasting 20,253 hours (2.3 years). The
+first explanation was that those spans were visits GFW had stitched together
+without observing a stop, so re-deriving them would separate a dwell from a
+stitch. **That explanation was wrong, and this tool's own audit is what proved
+it**: 100% of the real visits have an observed stop, 87% are structurally clean
+dwells, and the clean-dwell p95 is still 828 days. See the ADR-020 correction,
+and `tools/port_visit_forensics.py` for the investigation that replaced it.
 
-The mapper was fixed on 2026-07-29. The landed rows were not, and cannot fix
-themselves.
+The rebuild is still worth running — recovering GFW's confidence on 3,000 rows
+is the point on its own — but it does not fix the durations, and `dwell_hours`
+is a better-defined field rather than a smaller one.
 
 **Why re-deriving is the right fix rather than a patch.** This is precisely the
 case CLAUDE.md §4.2 exists for: raw is immutable and still on disk, so every

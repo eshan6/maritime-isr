@@ -315,11 +315,15 @@ def add_port_visits(store, known: set[str]) -> tuple[int, int]:
     for r in read_table("gfw_port_visits"):
         v = r.get("vessel_id")
         # `visit_port_id` resolves across the entry / stop / exit anchorages;
-        # `port_id` is the stop alone and is null on the ~46% of real visits
-        # where GFW observed no stop. Preferring the resolved value is what
-        # stops those visits being silently skipped — they were counted as
-        # `port_visits_skipped` and never became edges. Order matters: the stop
-        # still wins when it exists, because it is the stronger attribution.
+        # `port_id` is the stop alone. On the operator's corpus this changes
+        # nothing — measured 2026-07-31, every one of the 3,000 real port
+        # visits has a stop anchorage with an id, so `port_id` was already 100%
+        # populated and nothing was being skipped. (An earlier comment here
+        # claimed ~46% were dropped. That was inferred from `port_name`'s null
+        # rate, which is an *unnamed* anchorage, not a missing one — see the
+        # ADR-020 correction.) The fallback stays as a guard for corpora where
+        # the stop is genuinely absent. Order matters: the stop still wins when
+        # it exists, because it is the stronger attribution.
         pid = (r.get("visit_port_id") or r.get("visit_port_name")
                or r.get("port_id") or r.get("port_name"))
         t0 = _epoch(r.get("start_time"))

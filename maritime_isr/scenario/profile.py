@@ -168,37 +168,50 @@ DURATION_PRIORS: dict[str, dict] = {
 #:
 #: The generator must emit the same mix or `WHERE dwell_hours IS NULL` becomes a
 #: synthetic detector — the null-rate failure family (nulls.py) reached from a
-#: third direction. These are ASSUMED until `tools/rebuild_conformed.py` has run
-#: on the host and the profiler has measured them; the one anchor available
-#: before then is that `port_name` — which comes from the stop anchorage and
-#: only from it — is null on 45.6% of the operator's landed port visits, so
-#: something close to half of real visits have no observed stop.
+#: third direction.
+#:
+#: **These are the rates measured on the operator's corpus 2026-07-31** by
+#: `tools/rebuild_conformed.py --dry-run` over all 3,000 real port visits: every
+#: visit has an observed stop, 87% have entry and exit at the same anchorage,
+#: 13% do not, and none has too few anchorages to tell. They stay here as the
+#: fallback and are superseded by `port_visit_structure` in the profile once the
+#: rebuild has actually been applied and the profiler re-run.
+#:
+#: The first version of this table guessed 36% `no_stop` from `port_name`'s
+#: 45.6% null rate. That was wrong — an unnamed anchorage is not a missing one —
+#: and the measurement is what corrected it. See the ADR-020 correction.
 VISIT_STRUCTURE_PRIOR: dict[str, float] = {
-    "dwell": 0.40,               # stopped, entered and left the same anchorage
-    "no_stop": 0.36,             # crossed the port polygon without stopping
-    "anchorages_differ": 0.10,   # entry and exit at different anchorages
-    "unknown": 0.14,             # fewer than two anchorage ids: cannot tell
+    "dwell": 0.87,               # stopped, entered and left the same anchorage
+    "anchorages_differ": 0.13,   # entry and exit at different anchorages
+    "no_stop": 0.0,              # not observed at all on this corpus
+    "unknown": 0.0,              # fewer than two anchorage ids: cannot tell
 }
 
 
-#: Physically plausible upper bounds, per distribution. A measured quantile
-#: above these is a data artefact, not a long tail.
+#: Upper bounds on what the GENERATOR will sample, per distribution. Not a claim
+#: that the data above them is wrong — see below.
 #:
-#: **Measured on the operator's corpus, `port_call_dwell_hours` had p75 = 1,263
-#: hours (52 days) and p95 = 20,254 hours — 2.3 years.** That was traced (see
-#: ADR-020): the figure was profiled from `duration_hours`, which is GFW's event
-#: *span*, and a port-visit span is time alongside only when the vessel stopped
-#: and the anchorage it entered is the one it left. Otherwise the same number is
-#: measuring a transit across the port polygon, or an entry and an exit at two
-#: different anchorages stitched into one record with the middle unobserved.
+#: **Measured on the operator's corpus, `port_call_dwell_hours` has p75 = 1,263
+#: hours (52 days) and p95 = 20,254 hours — 2.3 years.** Two explanations have
+#: been tried:
 #:
-#: The fix is upstream — `dwell_hours` is now populated only where the structure
-#: supports the claim, and the profiler reads that instead. This cap stays
-#: anyway, as a floor under the generator: it is what stops an unnoticed change
-#: in the source's semantics from putting background vessels alongside for
-#: months again, and it costs nothing when the input is already sane. The
-#: truncation is recorded, so the provenance report says a figure is measured
-#: **with its tail truncated** rather than pretending the tail is fine.
+#: 1. *Structural* — the spans are visits GFW stitched together without
+#:    observing a stop. **Refuted on host 2026-07-31** (ADR-020 correction): all
+#:    3,000 real visits have an observed stop, 87% are structurally clean, and
+#:    the clean-dwell p95 is still 828 days.
+#: 2. *Length-biased sampling* — the connector asks for events **overlapping** an
+#:    eight-week window, and an overlap query over-samples long events in direct
+#:    proportion to their length. Under this reading the tail is real duration
+#:    that is simply massively over-represented, nothing is broken anywhere, and
+#:    the fix is to profile only visits fully contained in the window. **Open;
+#:    `tools/port_visit_forensics.py` tests it.**
+#:
+#: Until that resolves, the cap is doing one job and one job only: **stopping the
+#: generator sampling a 2.3-year port call and overrunning the corpus window.**
+#: It is a bound on the generator, not a judgement that the source is wrong, and
+#: the earlier comment here calling the tail "a data artefact" overstated what
+#: was known. The truncation is recorded, so the provenance report says a figure
+#: is measured **with its tail truncated** and by how much.
 PLAUSIBLE_MAX_HOURS: dict[str, float] = {
     "encounter_duration_hours": 72.0,      # 3 days alongside is already extreme
     "loiter_duration_hours": 24.0 * 30,
@@ -311,9 +324,10 @@ class CorpusProfile:
                       source_table=d.get("source_table", "?"),
                       rationale=("" if rejected is None else
                                  f"tail truncated at "
-                                 f"{PLAUSIBLE_MAX_HOURS[key]:.0f}h; real max "
-                                 f"was {rejected:.0f}h, which is a data "
-                                 f"artefact rather than a duration"))
+                                 f"{PLAUSIBLE_MAX_HOURS[key]:.0f}h so the "
+                                 f"generator does not overrun its window; the "
+                                 f"real max is {rejected:.0f}h and whether "
+                                 f"that is genuine is OPEN (ADR-020)"))
         else:
             prior = DURATION_PRIORS.get(key)
             if prior is None:

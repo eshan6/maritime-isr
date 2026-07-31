@@ -144,12 +144,14 @@ def apply_visit_structure(row: dict, cls: str) -> dict:
     """Give a synthetic port visit the same structure real ones have, in place.
 
     **Why a synthetic port visit cannot just be a clean dwell.** A GFW port
-    visit is stitched from up to four sub-events and only some of them get
-    observed; measured on the real corpus, `port_name` — which comes from the
-    stop anchorage and nowhere else — is null on 45.6% of visits. A generator
-    that emits a stop, an entry and an exit on every single visit makes
-    `WHERE dwell_hours IS NULL` a perfect real-row detector, which is the
-    null-rate failure family from `nulls.py` arriving through a third door.
+    visit is stitched from up to four sub-events and not all of them line up.
+    Measured on the real corpus 2026-07-31: every visit has an observed stop,
+    but **13% have entry and exit at different anchorages**, and `port_name` —
+    which comes from the stop anchorage and nowhere else — is null on 45.6%,
+    because the anchorage is present but unnamed. A generator that emits a
+    named stop and matching endpoints on every single visit makes
+    `WHERE dwell_hours IS NULL` a real-row detector, which is the null-rate
+    failure family from `nulls.py` arriving through a third door.
 
     The class comes from `assign_visit_structures`, which allocates it from a
     **hash of the event id** rather than the generator's RNG — for the same

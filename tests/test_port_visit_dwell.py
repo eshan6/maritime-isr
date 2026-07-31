@@ -79,7 +79,12 @@ def test_complete_visit_is_a_dwell():
 
 
 def test_visit_without_a_stop_has_no_dwell():
-    """The 46%-of-the-corpus case: entry and exit, nothing in between."""
+    """Entry and exit, nothing observed in between.
+
+    **Not present in the operator's corpus** — measured 2026-07-31, all 3,000
+    real port visits carry a stop. Kept because GFW's schema permits it and the
+    mapper must not invent a dwell if one ever arrives.
+    """
     r = map_event(_visit({
         "confidence": 2,
         "startAnchorage": _anch("ind-sikka"),
@@ -450,12 +455,18 @@ def test_orphaned_real_rows_are_kept_not_deleted(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------
 
 def test_visit_without_a_stop_still_becomes_an_edge(tmp_path, monkeypatch):
-    """46% of real port visits have no stop. They were all being skipped.
+    """A stop-less visit still becomes an edge.
 
-    `port_id` is read from the stop anchorage alone, and the graph populator
-    keyed on it, so nearly half the port visits in the corpus produced no
-    `docked-at` edge at all — counted as `port_visits_skipped` and never looked
-    at again.
+    `port_id` is read from the stop anchorage alone and the graph populator
+    keyed on it, so a visit without a stop produced no `docked-at` edge — it was
+    counted as `port_visits_skipped` and never looked at again.
+
+    **This does not currently happen on the operator's corpus.** All 3,000 real
+    port visits have a stop with an id, so `port_id` was already 100% populated
+    and nothing was being skipped; an earlier claim that ~46% were dropped was
+    inferred from `port_name`'s null rate and was wrong (ADR-020 correction).
+    The test stays because the fallback is the guard, and a guard with no test
+    is a guard nobody knows is broken.
     """
     monkeypatch.setattr(landing.cfg, "data_root", tmp_path)
     from maritime_isr.graph import from_landed

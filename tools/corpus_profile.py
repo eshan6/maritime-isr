@@ -31,7 +31,7 @@ from __future__ import annotations
 import json
 import sys
 from collections import Counter, defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -43,6 +43,61 @@ from maritime_isr.scenario.profile import CLASS_PRIORS               # noqa: E40
 OUT_PATH = repo_root() / "data_profiles" / "real_corpus_profile.json"
 
 QUANTILES = (0.05, 0.25, 0.50, 0.75, 0.95)
+
+_DAY = timedelta(days=1)
+
+#: Filenames the events connector lands raw under: `<kind>_<from>_<to>.json`.
+_WINDOW_RE = __import__("re").compile(r"_(\d{8})_(\d{8})\.json$")
+
+
+def query_window() -> tuple[datetime, datetime] | None:
+    """The window the connector actually asked GFW for, from the raw filenames.
+
+    **This is needed to measure a duration honestly, and its absence is why the
+    port-call figure was wrong.** The connector requests events *overlapping* an
+    eight-week window. A port visit lasting fourteen years overlaps every
+    possible window; one lasting twelve hours only overlaps if it falls inside.
+    So an overlap query over-samples long events **in direct proportion to their
+    length**, and the durations in the landed table are not the distribution of
+    port calls — they are that distribution multiplied by duration.
+
+    That is arithmetic, not a hypothesis about GFW. Any quantile taken over the
+    whole table inherits it, which is how `port_call_dwell_hours` came out with
+    a p95 of 2.3 years while every visit in it was structurally sound.
+
+    Restricting to visits fully inside the window removes the bias exactly, at a
+    known cost: genuine long stays are excluded, so the result understates the
+    real tail. That trade is the right way round here — the figure feeds a
+    generator that must not put a background vessel alongside for two years —
+    and both numbers are written to the profile so the difference is visible
+    rather than argued about.
+    """
+    from maritime_isr.config import cfg
+    root = cfg.data_root / "raw" / "gfw-events"
+    if not root.exists():
+        return None
+    lo = hi = None
+    for p in root.glob("day=*/*.json"):
+        m = _WINDOW_RE.search(p.name)
+        if not m:
+            continue
+        a = datetime.strptime(m.group(1), "%Y%m%d").replace(tzinfo=timezone.utc)
+        b = datetime.strptime(m.group(2), "%Y%m%d").replace(tzinfo=timezone.utc)
+        lo = a if lo is None else min(lo, a)
+        hi = b if hi is None else max(hi, b)
+    return (lo, hi) if lo and hi else None
+
+
+def _as_dt(v):
+    if isinstance(v, datetime):
+        return v if v.tzinfo else v.replace(tzinfo=timezone.utc)
+    if isinstance(v, str) and len(v) >= 10:
+        try:
+            d = datetime.fromisoformat(v.replace("Z", "+00:00"))
+            return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+    return None
 
 #: How GFW's free-text `vessel_type` maps onto the classes the generator builds.
 #: GFW's taxonomy is coarse (CARGO, FISHING, TANKER...), so this cannot recover a
@@ -201,29 +256,55 @@ def build_profile() -> dict:
         [r.get("duration_hours") for r in encounters], "gfw_encounters")
     add("loiter_duration_hours",
         [r.get("duration_hours") for r in loitering], "gfw_loitering")
-    # **Dwell, not span.** A GFW port visit's `start`..`end` is time alongside
-    # only when the vessel stopped and the anchorage it entered is the one it
-    # left; otherwise the same number is measuring a transit across the port
-    # polygon or two observations stitched together with the middle unobserved.
-    # Profiling the span as though it were dwell is what produced a
-    # `port_call_dwell_hours` p75 of 52 days and a p95 of 2.3 years, which then
-    # fed the generator. `dwell_hours` exists on rows written by the current
-    # mapper; on older rows it is absent and the span is all there is, so the
-    # fallback is kept and the source is reported.
-    dwell = [r.get("dwell_hours") for r in port_visits
+    # **Dwell, measured without the length bias.** See `query_window`: the whole
+    # table over-samples long visits in proportion to their length, so the only
+    # honest denominator for a *port-call duration* is the set of visits that
+    # both began and ended inside the window we asked for. Two other filters
+    # apply on top, and all three are reported:
+    #
+    #   * `dwell_hours` where present — a visit whose entry and exit anchorages
+    #     differ is not measuring time at one place (13% of the real corpus).
+    #   * the containment filter, which is the one that removes the 2.3 years.
+    #
+    # The unfiltered span is written separately as `port_visit_span_hours`, so
+    # the difference between the two is visible in the profile rather than
+    # argued about later.
+    win = query_window()
+    if win:
+        w0, w1 = win
+        contained = [r for r in port_visits
+                     if (_as_dt(r.get("start_time")) or w0 - _DAY) >= w0
+                     and (_as_dt(r.get("end_time")) or w1 + _DAY) <= w1]
+        print(f"  query window {w0:%Y-%m-%d}..{w1:%Y-%m-%d}: "
+              f"{len(contained):,} of {len(port_visits):,} port visits "
+              f"({len(contained) / max(len(port_visits), 1):.1%}) began AND "
+              f"ended inside it — the rest are length-biased and excluded from "
+              f"the dwell figure")
+    else:
+        contained = port_visits
+        print("  ! no raw filenames to recover the query window from, so the "
+              "dwell figure CANNOT be de-biased. It will over-state port-call "
+              "duration by however much the overlap query over-sampled long "
+              "visits. Keep data/raw/ to fix this.")
+
+    dwell = [r.get("dwell_hours") for r in contained
              if r.get("dwell_hours") is not None]
     if dwell:
-        add("port_call_dwell_hours", dwell, "gfw_port_visits.dwell_hours")
+        add("port_call_dwell_hours", dwell,
+            "gfw_port_visits.dwell_hours, window-contained")
     else:
-        print("  ! port_call_dwell_hours falling back to duration_hours — no "
-              "row carries dwell_hours, so this table predates the port-visit "
-              "structure fields. Run tools/rebuild_conformed.py.")
+        if any(r.get("dwell_hours") is not None for r in port_visits):
+            print("  ! no window-contained visit carries dwell_hours")
+        else:
+            print("  ! no row carries dwell_hours — this table predates the "
+                  "port-visit structure fields. Run tools/rebuild_conformed.py.")
         add("port_call_dwell_hours",
-            [r.get("duration_hours") for r in port_visits], "gfw_port_visits")
-    # The span is still worth carrying, separately and under its own name, so
-    # the difference between the two is visible rather than argued about.
+            [r.get("duration_hours") for r in contained],
+            "gfw_port_visits.duration_hours, window-contained")
+
     add("port_visit_span_hours",
-        [r.get("duration_hours") for r in port_visits], "gfw_port_visits")
+        [r.get("duration_hours") for r in port_visits],
+        "gfw_port_visits, UNFILTERED and length-biased")
 
     # Port calls per vessel over the corpus window. The denominator is vessels
     # that made at least one call — vessels with zero calls are not in this

@@ -710,13 +710,16 @@ rows that are jointly impossible — a dwell with no stop.
 
 **Consequences.**
 
-- **~46% of real port visits stopped being dropped by the graph.** `port_id` is
-  read from the stop anchorage alone, and `add_port_visits` keyed on it, so
-  nearly half the port visits in the corpus produced no `docked-at` edge —
-  counted as `port_visits_skipped` and never looked at again. `visit_port_id`
-  resolves across entry, stop and exit, and records which one it used, because a
-  port attributed from the exit is a weaker claim than one attributed from the
-  stop.
+- **GFW's own port-visit confidence was being dropped entirely and is now
+  recovered.** Measured on host: `confidence`, `gfw_confidence_raw` and
+  `visit_confidence` all go from **0% to 100%** coverage across the 3,000 rows.
+  That is the single largest gain here — it is GFW's own judgement about how
+  much of the visit they actually saw, and it was on the floor.
+- `visit_port_id` resolves a port across entry, stop and exit and records which
+  one it used, because a port attributed from the exit is a weaker claim than
+  one attributed from the stop. **On this corpus it changes nothing today** —
+  see the correction below — and it is kept as a guard for corpora where the
+  stop anchorage is absent.
 - **A latent landmine in the landing layer surfaced and is fixed.** Arrow types
   a column from the values present, so a day partition where `dwell_hours`
   happened to be null in every row was typed `null` while its sibling was
@@ -735,3 +738,73 @@ rows that are jointly impossible — a dwell with no stop.
 - `PLAUSIBLE_MAX_HOURS` stays as a floor under the generator even though its
   input is now sane, so an unnoticed change in the source's semantics cannot put
   vessels alongside for months again.
+
+### ADR-020 — CORRECTION, 2026-07-31, after the first host run
+
+**The explanation above is wrong, and the rebuild's own audit is what proved
+it.** Recorded rather than edited away, because the reasoning error is the
+instructive part.
+
+Measured on the host, over all 3,000 real port visits:
+
+```
+observed a stop              3,000 (100.0%)
+entry and exit agree         2,611 (87.0%)
+entry and exit differ          389 (13.0%)
+dwell_hours populated        2,611 (87.0%)
+
+                     p05     p25     p50        p75            p95
+duration_hours      4.0h   21.0h   107h   1,261h (52d)   20,242h (843d)
+dwell_hours         3.7h   18.8h    92h   1,184h (49d)   19,862h (828d)
+```
+
+**Structure does not explain the tail.** Every visit has an observed stop, 87%
+are structurally clean dwells, and the clean-dwell p95 is still 828 days. Two of
+the five longest spans — over 5,000 days each — classify as `dwell`.
+
+Two specific claims were false:
+
+1. **"~46% of visits have no observed stop."** `port_name` is null on 45.6% of
+   rows, and I read that as a missing stop. It is not: the intermediate
+   anchorage is present on **100%** of visits, it simply has no `name` on 46% of
+   them. `port_id` — which comes from the same anchorage's `id` — was **100%
+   populated before the change**.
+2. **"~46% of port visits were being dropped by the graph."** It follows from
+   (1) and is equally false. `add_port_visits` keyed on `port_id or port_name`,
+   `port_id` was always there, and nothing was being skipped. The number was
+   never measured; it was inferred from a null rate on a different column.
+
+**What survives, and it is not nothing:** GFW's port-visit confidence recovered
+from 0% to 100%; `orphans: 0`, so raw really is sufficient to regenerate the
+conformed layer and CLAUDE.md §4.2 holds on this corpus; `duration_hours`
+quantiles identical before and after, confirming nothing clamps; the 13%
+entry≠exit split is real structure now recorded; and the all-null-column landing
+bug is real and fixed.
+
+**What `dwell_hours` is now understood to be:** a narrower, better-defined field
+than `duration_hours`, and **not** a solution to the long-duration problem. Any
+claim that it is the "distributionally matched" field is withdrawn.
+
+**The live hypothesis, and why it needs no bug anywhere.** The connector asks GFW
+for events *overlapping* an eight-week window. A visit lasting fourteen years
+overlaps every possible window; a visit lasting twelve hours only overlaps if it
+falls inside one. An overlap query therefore over-samples long events in direct
+proportion to their length, so the observed duration distribution is not the
+distribution of port calls — it is that distribution multiplied by duration.
+Separately, the pull returned **exactly 3,000** events, which is a result cap
+rather than a count, making the sample biased in a second, unknown way.
+
+If that is right, the fix belongs in **the profiler, not ingest**: measure only
+visits fully contained in the query window, and state the cap. Ingest should
+keep landing exactly what GFW returned. `tools/port_visit_forensics.py` reads
+the raw payloads and answers it — pull size, GFW's `durationHours` versus
+`end - start`, contained versus straddling durations, and the extreme records
+printed verbatim rather than reasoned about.
+
+**The process lesson, which is the reason this correction is in the file at
+all.** The first explanation was built by reasoning about what a field *means*
+from a null rate on a neighbouring column, and it survived writing an ADR, a
+tool, a validator, sixteen tests and a PR description before any of it met the
+data. Every one of those artefacts was internally consistent and jointly wrong.
+The audit output in `rebuild_conformed.py` is what caught it, which is an
+argument for tools that print what changed rather than asserting that it worked.

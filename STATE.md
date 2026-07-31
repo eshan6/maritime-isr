@@ -152,29 +152,42 @@ these produce are the point; do not quote any of them until he pastes a run back
     3. python tools/analytic_rename_gap.py       # DONE - re-run after the fix
     4. python tools/graph_report.py              # NOT YET RUN
 
-### Before those: the port-visit rebuild (ADR-020) — NOT YET RUN ON HOST
+### Before those: the port-visit work (ADR-020)
 
-    git pull
-    python tools/rebuild_conformed.py --dry-run     # audit only, writes nothing
+    python tools/rebuild_conformed.py --dry-run     # DONE 2026-07-31, orphans 0
+    python tools/data_health.py                     # NEXT — the demo gate
+    python tools/port_visit_forensics.py            # raw only, writes nothing
     python tools/rebuild_conformed.py               # after backing up data/conformed
     python tools/corpus_profile.py                  # refresh the profile
     python tools/restamp_h3.py --dry-run            # must still report 0 added
+
+**`data_health.py` is the demo gate.** Read-only, exits 1 on any BLOCKER. It
+grades the data on disk rather than the code's intentions: H3 coverage at all
+five resolutions, the provenance envelope on every row, `is_synthetic` and
+`source_id` never disagreeing, whether the raw store is complete enough to
+re-derive, whether a row count is really an API page limit, and whether there is
+anything in the corpus to demo at all. Run it before every demo. A blocker means
+the demo would fail outright or state something false on screen.
+
+**The forensics run is about the open question**, not the demo. The dry run
+refuted the structural explanation (see the correction above); this reads
+`data/raw/` and writes nothing, so it is safe to run before deciding anything.
 
 Re-derives the conformed GFW tables from the immutable raw JSON with the current
 mapper. **No network** — it reads `data/raw/gfw-events/`, so ADR-013 holds and
 the corpus window does not move.
 
-*What the dry run should show:* a `--- port_visits: what changed ---` block where
-`dwell_hours`, `visit_confidence` and `visit_port_id` go from `-` (0%) before to
-some non-zero coverage after, `visit_port_id` covering substantially more rows
-than `port_id`, and a "five longest spans" list saying of each whether it is a
-dwell or why it is not. The `duration_hours` quantiles must be **identical**
-before and after — if they moved, something is clamping and that is a bug.
+*What the dry run showed (2026-07-31):* `confidence`, `gfw_confidence_raw` and
+`visit_confidence` all 0% → **100%**; `visit_port_id` 0% → 100% but changing
+nothing, because `port_id` was already 100%; `dwell_hours` 87%;
+`duration_hours` quantiles **identical** before and after, confirming nothing
+clamps; **`orphans: 0` on all four kinds.**
 
-*The number to watch:* `orphans`. It should be **0**. Anything else means part of
-raw is missing and "every derived output is regenerable from raw + git SHA"
-(CLAUDE.md §4.2) is not currently true for this corpus — the tool preserves those
-rows rather than deleting them, and says so loudly.
+*`orphans: 0` is the load-bearing one.* It is the first direct check that raw is
+sufficient to regenerate the conformed layer — "every derived output is
+regenerable from raw + git SHA" (CLAUDE.md §4.2) is now measured on this corpus
+rather than asserted. Anything other than 0 would have meant part of raw is
+missing; the tool preserves those rows rather than deleting them, and says so.
 
 *Failure mode:* `no raw payloads on disk` for every kind means `data/raw/` was
 not kept. Nothing is written in that case and the conformed table is left as-is;
@@ -553,10 +566,13 @@ across the 3,000-row table. The generator now truncates the tail at 14 days and
 the distribution is still used because it is real. **Worth investigating on the
 ingest side — this is a real-data defect, not a scenario one.**
 
-**✅ DIAGNOSED AND FIXED IN CODE 2026-07-31 — ADR-020. Not host-verified: the
-rebuild has not been run on the laptop yet.** The durations are not corrupt.
-The number being profiled was `duration_hours`, GFW's **event span**, read as
-though it were time alongside.
+**⚠️ FIRST EXPLANATION REFUTED ON HOST 2026-07-31 — see the ADR-020 correction
+below. STILL OPEN.** The structural theory was measured and does not hold. What
+follows is the original reasoning, kept because the error is instructive; the
+correction is at the end of this section.
+
+The durations are not corrupt. The number being profiled was `duration_hours`,
+GFW's **event span**, read as though it were time alongside.
 
 A GFW port visit is stitched from up to four sub-events — entry, stop, gap,
 exit — and its span covers whichever of them GFW observed. That span is a dwell
@@ -591,9 +607,81 @@ What changed:
   at 64%), so `WHERE dwell_hours IS NULL` is not a synthetic-row detector.
 
 **Still separable, and recorded rather than hidden:** synthetic port-visit
-`duration_hours` cannot reproduce the real multi-week tail, because that tail
-comes from GFW stitching across intervals longer than the whole eight-week
-scenario window. `dwell_hours` is the matched field.
+`duration_hours` cannot reproduce the real multi-week tail.
+
+#### CORRECTION — the host run refuted the above (2026-07-31)
+
+`tools/rebuild_conformed.py --dry-run` on the real corpus, `orphans: 0`,
+`duration_hours` quantiles identical before and after:
+
+```
+observed a stop              3,000 (100.0%)
+entry and exit agree         2,611 (87.0%)
+entry and exit differ          389 (13.0%)
+dwell_hours populated        2,611 (87.0%)
+
+                     p05     p25     p50        p75            p95
+duration_hours      4.0h   21.0h   107h   1,261h (52d)   20,242h (843d)
+dwell_hours         3.7h   18.8h    92h   1,184h (49d)   19,862h (828d)
+```
+
+**Structure does not explain the tail.** Every visit has a stop; 87% are clean
+dwells; the clean-dwell p95 is still 828 days; two of the five longest spans
+(>5,000 days each) classify as `dwell`.
+
+Two claims were false and are withdrawn:
+
+- **"~46% of visits have no observed stop."** `port_name` is null on 45.6% of
+  rows and I read that as a missing stop. The intermediate anchorage is present
+  on **100%** of visits — it just has no `name` on 46% of them.
+- **"~46% of port visits were dropped by the graph."** Follows from the above
+  and is equally false. `port_id` was **100% populated before the change**, and
+  `add_port_visits` keyed on it. Nothing was being skipped. **The number was
+  never measured — it was inferred from a null rate on a different column.**
+
+**What did survive the host run, all measured:**
+
+| Field | Before | After |
+|---|---|---|
+| `confidence` | 0% | **100%** |
+| `gfw_confidence_raw` | 0% | **100%** |
+| `visit_confidence` | 0% | **100%** |
+| `visit_port_id` | 0% | 100% (changes nothing today) |
+| `dwell_hours` | 0% | 87% |
+
+Plus: `orphans: 0` across all four kinds — **raw really is sufficient to
+regenerate the conformed layer, so CLAUDE.md §4.2 holds on this corpus.** That
+is the first time it has been checked. And the all-null-column landing bug is
+real and fixed.
+
+`dwell_hours` is a narrower, better-defined field than `duration_hours` and is
+**not** a fix for the long durations. Any claim that it is "distributionally
+matched" is withdrawn.
+
+#### The live hypothesis — needs no bug anywhere
+
+The connector asks GFW for events **overlapping** an eight-week window. A visit
+lasting fourteen years overlaps every possible window; one lasting twelve hours
+only overlaps if it falls inside. An overlap query therefore over-samples long
+events **in direct proportion to their length**, so the observed distribution is
+not the distribution of port calls — it is that distribution multiplied by
+duration. Separately, the pull returned **exactly 3,000** events, which is a
+result cap, not a count.
+
+If that holds, the fix is in **the profiler, not ingest**: measure only visits
+fully contained in the query window, and state the cap. Ingest keeps landing
+what GFW returned.
+
+**Next: `python tools\port_visit_forensics.py`** — reads raw only, writes
+nothing. Answers pull size, GFW's `durationHours` vs `end - start`, contained
+vs straddling durations, and prints the extreme records verbatim.
+
+**Process note.** The first explanation was built by reasoning about what a
+field means from a null rate on a *neighbouring* column, and it survived an ADR,
+a tool, a validator, sixteen tests and a PR description before meeting the data.
+All of it was internally consistent and jointly wrong. The audit output in
+`rebuild_conformed.py` is what caught it — an argument for tools that print what
+changed rather than assert that it worked.
 
 **✅ RESOLVED ON HOST 2026-07-31 — the landed events carried only `h3_r7`
 and `h3_r9`.**
@@ -801,3 +889,59 @@ earlier 18% was measured against a corpus that was easier than reality.
    `D-01` or `D-02` in the file. Session notes referring to "D-01" mean
    **ADR-001** (free data first). Flagging rather than renaming, since ADR IDs
    are cited across the docs.
+
+---
+
+## Demo readiness (2026-07-31)
+
+**`python tools/data_health.py` — run it before every demo.** Read-only, exits 1
+on any BLOCKER. It grades the bytes on disk, not the code's intentions, because
+every data defect this project has hit was found late and by accident while
+looking at something else: the H3 resolutions (ADR-015), the two vessel
+keyspaces, the port-visit durations (ADR-020). Each was invisible in a row count
+and obvious the moment somebody printed the right number.
+
+| Level | Meaning |
+|---|---|
+| **BLOCKER** | the demo would state something false, or a core query returns nothing |
+| **WARN** | it works, but a number on screen is weaker than it looks |
+| **INFO** | measured context |
+
+Blockers: unreadable table (including the all-null-column type conflict that
+takes down a whole table at once), missing H3 at any of the five resolutions, a
+gap in the provenance envelope, `is_synthetic` disagreeing with `source_id`, and
+a missing raw store.
+
+Warnings currently expected on the real corpus:
+
+- **No flagged dark-vessel gaps.** The demo cannot show a *real* dark vessel
+  from this corpus. Run the scenario corpus alongside and label every figure as
+  synthetic (ADR-019), or widen the pull.
+- **Thin encounter graph.** 14 encounters across the whole AOI and window; a
+  network view has nearly nothing to draw, so prefer a ranked table.
+- **Multi-year port-visit spans.** Do not render these as "time alongside" —
+  ADR-020 is open.
+- **Possible result cap.** Exactly 3,000 port visits is an API page limit, not a
+  count of what is in the Arabian Sea. Say "the first N returned"; an operator
+  will otherwise reasonably hear the second thing.
+
+### The duration measurement is now de-biased
+
+`tools/corpus_profile.py` measures `port_call_dwell_hours` from **visits that
+began and ended inside the query window**, and writes the unfiltered figure
+separately as `port_visit_span_hours` so the difference is visible in the
+profile rather than argued about.
+
+The reason is arithmetic, not a theory about GFW: the connector asks for events
+*overlapping* an eight-week window, and an overlap query over-samples long
+events **in direct proportion to their length**. A fourteen-year visit overlaps
+every possible window; a twelve-hour one only overlaps if it falls inside. Any
+quantile over the whole table inherits that, which is how the figure reached a
+p95 of 2.3 years while every visit in it was structurally sound.
+
+The cost is stated rather than hidden: genuine long stays are excluded, so the
+de-biased figure **understates** the real tail. For a number that feeds a
+generator which must not put a background vessel alongside for two years, that
+is the right way round. When `data/raw/` is absent the window cannot be
+recovered and the profiler **says it cannot de-bias** instead of silently
+falling back.
