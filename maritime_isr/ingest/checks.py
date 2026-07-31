@@ -59,6 +59,13 @@ COVERAGE_EXPECTATIONS: dict[str, dict[str, float | None]] = {
         "event_id": _BY_CONSTRUCTION, "start_time": _BY_CONSTRUCTION,
         "lat": None, "lon": None, "h3_r6": None, "h3_r7": None,
         "vessel_id": None, "port_id": None, "port_name": None,
+        # Watched, never floored. `visit_port_id` resolves across all three
+        # anchorages so its coverage should sit well above `port_id`'s; if the
+        # two ever converge, the fallback has stopped working. `dwell_hours` is
+        # null by design on every visit whose structure cannot support the
+        # claim, so a *high* null rate here is correct and a sudden drop is the
+        # thing to be suspicious of.
+        "visit_port_id": None, "dwell_hours": None, "visit_confidence": None,
     },
     "gfw_ais_gaps": {
         "event_id": _BY_CONSTRUCTION, "start_time": _BY_CONSTRUCTION,

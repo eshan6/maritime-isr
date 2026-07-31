@@ -162,6 +162,72 @@ def _anchorage_fields(anch, prefix: str) -> dict:
     }
 
 
+def _port_visit_structure(pv: dict, duration_h: float | None) -> dict:
+    """Decide what a port visit's time span actually measures.
+
+    **This is the field that separates a dwell from a span, and its absence is
+    why the conformed table carried port visits of 2.3 years.** A GFW port visit
+    is stitched from up to four sub-events — entry, stop, gap, exit — and the
+    event's `start`..`end` covers whichever of them GFW managed to observe. That
+    span is a *dwell* only when the vessel actually stopped and the anchorage it
+    entered is the anchorage it left. When the stop is missing, or the entry and
+    exit anchorages differ, the same span is measuring something else entirely:
+    a transit across a port polygon, or two observations at different anchorages
+    stitched into one record with everything in between unobserved. Divide
+    metres by the wrong seconds and you get a ship that sat in port for two
+    years.
+
+    So `duration_hours` keeps meaning exactly what GFW said — the event span,
+    unclamped, never "corrected" — and `dwell_hours` is populated only when the
+    structure supports the claim. Everywhere else it is NULL, which is the
+    honest answer: we do not know how long this vessel was alongside.
+
+    `visit_anchorages_agree` is `None` rather than `False` when fewer than two
+    anchorage ids are present. "They disagree" and "we cannot tell" are
+    different facts and collapsing them would let an unknown read as a finding.
+    """
+    if not isinstance(pv, dict):
+        pv = {}
+    start_a = pv.get("startAnchorage")
+    mid_a = pv.get("intermediateAnchorage")
+    end_a = pv.get("endAnchorage")
+
+    ids = [a.get("id") for a in (start_a, mid_a, end_a)
+           if isinstance(a, dict) and a.get("id")]
+    # `has_stop` is None, not False, on an event that carries no port-visit
+    # object at all — encounters and gaps run through here too, and "this event
+    # has no stop" would be an assertion about a record that was never a visit.
+    has_stop: bool | None = isinstance(mid_a, dict) if pv else None
+    agree: bool | None = len(set(ids)) == 1 if len(ids) >= 2 else None
+
+    # Resolve a usable port for the graph. The intermediate anchorage is the
+    # one the vessel stopped at and is preferred; entry and exit are fallbacks
+    # so that a visit without an observed stop still names a place instead of
+    # being dropped on the floor. Which one was used is recorded, because a
+    # port attributed from the exit anchorage is a weaker claim than one
+    # attributed from the stop and a consumer is entitled to know which it has.
+    port_source = None
+    for cand, label in ((mid_a, "intermediate"), (start_a, "start"), (end_a, "end")):
+        if isinstance(cand, dict) and (cand.get("id") or cand.get("name")):
+            port_source = label
+            chosen = cand
+            break
+    else:
+        chosen = {}
+
+    return {
+        "visit_confidence": pv.get("confidence"),
+        "visit_has_stop": has_stop,
+        "visit_anchorages_agree": agree,
+        "visit_port_id": chosen.get("id"),
+        "visit_port_name": chosen.get("name"),
+        "visit_port_source": port_source,
+        "dwell_hours": (float(duration_h)
+                        if has_stop and agree and duration_h is not None
+                        else None),
+    }
+
+
 def map_event(ev: dict, kind: str) -> dict | None:
     """Map one GFW event into a canonical row. Returns None if unusable."""
     event_id = ev.get("id") or ev.get("eventId")
@@ -234,6 +300,8 @@ def map_event(ev: dict, kind: str) -> dict | None:
         **_anchorage_fields(pv.get("startAnchorage"), "start_anchorage"),
         **_anchorage_fields(pv.get("intermediateAnchorage"), "anchorage"),
         **_anchorage_fields(pv.get("endAnchorage"), "end_anchorage"),
+        # What the span above actually measures. See _port_visit_structure.
+        **_port_visit_structure(pv, duration_h),
         # kept for backwards compatibility with rows landed before 2026-07-29
         "port_id": (pv.get("intermediateAnchorage") or {}).get("id")
         if isinstance(pv.get("intermediateAnchorage"), dict) else None,

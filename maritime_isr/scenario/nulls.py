@@ -72,7 +72,25 @@ NEVER_MASK = {
     "lat", "lon", "source_id", "source_ref", "acquired_at", "ingested_at",
     "pipeline_version", "is_synthetic", "mmsi", "record_kind", "event_kind",
     "ship_name", "flag",
+    # ---- port-visit structure -------------------------------------------
+    # These are not independent columns; they are one fact recorded in seven
+    # places, and the real mapper derives them all from the same anchorage
+    # records. Masking each at its own measured rate would hit the marginal
+    # rates and produce rows that are jointly impossible — a dwell with no
+    # observed stop, a port name with no anchorage it came from — and anything
+    # that trusts the relationship would then break on synthetic data alone.
+    # `land.apply_visit_structure` emits them coherently at the measured class
+    # mix instead, and `validate.RULE_VISIT_STRUCTURE` checks both the
+    # coherence and the mix, which is strictly more than masking could give.
+    # `port_id` and `port_name` are here for the same reason: they come from
+    # the stop anchorage and their nullity is decided by whether there was one.
+    "port_id", "port_name", "dwell_hours",
 }
+
+#: Prefixes covered by the same exemption. The anchorage records are seven
+#: columns each and adding one must not quietly reopen the hole.
+NEVER_MASK_PREFIXES = ("visit_", "start_anchorage_", "end_anchorage_",
+                       "anchorage_")
 
 
 def _draw(table: str, field: str, key: str) -> float:
@@ -96,7 +114,7 @@ class NullMask:
         self.applied: dict[tuple[str, str], list[int]] = {}
 
     def rate(self, table: str, field: str) -> float | None:
-        if field in NEVER_MASK:
+        if field in NEVER_MASK or field.startswith(NEVER_MASK_PREFIXES):
             return None
         r = self.profile.null_rate(table, field)
         if r is None or r < self.min_rate:

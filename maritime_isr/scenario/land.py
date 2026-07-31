@@ -29,7 +29,7 @@ from datetime import timezone
 from ..ingest.landing import land_table, stamp_envelope, stamp_h3
 from ..ingest.sanctions_match import MATCH_TABLE
 from .identifiers import SYNTHETIC_SOURCE_ID
-from .nulls import NullMask
+from .nulls import NullMask, _draw as _draw01
 from .truth import TABLE as TRUTH_TABLE
 from .world import ScenarioWorld
 
@@ -62,6 +62,162 @@ EVENT_TABLES = {
 #: real-vs-synthetic split.
 ALL_TABLES = (T_IDENTITY, *EVENT_TABLES.values(), T_POSITIONS, T_DETECTIONS,
               T_SANCTIONS, T_ORGS, T_OWNERSHIP, MATCH_TABLE, TRUTH_TABLE)
+
+
+#: Anchorage ids a "different exit anchorage" can land on. Real places in the
+#: AOI, so a stitched visit names somewhere a ship could plausibly have gone.
+_OTHER_ANCHORAGES = ("Sikka", "Vadinar", "Mundra", "Kandla", "JNPT",
+                     "Mumbai", "Mangalore", "Kochi")
+
+#: Registry of the state each modelled port belongs to. GFW carries a flag on
+#: every anchorage record; leaving it null on synthetic rows would be one more
+#: column a filter could split the corpus on.
+_PORT_FLAG = {"Karachi": "PAK", "Gwadar": "PAK"}
+
+
+def _anchorage_record(name: str | None, aid: str | None, prefix: str,
+                      *, at_dock: bool | None) -> dict:
+    """One anchorage in the shape `ingest.gfw_events._anchorage_fields` writes.
+
+    Real port visits carry a full record per anchorage — id, name, flag,
+    position, whether the vessel was at a dock, distance from shore. Emitting
+    only the id and name would leave five columns populated on real rows and
+    null on every synthetic one, which is the separability problem this whole
+    area exists to avoid, arriving through the least interesting door.
+    """
+    from .geography import ANCHORAGES, PORTS
+    from .scenarios.common import _shore_km
+
+    if not (name or aid):
+        return {f"{prefix}_{k}": None
+                for k in ("id", "name", "flag", "lat", "lon", "at_dock",
+                          "distance_from_shore_km")}
+    pos = (ANCHORAGES.get(name) or PORTS.get(name)) if name else None
+    return {
+        f"{prefix}_id": aid,
+        f"{prefix}_name": name,
+        f"{prefix}_flag": _PORT_FLAG.get(name or "", "IND"),
+        f"{prefix}_lat": round(pos[0], 4) if pos else None,
+        f"{prefix}_lon": round(pos[1], 4) if pos else None,
+        f"{prefix}_at_dock": at_dock,
+        f"{prefix}_distance_from_shore_km": (round(_shore_km(*pos), 1)
+                                             if pos else None),
+    }
+
+
+def assign_visit_structures(rows: list[dict], profile) -> None:
+    """Give a batch of port visits the real structure mix, in place.
+
+    **Stratified, not sampled.** Drawing each visit's class independently is the
+    obvious implementation and it does not work at this scale: the corpus holds
+    45 port visits, so a 40% class lands anywhere from 26% to 56% on ordinary
+    luck, and the first seed tried came out at 64%. A mix that is only right in
+    expectation is not right — a filter on `dwell_hours` would still separate
+    the two populations, which is the whole thing this exists to prevent.
+
+    So the rows are ordered by a hash of their event id and sliced at the
+    cumulative fractions. The mix is then exact to rounding, and *which* visit
+    gets which class is still deterministic, seed-stable and unrelated to
+    anything a scenario controls — ordering by hash rather than by time matters,
+    because ordering by time would hand every dwell to the first fortnight.
+    """
+    if not rows:
+        return
+    w = profile.visit_structure().value
+    keys = sorted(w)
+    total = sum(w[k] for k in keys) or 1.0
+
+    ordered = sorted(rows, key=lambda r: _draw01(
+        "gfw_port_visits", "visit_structure", str(r.get("event_id") or "")))
+    n = len(ordered)
+    i = 0
+    for j, k in enumerate(keys):
+        # The last class absorbs the rounding remainder, so every row is
+        # assigned exactly once and no visit is left without a structure.
+        stop = n if j == len(keys) - 1 else min(n, i + round(n * w[k] / total))
+        for r in ordered[i:stop]:
+            apply_visit_structure(r, k)
+        i = stop
+
+
+def apply_visit_structure(row: dict, cls: str) -> dict:
+    """Give a synthetic port visit the same structure real ones have, in place.
+
+    **Why a synthetic port visit cannot just be a clean dwell.** A GFW port
+    visit is stitched from up to four sub-events and only some of them get
+    observed; measured on the real corpus, `port_name` — which comes from the
+    stop anchorage and nowhere else — is null on 45.6% of visits. A generator
+    that emits a stop, an entry and an exit on every single visit makes
+    `WHERE dwell_hours IS NULL` a perfect real-row detector, which is the
+    null-rate failure family from `nulls.py` arriving through a third door.
+
+    The class comes from `assign_visit_structures`, which allocates it from a
+    **hash of the event id** rather than the generator's RNG — for the same
+    reason masking does: which visits are dwells must not depend on how many
+    random numbers the rest of the corpus happened to consume.
+
+    The fields are then derived by the *same rule the real mapper applies*
+    (`ingest.gfw_events._port_visit_structure`), rather than each being drawn at
+    its own measured rate. Independent draws would produce rows that are
+    marginally right and jointly impossible — a dwell with no stop — and a
+    consumer that trusts the relationship would break on synthetic data only.
+
+    **What this deliberately does not reproduce: the multi-week tail on
+    `duration_hours`.** Real spans reach 2.3 years because GFW stitched across
+    an interval longer than this entire eight-week window, and manufacturing
+    that would mean emitting an event that never happened. So port-visit
+    `duration_hours` remains a channel on which the two populations differ, it
+    is recorded here rather than papered over, and `dwell_hours` — the field
+    anything reasoning about time alongside should use — is the matched one.
+    """
+    u = _draw01("gfw_port_visits", "anchorage_pick",
+                str(row.get("event_id") or ""))
+    port = row.get("port_name")
+    pid = row.get("port_id")
+    duration = row.get("duration_hours")
+
+    # Deterministic second anchorage for the stitched case.
+    other = _OTHER_ANCHORAGES[int(u * 1e6) % len(_OTHER_ANCHORAGES)]
+    if other == port:
+        other = _OTHER_ANCHORAGES[(int(u * 1e6) + 1) % len(_OTHER_ANCHORAGES)]
+    other_id = f"anch:{other.lower()}"
+
+    if cls == "dwell":
+        stop, agree, end_id, end_name = True, True, pid, port
+    elif cls == "no_stop":
+        # No stop means no intermediate anchorage, which means `port_id` and
+        # `port_name` are null on the real row too — they are read from the
+        # stop and from nothing else. Nulling them here is not masking, it is
+        # the same absence.
+        stop, agree, end_id, end_name = False, True, pid, port
+        row["port_id"] = row["port_name"] = None
+    elif cls == "anchorages_differ":
+        stop, agree, end_id, end_name = True, False, other_id, other
+    else:                                    # unknown: too few anchorage ids
+        stop, agree, end_id, end_name = False, None, None, None
+        row["port_id"] = row["port_name"] = None
+
+    row.update({
+        **_anchorage_record(port, pid, "start_anchorage", at_dock=False),
+        **_anchorage_record(port if stop else None, pid if stop else None,
+                            "anchorage", at_dock=True),
+        **_anchorage_record(end_name, end_id, "end_anchorage", at_dock=False),
+        "visit_confidence": {"dwell": 4, "anchorages_differ": 3,
+                             "no_stop": 2}.get(cls),
+        "visit_has_stop": stop,
+        "visit_anchorages_agree": agree,
+        "visit_port_id": pid if stop else (pid or end_id),
+        "visit_port_name": port if stop else (port or end_name),
+        "visit_port_source": ("intermediate" if stop
+                              else "start" if pid or port
+                              else "end" if end_id or end_name else None),
+        "dwell_hours": duration if (stop and agree) else None,
+        "port_visit_id": f"pv:{row.get('event_id')}",
+        # The connector carries distance context on both ends of every event.
+        "end_distance_from_shore_km": row.get("start_distance_from_shore_km"),
+        "end_distance_from_port_km": row.get("start_distance_from_port_km"),
+    })
+    return row
 
 
 def _stamp(row: dict, *, source_ref: str, acquired_at, confidence=None) -> dict:
@@ -178,6 +334,8 @@ def land_world(world: ScenarioWorld) -> dict[str, int]:
         by_kind[ev.kind].append(_stamp(
             row, source_ref=ev.event_id, acquired_at=ev.t_start,
             confidence=None))
+    # Allocated over the whole batch rather than per row — see the docstring.
+    assign_visit_structures(by_kind["port_visits"], world.profile)
     for kind, table in EVENT_TABLES.items():
         land(by_kind[kind], table, ("event_id",), day_field="start_time")
 

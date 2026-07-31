@@ -314,7 +314,14 @@ def add_port_visits(store, known: set[str]) -> tuple[int, int]:
     n = skipped = 0
     for r in read_table("gfw_port_visits"):
         v = r.get("vessel_id")
-        pid = r.get("port_id") or r.get("port_name")
+        # `visit_port_id` resolves across the entry / stop / exit anchorages;
+        # `port_id` is the stop alone and is null on the ~46% of real visits
+        # where GFW observed no stop. Preferring the resolved value is what
+        # stops those visits being silently skipped — they were counted as
+        # `port_visits_skipped` and never became edges. Order matters: the stop
+        # still wins when it exists, because it is the stronger attribution.
+        pid = (r.get("visit_port_id") or r.get("visit_port_name")
+               or r.get("port_id") or r.get("port_name"))
         t0 = _epoch(r.get("start_time"))
         if not v or not pid or t0 is None:
             skipped += 1
@@ -328,7 +335,8 @@ def add_port_visits(store, known: set[str]) -> tuple[int, int]:
         # Ports are real places whether a real or a scenario vessel calls
         # there, so the node stays real and only the edge carries the flag.
         store.upsert_node(node, "port", dict(
-            port_id=r.get("port_id"), name=r.get("port_name"),
+            port_id=r.get("visit_port_id") or r.get("port_id"),
+            name=r.get("visit_port_name") or r.get("port_name"),
             flag=r.get("anchorage_flag"), lat=r.get("lat"), lon=r.get("lon")))
         conf, stated = _conf(r)
         store.add_edge(
@@ -338,9 +346,17 @@ def add_port_visits(store, known: set[str]) -> tuple[int, int]:
             observed_at=t0, source=_src(r, "gfw-events:port_visits"),
             source_ref=str(r.get("event_id")),
             props=dict(event_id=r.get("event_id"),
+                       # Both, deliberately. `duration_hours` is GFW's event
+                       # span and can be months when the visit was stitched
+                       # across two anchorages; `dwell_hours` is populated only
+                       # when the structure supports calling it time alongside.
+                       # Anything reasoning about how long a ship sat somewhere
+                       # wants the second one and must tolerate its being null.
                        duration_hours=r.get("duration_hours"),
+                       dwell_hours=r.get("dwell_hours"),
+                       visit_port_source=r.get("visit_port_source"),
                        confidence_stated=stated,
-                       port_name=r.get("port_name")),
+                       port_name=r.get("visit_port_name") or r.get("port_name")),
             is_synthetic=_syn(r),
         )
         n += 1

@@ -201,7 +201,28 @@ def build_profile() -> dict:
         [r.get("duration_hours") for r in encounters], "gfw_encounters")
     add("loiter_duration_hours",
         [r.get("duration_hours") for r in loitering], "gfw_loitering")
-    add("port_call_dwell_hours",
+    # **Dwell, not span.** A GFW port visit's `start`..`end` is time alongside
+    # only when the vessel stopped and the anchorage it entered is the one it
+    # left; otherwise the same number is measuring a transit across the port
+    # polygon or two observations stitched together with the middle unobserved.
+    # Profiling the span as though it were dwell is what produced a
+    # `port_call_dwell_hours` p75 of 52 days and a p95 of 2.3 years, which then
+    # fed the generator. `dwell_hours` exists on rows written by the current
+    # mapper; on older rows it is absent and the span is all there is, so the
+    # fallback is kept and the source is reported.
+    dwell = [r.get("dwell_hours") for r in port_visits
+             if r.get("dwell_hours") is not None]
+    if dwell:
+        add("port_call_dwell_hours", dwell, "gfw_port_visits.dwell_hours")
+    else:
+        print("  ! port_call_dwell_hours falling back to duration_hours — no "
+              "row carries dwell_hours, so this table predates the port-visit "
+              "structure fields. Run tools/rebuild_conformed.py.")
+        add("port_call_dwell_hours",
+            [r.get("duration_hours") for r in port_visits], "gfw_port_visits")
+    # The span is still worth carrying, separately and under its own name, so
+    # the difference between the two is visible rather than argued about.
+    add("port_visit_span_hours",
         [r.get("duration_hours") for r in port_visits], "gfw_port_visits")
 
     # Port calls per vessel over the corpus window. The denominator is vessels
@@ -266,6 +287,34 @@ def build_profile() -> dict:
             n_rows=len(lens), source_table="gfw_vessel_identity", dims=dims)
         print(f"  + class_dims:{c:<22} n={len(lens):<8,} "
               f"median length={ql['0.5']:.1f} m")
+
+    # ---- port-visit structure ----
+    # What fraction of real port visits are dwells, and what the rest are. The
+    # generator needs these fractions to emit the same mix, because a synthetic
+    # corpus where every visit is a clean dwell is separable from the real one
+    # by `WHERE dwell_hours IS NULL` — the null-rate failure family again, from
+    # a third direction.
+    if port_visits and any(r.get("visit_has_stop") is not None
+                           for r in port_visits):
+        n = len(port_visits)
+        cls = Counter()
+        for r in port_visits:
+            if r.get("dwell_hours") is not None:
+                cls["dwell"] += 1
+            elif r.get("visit_has_stop") is False:
+                cls["no_stop"] += 1
+            elif r.get("visit_anchorages_agree") is False:
+                cls["anchorages_differ"] += 1
+            else:
+                cls["unknown"] += 1
+        dists["port_visit_structure"] = dict(
+            n_rows=n, source_table="gfw_port_visits",
+            fractions={k: v / n for k, v in cls.items()})
+        print(f"  + port_visit_structure           n={n:<8,} "
+              + ", ".join(f"{k} {v / n:.1%}" for k, v in cls.most_common()))
+    else:
+        print("  - port_visit_structure           table predates the visit "
+              "structure fields — run tools/rebuild_conformed.py")
 
     # ---- flags ----
     flags = Counter(str(r["flag"]).strip().upper() for r in identity

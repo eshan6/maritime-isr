@@ -254,7 +254,72 @@ def land_table(
         out = _normalise_for_arrow(list(merged.values()))
         pq.write_table(pa.Table.from_pylist(out), path, compression="zstd")
         written[day] = len(out)
+
+    reconcile_null_columns(table)
     return written
+
+
+# --------------------------------------------------------------------------
+# schema reconciliation across partitions
+# --------------------------------------------------------------------------
+
+def _type_hints(table: str) -> dict[str, "pa.DataType"]:
+    """Column -> the concrete Arrow type some partition of `table` uses."""
+    hints: dict[str, pa.DataType] = {}
+    for p in table_day_partitions(table):
+        try:
+            schema = pq.read_schema(p)
+        except Exception:                                      # noqa: BLE001
+            continue
+        for f in schema:
+            if f.name not in hints and not pa.types.is_null(f.type):
+                hints[f.name] = f.type
+    return hints
+
+
+def reconcile_null_columns(table: str) -> int:
+    """Give all-null columns the type their siblings use. Returns partitions fixed.
+
+    **Why this is not optional.** Arrow infers a column's type from the values
+    present, so a day partition where an optional column happens to be null in
+    every row gets that column typed `null`. A sibling partition with one real
+    value types it `double`. Both files are individually fine; read together —
+    which is how every query in this project reads them — DuckDB takes the
+    schema from the first file and fails outright:
+
+        Conversion Error: failed to cast column "dwell_hours" from type DOUBLE
+        to "NULL"
+
+    So one sparse column silently makes an entire table unqueryable, and *which*
+    column depends on which day's rows happened to be empty. That is a landmine
+    with a fuse measured in weeks: it does not fire when the column is added, it
+    fires the first time a partition comes out all-null.
+
+    The fix is to rewrite those partitions with the type its siblings agree on.
+    A null-typed column carries no values, so retyping it cannot change data —
+    it only stops the file lying about what it holds. Partitions with nothing to
+    fix are left alone, so this costs a schema read per partition and no writes
+    in the normal case.
+    """
+    hints = _type_hints(table)
+    if not hints:
+        return 0
+    fixed = 0
+    for p in table_day_partitions(table):
+        try:
+            tbl = pq.read_table(p)
+        except Exception:                                      # noqa: BLE001
+            continue
+        bad = [f.name for f in tbl.schema
+               if pa.types.is_null(f.type) and f.name in hints]
+        if not bad:
+            continue
+        tbl = tbl.cast(pa.schema([
+            pa.field(f.name, hints[f.name]) if f.name in bad else f
+            for f in tbl.schema]))
+        pq.write_table(tbl, p, compression="zstd")
+        fixed += 1
+    return fixed
 
 
 # --------------------------------------------------------------------------

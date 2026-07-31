@@ -164,20 +164,41 @@ DURATION_PRIORS: dict[str, dict] = {
 }
 
 
+#: How real port visits divide by observed structure. See ADR-020.
+#:
+#: The generator must emit the same mix or `WHERE dwell_hours IS NULL` becomes a
+#: synthetic detector — the null-rate failure family (nulls.py) reached from a
+#: third direction. These are ASSUMED until `tools/rebuild_conformed.py` has run
+#: on the host and the profiler has measured them; the one anchor available
+#: before then is that `port_name` — which comes from the stop anchorage and
+#: only from it — is null on 45.6% of the operator's landed port visits, so
+#: something close to half of real visits have no observed stop.
+VISIT_STRUCTURE_PRIOR: dict[str, float] = {
+    "dwell": 0.40,               # stopped, entered and left the same anchorage
+    "no_stop": 0.36,             # crossed the port polygon without stopping
+    "anchorages_differ": 0.10,   # entry and exit at different anchorages
+    "unknown": 0.14,             # fewer than two anchorage ids: cannot tell
+}
+
+
 #: Physically plausible upper bounds, per distribution. A measured quantile
 #: above these is a data artefact, not a long tail.
 #:
-#: **Measured on the operator's corpus, `port_call_dwell_hours` has p75 = 1,263
-#: hours (52 days) and p95 = 20,254 hours — 2.3 years.** A port visit does not
-#: last 2.3 years. Something in GFW's port-visit events produces degenerate
-#: durations, and sampling from that tail produced background vessels sitting
-#: alongside for months and overrunning the corpus window.
+#: **Measured on the operator's corpus, `port_call_dwell_hours` had p75 = 1,263
+#: hours (52 days) and p95 = 20,254 hours — 2.3 years.** That was traced (see
+#: ADR-020): the figure was profiled from `duration_hours`, which is GFW's event
+#: *span*, and a port-visit span is time alongside only when the vessel stopped
+#: and the anchorage it entered is the one it left. Otherwise the same number is
+#: measuring a transit across the port polygon, or an entry and an exit at two
+#: different anchorages stitched into one record with the middle unobserved.
 #:
-#: The distribution is still used — it is real, and its body is informative.
-#: Only the implausible tail is rejected, the truncation is recorded, and the
-#: provenance report says the figure is measured **with its tail truncated**
-#: rather than pretending either that the tail is fine or that the whole
-#: distribution is unusable.
+#: The fix is upstream — `dwell_hours` is now populated only where the structure
+#: supports the claim, and the profiler reads that instead. This cap stays
+#: anyway, as a floor under the generator: it is what stops an unnoticed change
+#: in the source's semantics from putting background vessels alongside for
+#: months again, and it costs nothing when the input is already sane. The
+#: truncation is recorded, so the provenance report says a figure is measured
+#: **with its tail truncated** rather than pretending the tail is fine.
 PLAUSIBLE_MAX_HOURS: dict[str, float] = {
     "encounter_duration_hours": 72.0,      # 3 days alongside is already extreme
     "loiter_duration_hours": 24.0 * 30,
@@ -347,6 +368,24 @@ class CorpusProfile:
             if u <= acc:
                 return k
         return keys[-1]
+
+    def visit_structure(self) -> Param:
+        """Fractions of port visits by observed structure, measured or assumed."""
+        d = self._dist("port_visit_structure")
+        fr = (d or {}).get("fractions")
+        if not fr:
+            p = Param("port_visit_structure", dict(VISIT_STRUCTURE_PRIOR),
+                      measured=False,
+                      rationale=("no rebuilt port-visit rows in the profile — "
+                                 "run tools/rebuild_conformed.py, then "
+                                 "tools/corpus_profile.py"))
+        else:
+            p = Param("port_visit_structure",
+                      {k: float(v) for k, v in fr.items()},
+                      measured=True, n_rows=int(d.get("n_rows", 0)),
+                      source_table=d.get("source_table", "gfw_port_visits"))
+        self._used["port_visit_structure"] = p
+        return p
 
     # ---- real schemas: types and null rates ----
     def schema(self, table: str) -> dict:

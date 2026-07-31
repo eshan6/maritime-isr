@@ -152,6 +152,35 @@ these produce are the point; do not quote any of them until he pastes a run back
     3. python tools/analytic_rename_gap.py       # DONE - re-run after the fix
     4. python tools/graph_report.py              # NOT YET RUN
 
+### Before those: the port-visit rebuild (ADR-020) — NOT YET RUN ON HOST
+
+    git pull
+    python tools/rebuild_conformed.py --dry-run     # audit only, writes nothing
+    python tools/rebuild_conformed.py               # after backing up data/conformed
+    python tools/corpus_profile.py                  # refresh the profile
+    python tools/restamp_h3.py --dry-run            # must still report 0 added
+
+Re-derives the conformed GFW tables from the immutable raw JSON with the current
+mapper. **No network** — it reads `data/raw/gfw-events/`, so ADR-013 holds and
+the corpus window does not move.
+
+*What the dry run should show:* a `--- port_visits: what changed ---` block where
+`dwell_hours`, `visit_confidence` and `visit_port_id` go from `-` (0%) before to
+some non-zero coverage after, `visit_port_id` covering substantially more rows
+than `port_id`, and a "five longest spans" list saying of each whether it is a
+dwell or why it is not. The `duration_hours` quantiles must be **identical**
+before and after — if they moved, something is clamping and that is a bug.
+
+*The number to watch:* `orphans`. It should be **0**. Anything else means part of
+raw is missing and "every derived output is regenerable from raw + git SHA"
+(CLAUDE.md §4.2) is not currently true for this corpus — the tool preserves those
+rows rather than deleting them, and says so loudly.
+
+*Failure mode:* `no raw payloads on disk` for every kind means `data/raw/` was
+not kept. Nothing is written in that case and the conformed table is left as-is;
+report it, because the fix then requires a re-download and that is an ADR-013
+decision, not a tooling one.
+
 **The `maritime-isr` console script is not installed on the laptop.** It is
 declared in `pyproject.toml` but the package was never `pip install`ed, so the
 short name does not resolve. `python -m maritime_isr.cli <verb>` runs the same
@@ -523,6 +552,48 @@ across the 3,000-row table. The generator now truncates the tail at 14 days and
 **says so in the provenance report** rather than capping silently; the body of
 the distribution is still used because it is real. **Worth investigating on the
 ingest side — this is a real-data defect, not a scenario one.**
+
+**✅ DIAGNOSED AND FIXED IN CODE 2026-07-31 — ADR-020. Not host-verified: the
+rebuild has not been run on the laptop yet.** The durations are not corrupt.
+The number being profiled was `duration_hours`, GFW's **event span**, read as
+though it were time alongside.
+
+A GFW port visit is stitched from up to four sub-events — entry, stop, gap,
+exit — and its span covers whichever of them GFW observed. That span is a dwell
+only when the vessel **stopped** and the anchorage it **entered is the anchorage
+it left**. Otherwise the same number measures a transit across a port polygon,
+or two observations at different anchorages with the middle unobserved.
+
+The mapper that wrote those 3,000 rows recorded none of the fields that decide
+it. Measured on the corpus: `confidence` and `gfw_confidence_raw` null on
+**100%** of port visits, `port_name` — which comes from the stop anchorage and
+nowhere else — null on **45.6%**. The mapper was fixed on 2026-07-29; the rows
+were not.
+
+What changed:
+
+- `dwell_hours`, populated only where the structure supports the claim.
+  `duration_hours` is untouched and unclamped — it still means what GFW said.
+- `tools/rebuild_conformed.py` re-derives the conformed tables from the
+  **immutable raw JSON** with the current mapper. No network (ADR-013), no new
+  window of events, synthetic rows carried through untouched, orphaned real rows
+  preserved and reported.
+- **~46% of real port visits were being dropped by the graph.** `add_port_visits`
+  keyed on `port_id`, which is read from the stop anchorage alone, so every
+  stop-less visit was counted as `port_visits_skipped` and never became an edge.
+  `visit_port_id` resolves across entry/stop/exit and records which it used.
+- A latent landing-layer bug surfaced: a day partition whose optional column is
+  all-null gets Arrow type `null` while its sibling gets `double`, and reading
+  them together fails outright — **one sparse column makes a whole table
+  unqueryable**. `landing.reconcile_null_columns` fixes it after every land.
+- The generator emits the same structure mix (stratified, not sampled — 45
+  visits cannot hit a 40% target on independent draws; the first attempt landed
+  at 64%), so `WHERE dwell_hours IS NULL` is not a synthetic-row detector.
+
+**Still separable, and recorded rather than hidden:** synthetic port-visit
+`duration_hours` cannot reproduce the real multi-week tail, because that tail
+comes from GFW stitching across intervals longer than the whole eight-week
+scenario window. `dwell_hours` is the matched field.
 
 **✅ RESOLVED ON HOST 2026-07-31 — the landed events carried only `h3_r7`
 and `h3_r9`.**

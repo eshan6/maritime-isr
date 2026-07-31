@@ -61,6 +61,7 @@ RULE_TEMPORAL = "corpus_window"
 RULE_GEOMETRY = "encounter_geometry"
 RULE_IDENTITY = "identity_intervals"
 RULE_OBSERVABLE = "observable"
+RULE_VISIT_STRUCTURE = "port_visit_structure"
 
 #: Speed tolerance over the class maximum. Position noise on a short interval
 #: can inflate an implied speed slightly, and rejecting that would be rejecting
@@ -152,6 +153,7 @@ def validate_world(world) -> ValidationReport:
     _check_temporal(world, rep)
     _check_h3_and_envelope(world, rep)
     _check_observable(world, rep, ent_scen)
+    _check_visit_structure(world, rep)
 
     if world.clipped:
         rep.warnings.append(
@@ -466,6 +468,74 @@ def _check_observable(world, rep, ent_scen) -> None:
             f"outside terrestrial reception. Expected under ADR-005, but check "
             f"the scenario still has evidence: e.g. {', '.join(silent[:4])}")
     rep.count(RULE_OBSERVABLE, n)
+
+
+#: How far the achieved class mix may sit from the profile's before it counts
+#: as a violation. Generous, because a few hundred synthetic visits cannot hit
+#: a fraction precisely and the check is that the mix is the right *shape*, not
+#: that it matches to three decimals.
+VISIT_MIX_TOLERANCE = 0.15
+
+
+def _check_visit_structure(world, rep) -> None:
+    """Port-visit structure: internally coherent, and the real mix.
+
+    Two failures, both silent without this. **Coherence**: `dwell_hours` is
+    populated exactly when the vessel stopped and entered and left the same
+    anchorage, so a row with a dwell and no stop is impossible — it would only
+    ever occur on synthetic data, and anything downstream that trusts the
+    relationship would break there and nowhere else. **Mix**: if every synthetic
+    visit is a clean dwell, `WHERE dwell_hours IS NULL` separates the two
+    populations perfectly, which is the null-rate failure family again.
+
+    Read back from the landed table rather than the in-memory world, for the
+    same reason the H3 check is: the question is whether the rows that exist are
+    right, not whether the code that wrote them looked right.
+    """
+    from ..ingest.landing import read_table
+    from .land import T_PORT_VISITS
+
+    try:
+        rows = [r for r in read_table(T_PORT_VISITS) if r.get("is_synthetic")]
+    except Exception:                                          # noqa: BLE001
+        return
+    if not rows:
+        return
+
+    counts: dict[str, int] = {}
+    for r in rows:
+        stop = r.get("visit_has_stop")
+        agree = r.get("visit_anchorages_agree")
+        dwell = r.get("dwell_hours")
+        if (dwell is not None) != bool(stop and agree is True):
+            rep.add(RULE_VISIT_STRUCTURE, str(r.get("event_id")),
+                    f"dwell_hours={dwell!r} but visit_has_stop={stop!r} and "
+                    f"visit_anchorages_agree={agree!r} — a dwell exists exactly "
+                    f"when the vessel stopped and entered and left the same "
+                    f"anchorage, so this row is jointly impossible")
+            break
+        if r.get("port_name") is not None and not stop:
+            rep.add(RULE_VISIT_STRUCTURE, str(r.get("event_id")),
+                    "port_name is populated on a visit with no observed stop, "
+                    "but the real mapper reads it from the stop anchorage and "
+                    "from nowhere else")
+            break
+        cls = ("dwell" if dwell is not None
+               else "no_stop" if stop is False and agree is not None
+               else "anchorages_differ" if agree is False
+               else "unknown")
+        counts[cls] = counts.get(cls, 0) + 1
+
+    target = world.profile.visit_structure().value
+    n = len(rows)
+    for cls, want in target.items():
+        got = counts.get(cls, 0) / n
+        if abs(got - want) > VISIT_MIX_TOLERANCE:
+            rep.add(RULE_VISIT_STRUCTURE, cls,
+                    f"{got:.1%} of {n:,} synthetic port visits are '{cls}' but "
+                    f"the profile says {want:.1%} — a filter on dwell_hours or "
+                    f"port_name would separate synthetic rows from real ones")
+    rep.count(RULE_VISIT_STRUCTURE, n)
 
 
 def _check_h3_and_envelope(world, rep) -> None:

@@ -641,3 +641,97 @@ places at once — `world.add_track` now refuses overlapping segments and
 implausible repositioning, which is what forced the honest count. The
 fleet-aggregation decoy is sized to the phenomenon: eight vessels would not resemble
 the mass rendezvous it exists to test.
+
+---
+
+## ADR-020 — A port visit's span is not its dwell *(Accepted)*
+**2026-07-31. Follows ADR-015 (H3 unification) in kind: a landed table that the
+code has since outgrown.**
+
+**Context.** Profiling the operator's corpus produced `port_call_dwell_hours`
+with a **75th percentile of 1,263 hours (52 days) and a 95th of 20,253 hours —
+2.3 years**. A generator sampling that tail put background vessels alongside for
+months and overran the corpus window. The initial reading was that GFW's
+port-visit events contain corrupt durations.
+
+They do not. The number being profiled was `duration_hours`, which is GFW's
+**event span**, and it was being read as time alongside.
+
+A GFW port visit is stitched from up to four sub-events — `PORT_ENTRY`,
+`PORT_STOP`, `PORT_GAP`, `PORT_EXIT` — and the event's `start`..`end` covers
+whichever of them GFW managed to observe. That span is a dwell only when the
+vessel **stopped** and the anchorage it **entered is the anchorage it left**.
+Otherwise the same number measures a transit across a port polygon, or an entry
+and an exit at two different anchorages with everything in between unobserved.
+
+The mapper that wrote the 3,000 landed rows recorded none of the fields needed
+to tell those cases apart. Measured on that corpus: `confidence` and
+`gfw_confidence_raw` are null on **100%** of port visits, and `port_name` — read
+from the stop anchorage and from nowhere else — on **45.6%**. The mapper was
+fixed on 2026-07-29 (`_confidence_raw` looks under `port_visit.confidence`; the
+three anchorage records are flattened onto the row). The landed rows were not,
+and cannot fix themselves.
+
+**Decision — four parts.**
+
+**(a) `duration_hours` keeps meaning exactly what GFW said.** It is never
+clamped and never corrected. A cap in the ingest layer would destroy the
+evidence that the source produces these spans and would put a magic number
+where nothing downstream could see it.
+
+**(b) `dwell_hours` is a new column, populated only where the structure supports
+the claim** — an observed stop, and every anchorage id present in agreement.
+Everywhere else it is NULL, which is the honest answer: we do not know how long
+this vessel was alongside. `visit_anchorages_agree` is `None` rather than
+`False` when fewer than two anchorage ids are present, because "they disagree"
+and "we cannot tell" are different facts and collapsing them lets an unknown
+read as a finding.
+
+**(c) The landed table is re-derived from raw, not patched.** This is what
+CLAUDE.md §4.2 exists for: raw is immutable and on disk, so
+`tools/rebuild_conformed.py` re-runs the current `map_event` over the same bytes
+GFW returned. No network — ADR-013 puts the machine in download-only mode, and
+re-running the connectors would return a *different* window of events, changing
+the corpus in the course of repairing a column. Synthetic rows are carried
+through untouched (they share partitions by ADR-019), real rows with no raw
+record are preserved and reported loudly, and `ingested_at` is preserved while
+`pipeline_version` is restamped: a re-derivation is not a new ingest, but it is
+new code.
+
+**(d) The generator emits the same mix of visit structures.** If every synthetic
+port visit were a clean dwell, `WHERE dwell_hours IS NULL` would be a perfect
+real-row detector — the null-rate failure family from `nulls.py` reached through
+a third door. The class is allocated **stratified, not sampled**: 45 port visits
+cannot hit a 40% target on independent draws (the first attempt landed at 64%),
+so rows are ordered by a hash of their event id and sliced at the cumulative
+fractions. The fields are then derived by the same rule the real mapper applies,
+because independent per-column draws would hit every marginal and still produce
+rows that are jointly impossible — a dwell with no stop.
+
+**Consequences.**
+
+- **~46% of real port visits stopped being dropped by the graph.** `port_id` is
+  read from the stop anchorage alone, and `add_port_visits` keyed on it, so
+  nearly half the port visits in the corpus produced no `docked-at` edge —
+  counted as `port_visits_skipped` and never looked at again. `visit_port_id`
+  resolves across entry, stop and exit, and records which one it used, because a
+  port attributed from the exit is a weaker claim than one attributed from the
+  stop.
+- **A latent landmine in the landing layer surfaced and is fixed.** Arrow types
+  a column from the values present, so a day partition where `dwell_hours`
+  happened to be null in every row was typed `null` while its sibling was
+  `double`; read together, DuckDB fails outright and **one sparse column makes
+  the whole table unqueryable**. `landing.reconcile_null_columns` retypes those
+  partitions after every land. The bug does not fire when a column is added — it
+  fires the first time a partition comes out empty, which is why it needed a
+  test rather than vigilance.
+- **What this deliberately does not fix: the tail on synthetic
+  `duration_hours`.** Real spans reach 2.3 years because GFW stitched across an
+  interval longer than the entire eight-week scenario window; manufacturing that
+  would mean emitting an event that never happened. Port-visit `duration_hours`
+  therefore remains a channel on which the two populations differ. It is
+  recorded here rather than papered over, and `dwell_hours` — the field anything
+  reasoning about time alongside should use — is the matched one.
+- `PLAUSIBLE_MAX_HOURS` stays as a floor under the generator even though its
+  input is now sane, so an unnoticed change in the source's semantics cannot put
+  vessels alongside for months again.
