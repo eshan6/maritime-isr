@@ -524,7 +524,29 @@ across the 3,000-row table. The generator now truncates the tail at 14 days and
 the distribution is still used because it is real. **Worth investigating on the
 ingest side — this is a real-data defect, not a scenario one.**
 
-**The landed events carry only `h3_r7` and `h3_r9`.** ADR-015 requires all five
+**✅ RESOLVED ON HOST 2026-07-31 — the landed events carried only `h3_r7`
+and `h3_r9`.**
+
+```
+table              parts     rows  positioned  cells added  corrected
+gfw_encounters         6       14          14           42          0
+gfw_loitering         86   24,153      24,153       72,459          0
+gfw_port_visits      407    3,000       3,000        9,000          0
+gfw_ais_gaps           4        5           5           15          0
+                                        27,172       81,516          0
+```
+
+**`corrected: 0` is the number that matters.** Every H3 cell already present
+was correct — nothing had been derived from a parent resolution, so the 7.2%
+ADR-015 failure mode had never occurred in this data. Only the three missing
+resolutions (r4, r6, r8) needed adding, and 27,172 × 3 = 81,516 confirms
+exactly that with nothing unexplained.
+
+Run on Eshan's laptop against the real corpus, `data/conformed` backed up
+first (3,373 files). **This is host-verified, not sandbox-green.** Original
+finding below.
+
+ ADR-015 requires all five
 resolutions, and the code does that now — but these rows were landed **before**
 the fix, so the ingest↔fusion join at res 6 still returns nothing. New tool:
 `python tools/restamp_h3.py --dry-run` reports, without `--dry-run` recomputes
