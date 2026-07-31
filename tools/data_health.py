@@ -298,13 +298,26 @@ def check_demo_has_something_to_show(rep: Report, tables: dict) -> None:
     gaps = tables.get("gfw_ais_gaps", [])
     enc = tables.get("gfw_encounters", [])
     flagged = [r for r in gaps if r.get("gfw_intentional_disabling")]
+    # **Always reported, both ways.** A check that only speaks when the answer
+    # is zero makes the non-zero case invisible — the count silently vanished
+    # from this report the first time it went above zero, which is precisely
+    # the number a demo lives or dies on.
     if not flagged:
         rep.add(WARN, "no flagged dark-vessel gaps",
-                f"{len(gaps):,} AIS gap(s) landed, {len(flagged)} flagged by "
-                f"GFW as intentional disabling",
+                f"{len(gaps):,} AIS gap(s) landed, 0 flagged by GFW as "
+                f"intentional disabling",
                 "the demo cannot show a real dark vessel from this corpus. "
                 "Run the scenario corpus alongside it and label every figure "
                 "as synthetic (ADR-019), or widen the pull")
+    else:
+        rep.add(INFO, "flagged dark-vessel gaps",
+                f"{len(flagged):,} of {len(gaps):,} AIS gap(s) are flagged by "
+                f"GFW as intentional disabling — vessel(s) "
+                + ", ".join(sorted({str(r.get("vessel_id"))[:12]
+                                    for r in flagged})[:5]),
+                "this is GFW's finding, not ours (CLAUDE.md §6) — quote it as "
+                "'GFW assessed this gap as intentional', never as our own "
+                "dark-vessel detection")
     if len(enc) < 20:
         rep.add(WARN, "encounter graph is thin",
                 f"{len(enc):,} encounter(s) across the whole AOI and window",

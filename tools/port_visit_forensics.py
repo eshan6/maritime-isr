@@ -149,7 +149,16 @@ def main() -> int:
     gfw_h, calc_h, both, disagree = [], [], 0, 0
     worst = None
     for ev in events.values():
-        g = ev.get("durationHours")
+        # **GFW spells it `durationHrs` and nests it inside the sub-object.**
+        # Looking only at a top-level `durationHours` reported "GFW sends no
+        # duration" on a corpus where every single event carries one.
+        pv = ev.get("port_visit") or ev.get("portVisit") or {}
+        g = None
+        for src in (pv if isinstance(pv, dict) else {}, ev.get("gap") or {}, ev):
+            if isinstance(src, dict):
+                g = src.get("durationHrs", src.get("durationHours"))
+                if g is not None:
+                    break
         s, e = _ts(ev, "start"), _ts(ev, "end")
         c = (e - s).total_seconds() / 3600.0 if s and e else None
         if g is not None:

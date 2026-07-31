@@ -248,9 +248,17 @@ def test_synthetic_visit_fields_are_jointly_possible():
     for r in rows:
         stop, agree = r["visit_has_stop"], r["visit_anchorages_agree"]
         assert (r["dwell_hours"] is not None) == bool(stop and agree is True)
-        # port_name comes from the stop anchorage and from nowhere else.
-        assert (r["port_name"] is not None) == bool(stop)
+        # `port_name` is the stop anchorage's `name`, so it requires a stop AND
+        # that GFW named it — measured, GFW names only 54.4% of anchorages, and
+        # a synthetic corpus that named all of them would be separable on this
+        # column alone.
+        assert (r["port_name"] is not None) == bool(
+            stop and r["anchorage_name"] is not None)
         assert (r["anchorage_id"] is not None) == bool(stop)
+        # The destination survives an unnamed anchorage. This is what lets a
+        # demo render a readable place for one GFW never named.
+        if stop:
+            assert r["anchorage_top_destination"]
         ids = [r[k] for k in ("start_anchorage_id", "anchorage_id",
                               "end_anchorage_id") if r[k]]
         if len(ids) >= 2:

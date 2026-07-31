@@ -566,10 +566,10 @@ across the 3,000-row table. The generator now truncates the tail at 14 days and
 the distribution is still used because it is real. **Worth investigating on the
 ingest side — this is a real-data defect, not a scenario one.**
 
-**⚠️ FIRST EXPLANATION REFUTED ON HOST 2026-07-31 — see the ADR-020 correction
-below. STILL OPEN.** The structural theory was measured and does not hold. What
-follows is the original reasoning, kept because the error is instructive; the
-correction is at the end of this section.
+**✅ RESOLVED ON HOST 2026-07-31 — ADR-020. Nothing was wrong with the data;
+the measurement was wrong.** Two explanations were tried and refuted before the
+raw payloads settled it. What follows is the original reasoning, kept because
+the error is instructive; the resolution is at the end of this section.
 
 The durations are not corrupt. The number being profiled was `duration_hours`,
 GFW's **event span**, read as though it were time alongside.
@@ -672,9 +672,58 @@ If that holds, the fix is in **the profiler, not ingest**: measure only visits
 fully contained in the query window, and state the cap. Ingest keeps landing
 what GFW returned.
 
-**Next: `python tools\port_visit_forensics.py`** — reads raw only, writes
-nothing. Answers pull size, GFW's `durationHours` vs `end - start`, contained
-vs straddling durations, and prints the extreme records verbatim.
+#### RESOLVED — the raw payloads, 2026-07-31
+
+`tools/port_visit_forensics.py` on the real corpus. Length bias is the whole
+effect and the long visits are genuine.
+
+```
+query window: 2026-06-04 .. 2026-07-30 (56 days)
+fully inside : 1,278 (42.6%)      crossing an edge: 1,722 (57.4%)
+
+                        p05     p25     p50        p75          p95           max
+all visits             4.0h   21.0h    107h  1,261h(53d)  20,242h(843d) 126,414h(5,267d)
+contained (unbiased)   2.2h    7.6h   18.7h     46.5h       262h(11d)     1,224h(51d)
+crossing an edge      24.2h   133h    855h   2,556h(107d) 35,545h(1,481d) 126,414h
+```
+
+**Median contained 18.7 h. Median straddling 856 h. A 46x ratio.** The contained
+distribution is an ordinary population of port calls topping out at the window
+length. The tail lives entirely in visits already in progress when we started
+looking.
+
+**The extremes are correct.** The 5,022-day visit sits at `ind-ind-76`,
+`topDestination: ALANG` — **the world's largest shipbreaking yard**, arrived
+2012 to be scrapped. Two more are laid up at Pipavav and Ghogha since 2012.
+Calling these degenerate was our error, not GFW's.
+
+**GFW's own duration agrees with ours to the second** (`durationHrs`
+126,413.72 vs `end - start` 126,413.72). There was never a discrepancy.
+
+Fix is in the profiler and nowhere else — already landed.
+
+#### Three unrelated fields were being read from the wrong place
+
+Found by printing the payloads, none related to the original question:
+
+1. **`durationHrs`, not `durationHours`, nested in the sub-object.** Every
+   duration was ours, computed from `end - start`, while GFW's sat unread. They
+   agree — but **`gap.durationHrs` was affected identically**, so
+   `gap_duration_hours` was null on every gap. Both spellings now accepted at
+   both levels.
+2. **`topDestination` present on 100% of anchorages, `name` on 54.4%.** The
+   readable place — VADINAR, MUNDRA, ALANG — was there all along and unlanded.
+   An anchorage rendering as `ind-ind-76` in front of an operator is a worse
+   answer than one rendering as ALANG. Now landed, and the generator matches
+   the 45.6% unnamed rate so the corpus stays non-separable.
+3. **`anchorageId`** is a distinct stable key from `id`. Now landed.
+
+#### Still open: the 3,000 cap
+
+The pull returned **exactly 3,000** port visits in one file — a page limit. The
+corpus is a sample of unknown size and unknown selection, so **no count taken
+from it describes the Arabian Sea**. `data_health.py` flags any round row count.
+Paginating the events connector is the fix and is **not done**.
 
 **Process note.** The first explanation was built by reasoning about what a
 field means from a null rate on a *neighbouring* column, and it survived an ADR,

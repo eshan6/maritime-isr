@@ -145,12 +145,27 @@ def _confidence_raw(ev: dict):
     return None
 
 
+_ANCHORAGE_KEYS = ("id", "name", "flag", "lat", "lon", "at_dock",
+                   "distance_from_shore_km", "anchorage_id", "top_destination")
+
+
 def _anchorage_fields(anch, prefix: str) -> dict:
-    """Flatten one GFW anchorage record under `prefix`."""
+    """Flatten one GFW anchorage record under `prefix`.
+
+    **`name` is null on ~46% of real anchorages and `topDestination` is not.**
+    Measured on the operator's corpus: `intermediateAnchorage.name` is present on
+    54.4% of the 3,000 port visits, while `topDestination` is present on 100% and
+    carries the readable place — "VADINAR", "MUNDRA", "ALANG". An anchorage that
+    renders as `ind-ind-76` in front of an operator is a worse answer than one
+    that renders as ALANG, and the information was there the whole time.
+
+    Both are landed. `name` stays exactly what GFW called the anchorage;
+    `top_destination` is where vessels calling there say they are going, which is
+    a different claim and is labelled as one rather than being folded into
+    `name`.
+    """
     if not isinstance(anch, dict):
-        return {f"{prefix}_{k}": None
-                for k in ("id", "name", "flag", "lat", "lon", "at_dock",
-                          "distance_from_shore_km")}
+        return {f"{prefix}_{k}": None for k in _ANCHORAGE_KEYS}
     return {
         f"{prefix}_id": anch.get("id"),
         f"{prefix}_name": anch.get("name"),
@@ -159,7 +174,36 @@ def _anchorage_fields(anch, prefix: str) -> dict:
         f"{prefix}_lon": _f(anch.get("lon")),
         f"{prefix}_at_dock": anch.get("atDock"),
         f"{prefix}_distance_from_shore_km": _f(anch.get("distanceFromShoreKm")),
+        # GFW's own stable key for the anchorage polygon, distinct from `id`.
+        f"{prefix}_anchorage_id": anch.get("anchorageId"),
+        f"{prefix}_top_destination": anch.get("topDestination"),
     }
+
+
+def _duration_hours(ev: dict, nested: dict, start, end) -> float | None:
+    """The event's duration, preferring the source's own number.
+
+    **GFW spells it `durationHrs` and nests it inside the event's sub-object**,
+    not `durationHours` at the top level. Reading the wrong key meant every
+    duration in the corpus was ours, computed as `end - start`. On this corpus
+    the two agree to the second, so nothing was wrong — but a value we compute
+    and a value the source asserts are different kinds of fact, and quietly
+    substituting one for the other is how a discrepancy stays invisible.
+
+    Both spellings are accepted at both levels, because an API that renamed the
+    field once can rename it again, and the fallback to `end - start` remains so
+    an event without either still lands.
+    """
+    for src in (nested, ev):
+        if not isinstance(src, dict):
+            continue
+        for key in ("durationHrs", "durationHours"):
+            v = _f(src.get(key))
+            if v is not None:
+                return v
+    if start and end:
+        return (end - start).total_seconds() / 3600.0
+    return None
 
 
 def _port_visit_structure(pv: dict, duration_h: float | None) -> dict:
@@ -254,9 +298,11 @@ def map_event(ev: dict, kind: str) -> dict | None:
     if not isinstance(pv, dict):
         pv = {}
 
-    duration_h = ev.get("durationHours")
-    if duration_h is None and start and end:
-        duration_h = (end - start).total_seconds() / 3600.0
+    # The sub-object that carries this kind's own duration, if any.
+    _nested = pv if kind == "port_visits" else (
+        gap if kind == "gaps" else
+        (ev.get("encounter") if isinstance(ev.get("encounter"), dict) else {}))
+    duration_h = _duration_hours(ev, _nested, start, end)
 
     row = {
         "event_id": str(event_id),
@@ -311,7 +357,11 @@ def map_event(ev: dict, kind: str) -> dict | None:
         # ---- gaps ----------------------------------------------------------
         "gap_distance_km": _f(gap.get("distanceKm")),
         "gap_implied_speed_kn": _f(gap.get("impliedSpeedKnots")),
-        "gap_duration_hours": _f(gap.get("durationHours")),
+        # `durationHrs` is GFW's spelling — see `_duration_hours`. Reading only
+        # `durationHours` here would have left this null on every gap.
+        "gap_duration_hours": _f(gap.get("durationHrs")
+                                 if gap.get("durationHrs") is not None
+                                 else gap.get("durationHours")),
         # GFW'S OWN dark-vessel judgement. Arguably the single most valuable
         # field in the entire pull, and it was being dropped on the floor.
         # Recorded as GFW's assertion, never re-asserted as ours: per

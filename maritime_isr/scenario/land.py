@@ -24,6 +24,7 @@ detection code may read.
 """
 from __future__ import annotations
 
+import hashlib
 from datetime import timezone
 
 from ..ingest.landing import land_table, stamp_envelope, stamp_h3
@@ -75,33 +76,57 @@ _OTHER_ANCHORAGES = ("Sikka", "Vadinar", "Mundra", "Kandla", "JNPT",
 _PORT_FLAG = {"Karachi": "PAK", "Gwadar": "PAK"}
 
 
+#: Fraction of real GFW anchorage records that carry no `name` at all.
+#: Measured on the operator's corpus 2026-07-31 by `port_visit_forensics.py`:
+#: `intermediateAnchorage.name` present on 1,633 of 3,000 (54.4%), start on
+#: 54.5%, end on 57.0% — while `id`, `flag`, `lat`, `lon` and `topDestination`
+#: are present on **100%**. So an unnamed anchorage is the normal case, not a
+#: defect, and a synthetic corpus where every anchorage is named is separable
+#: from the real one by `WHERE anchorage_name IS NULL`.
+ANCHORAGE_NAME_NULL_RATE = 0.456
+
+
 def _anchorage_record(name: str | None, aid: str | None, prefix: str,
-                      *, at_dock: bool | None) -> dict:
+                      *, at_dock: bool | None, keep_name: bool = True) -> dict:
     """One anchorage in the shape `ingest.gfw_events._anchorage_fields` writes.
 
     Real port visits carry a full record per anchorage — id, name, flag,
-    position, whether the vessel was at a dock, distance from shore. Emitting
-    only the id and name would leave five columns populated on real rows and
+    position, whether the vessel was at a dock, distance from shore, GFW's own
+    anchorage key and the destination vessels calling there declare. Emitting
+    only the id and name would leave seven columns populated on real rows and
     null on every synthetic one, which is the separability problem this whole
     area exists to avoid, arriving through the least interesting door.
+
+    `keep_name` is decided once per visit by the caller, not once per anchorage,
+    because the real records agree within a visit: an unnamed anchorage tends to
+    be unnamed at entry, stop and exit alike.
     """
     from .geography import ANCHORAGES, PORTS
     from .scenarios.common import _shore_km
 
+    from ..ingest.gfw_events import _ANCHORAGE_KEYS
+
     if not (name or aid):
-        return {f"{prefix}_{k}": None
-                for k in ("id", "name", "flag", "lat", "lon", "at_dock",
-                          "distance_from_shore_km")}
+        return {f"{prefix}_{k}": None for k in _ANCHORAGE_KEYS}
     pos = (ANCHORAGES.get(name) or PORTS.get(name)) if name else None
     return {
         f"{prefix}_id": aid,
-        f"{prefix}_name": name,
+        # Dropped at the measured rate; `top_destination` below is kept, which
+        # is the shape the real records have and the reason a demo can still
+        # render a readable place for an anchorage GFW never named.
+        f"{prefix}_name": name if keep_name else None,
         f"{prefix}_flag": _PORT_FLAG.get(name or "", "IND"),
         f"{prefix}_lat": round(pos[0], 4) if pos else None,
         f"{prefix}_lon": round(pos[1], 4) if pos else None,
         f"{prefix}_at_dock": at_dock,
         f"{prefix}_distance_from_shore_km": (round(_shore_km(*pos), 1)
                                              if pos else None),
+        # sha256, not `hash()` — Python's string hash is salted per process, so
+        # using it here would break byte-identical regeneration at a fixed seed.
+        f"{prefix}_anchorage_id": (
+            hashlib.sha256((aid or name).encode()).hexdigest()[:8]
+            if (aid or name) else None),
+        f"{prefix}_top_destination": (name or "").upper() or None,
     }
 
 
@@ -174,6 +199,10 @@ def apply_visit_structure(row: dict, cls: str) -> dict:
     """
     u = _draw01("gfw_port_visits", "anchorage_pick",
                 str(row.get("event_id") or ""))
+    # Whether GFW named this visit's anchorages at all. Drawn once per visit,
+    # not once per anchorage, because the real records agree within a visit.
+    named = _draw01("gfw_port_visits", "anchorage_named",
+                    str(row.get("event_id") or "")) >= ANCHORAGE_NAME_NULL_RATE
     port = row.get("port_name")
     pid = row.get("port_id")
     duration = row.get("duration_hours")
@@ -199,17 +228,29 @@ def apply_visit_structure(row: dict, cls: str) -> dict:
         stop, agree, end_id, end_name = False, None, None, None
         row["port_id"] = row["port_name"] = None
 
+    # `port_name` is read from the stop anchorage's `name` and from nowhere
+    # else, so it inherits that column's nullity exactly. Without this it would
+    # be 100% populated on synthetic rows against 54.4% on real ones — the same
+    # separability hole, one column over.
+    if not named:
+        row["port_name"] = None
+
     row.update({
-        **_anchorage_record(port, pid, "start_anchorage", at_dock=False),
+        **_anchorage_record(port, pid, "start_anchorage", at_dock=False,
+                            keep_name=named),
         **_anchorage_record(port if stop else None, pid if stop else None,
-                            "anchorage", at_dock=True),
-        **_anchorage_record(end_name, end_id, "end_anchorage", at_dock=False),
+                            "anchorage", at_dock=True, keep_name=named),
+        **_anchorage_record(end_name, end_id, "end_anchorage", at_dock=False,
+                            keep_name=named),
         "visit_confidence": {"dwell": 4, "anchorages_differ": 3,
                              "no_stop": 2}.get(cls),
         "visit_has_stop": stop,
         "visit_anchorages_agree": agree,
         "visit_port_id": pid if stop else (pid or end_id),
-        "visit_port_name": port if stop else (port or end_name),
+        # Falls back to the destination when GFW named nothing, which is what
+        # lets a demo render ALANG instead of `ind-ind-76`.
+        "visit_port_name": ((port if stop else (port or end_name)) if named
+                            else (port or end_name or "").upper() or None),
         "visit_port_source": ("intermediate" if stop
                               else "start" if pid or port
                               else "end" if end_id or end_name else None),

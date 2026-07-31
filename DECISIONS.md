@@ -808,3 +808,79 @@ tool, a validator, sixteen tests and a PR description before any of it met the
 data. Every one of those artefacts was internally consistent and jointly wrong.
 The audit output in `rebuild_conformed.py` is what caught it, which is an
 argument for tools that print what changed rather than asserting that it worked.
+
+### ADR-020 — RESOLVED, 2026-07-31, from the raw payloads
+
+`tools/port_visit_forensics.py` on the operator's corpus. **Nothing is wrong
+with the data. The measurement was wrong.**
+
+**1. Length-biased sampling, confirmed, and it is the whole effect.**
+
+```
+query window: 2026-06-04 .. 2026-07-30 (56 days)
+fully inside the window : 1,278 (42.6%)
+crossing an edge        : 1,722 (57.4%)   <- all start BEFORE the window opened
+
+                        p05     p25     p50        p75          p95           max
+all visits             4.0h   21.0h    107h  1,261h(53d)  20,242h(843d) 126,414h(5,267d)
+contained (unbiased)   2.2h    7.6h   18.7h     46.5h       262h(11d)     1,224h(51d)
+crossing an edge      24.2h   133h    855h   2,556h(107d) 35,545h(1,481d) 126,414h
+```
+
+Median contained **18.7 h**, median straddling **856 h** — a ratio of **46x**.
+The contained distribution is an entirely ordinary population of port calls,
+topping out at 51 days, which is the window. The tail lives entirely in events
+that were already in progress when we started looking.
+
+**2. The extreme records are correct.** Printed verbatim rather than reasoned
+about, and they are exactly what they should be:
+
+| span | anchorage | `atDock` | what it is |
+|---|---|---|---|
+| 5,022 d | `ind-ind-76`, `topDestination: ALANG` | true | **Alang is the world's largest shipbreaking yard.** Arrived 2012 to be scrapped. |
+| 5,054 d | `ind-pipavav`, PIPAVAV | true | laid up alongside since 2012 |
+| 4,904 d | GHOGHA ANCHORAGE | false | laid up at anchor since 2013 |
+
+A ship that went to Alang in 2012 really has been there ever since. Calling
+that a degenerate duration was our error, not GFW's.
+
+**3. GFW's duration agrees with ours to the second** — `port_visit.durationHrs`
+= 126,413.72 against `end - start` = 126,413.72. There is no discrepancy to
+explain, because there was never a discrepancy.
+
+**Decision.** The fix is in the profiler and **nowhere else**. Ingest keeps
+landing exactly what GFW returns, unclamped. `tools/corpus_profile.py` measures
+`port_call_dwell_hours` from window-contained visits and writes the unfiltered
+figure separately as `port_visit_span_hours`. The `PLAUSIBLE_MAX_HOURS` cap now
+never fires on the de-biased figure and stays only as a floor under the
+generator.
+
+**Three things the raw payloads corrected that had nothing to do with the
+original question**, each one a field being read from the wrong place:
+
+1. **`durationHrs`, not `durationHours`, and nested inside the sub-object.**
+   Every duration in the corpus was ours, computed from `end - start`, while
+   GFW's own number sat unread. They agree here — but a value we compute and a
+   value the source asserts are different kinds of fact, and substituting one
+   for the other is how a future discrepancy would stay invisible. Both
+   spellings are now accepted at both levels. **`gap.durationHrs` was affected
+   the same way**, which means `gap_duration_hours` was null on every gap.
+2. **`topDestination` is present on 100% of anchorages; `name` on 54.4%.** The
+   readable place — VADINAR, MUNDRA, ALANG — was there all along and was not
+   being landed. An anchorage that renders as `ind-ind-76` in front of an
+   operator is a worse answer than one that renders as ALANG.
+3. **`anchorageId`** is a distinct stable key from `id` and is now landed.
+
+**The 3,000 cap stands as a separate, unresolved finding.** The pull returned
+exactly 3,000 port visits in one file. That is a page limit, so the corpus is a
+sample of unknown size and unknown selection, and no count taken from it
+describes the Arabian Sea. `data_health.py` flags any round row count for this
+reason. Paginating the events connector is the fix and is not done.
+
+**The process lesson, restated because it cost three passes.** Every wrong
+answer in this ADR came from reasoning about what a field *means* from summary
+statistics — a null rate, a quantile — rather than reading one record. The
+corpus was never in the sandbox, and the correct first move was a ten-line
+diagnostic that printed a payload, not an explanation built on a neighbouring
+column's null rate. Both the structural theory and the "46% dropped by the
+graph" claim would have died in the first minute against a single raw record.
