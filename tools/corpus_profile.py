@@ -104,6 +104,73 @@ def _read(table: str) -> list[dict]:
     return real
 
 
+#: Every table the scenario generator writes into. Their schemas decide whether
+#: synthetic rows can merge into the same day partitions as real rows.
+SHARED_TABLES = ("gfw_vessel_identity", "gfw_encounters", "gfw_loitering",
+                 "gfw_port_visits", "gfw_ais_gaps", "sanctioned_vessel_matches",
+                 "sanctions", "ais_position")
+
+
+def dump_schemas() -> dict:
+    """Column names, inferred types and null rates for every shared table.
+
+    **This is the compatibility check, and it is the reason the profile matters
+    beyond realism.** Scenario rows land into the *same day partitions* as real
+    rows (ADR-019), which means `land_table` reads the existing partition,
+    merges, and rewrites it through `pa.Table.from_pylist`. If a column holds a
+    string in real rows and an int in synthetic ones, Arrow raises and the
+    write fails — on a partition containing real data.
+
+    So this reports, per column: the Python types actually present, the null
+    rate, and one redacted example. Types let the generator be checked against
+    reality; **null rates matter just as much**, because a field that is 95%
+    null in the real corpus but always populated in synthetic rows makes the
+    two trivially separable, which is its own failure (STATE.md: "null that
+    looks populated is the same failure family").
+
+    No vessel names, positions or identifiers are included here — those live in
+    the identifiers block, which the collision guard needs. Examples are
+    truncated and numeric values are reported as their type only.
+    """
+    out = {}
+    for table in SHARED_TABLES:
+        try:
+            rows = read_table(table)
+        except Exception as exc:                              # noqa: BLE001
+            out[table] = dict(error=f"{type(exc).__name__}: {exc}")
+            continue
+        real = [r for r in rows if not r.get("is_synthetic")]
+        if not real:
+            out[table] = dict(n_rows=0, note="no real rows on this machine")
+            print(f"  {table:<28} no real rows")
+            continue
+
+        cols = {}
+        keys = set()
+        for r in real:
+            keys.update(r.keys())
+        for k in sorted(keys):
+            types = set()
+            n_null = 0
+            example = None
+            for r in real:
+                v = r.get(k)
+                if v is None:
+                    n_null += 1
+                    continue
+                types.add(type(v).__name__)
+                if example is None:
+                    # Strings are truncated; everything else reports its type
+                    # only, so no identifier or position leaves the machine here.
+                    example = (v[:24] if isinstance(v, str) else f"<{type(v).__name__}>")
+            cols[k] = dict(types=sorted(types),
+                           null_rate=round(n_null / len(real), 4),
+                           example=example)
+        out[table] = dict(n_rows=len(real), columns=cols)
+        print(f"  {table:<28} {len(real):>8,} real row(s), {len(cols)} column(s)")
+    return out
+
+
 def build_profile() -> dict:
     print("reading landed tables:")
     identity = _read("gfw_vessel_identity")
@@ -241,10 +308,14 @@ def build_profile() -> dict:
         as_str = sorted(str(t) for t in times)
         window = dict(start=as_str[0][:19], end=as_str[-1][:19])
 
+    print("\nschemas of the tables scenario rows will share:")
+    schemas = dump_schemas()
+
     return dict(
         generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         pipeline_version=PIPELINE_VERSION,
         corpus_window=window,
+        schemas=schemas,
         distributions=dists,
         identifiers=dict(real_imos=real_imos, real_mmsis=real_mmsis,
                          ofac_imos=ofac_imos),
@@ -261,7 +332,9 @@ def main() -> int:
     n_dist = len(prof["distributions"])
     ids = prof["identifiers"]
     size_kb = OUT_PATH.stat().st_size / 1024
-    print(f"\n{n_dist} distribution(s), "
+    n_sch = sum(1 for v in prof.get("schemas", {}).values() if v.get("n_rows"))
+    print(f"\n{n_sch} table schema(s) captured")
+    print(f"{n_dist} distribution(s), "
           f"{len(ids['real_imos'])} real IMO(s), "
           f"{len(ids['real_mmsis'])} real MMSI(s), "
           f"{len(ids['ofac_imos'])} OFAC IMO(s)")

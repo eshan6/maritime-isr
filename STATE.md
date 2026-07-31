@@ -425,6 +425,39 @@ with their capability boundary recorded and a number attached.
 4. **Landing merges within a day partition only**, so a re-run whose timing
    shifted landed duplicate truth rows. **Fixed** — `generate` clears first.
 
+### FIRST RUN ON THE LAPTOP — do this before generating
+
+**Back up `data/conformed/` first.** Scenario rows land into the *same day
+partitions* as real rows, so `land_table` reads each partition, merges, and
+rewrites it. Raw is immutable and conformed is re-derivable, but re-deriving is
+a re-run of every connector — a copy is cheaper:
+
+```
+xcopy /E /I data\conformed data\conformed_backup     (Windows)
+```
+
+**Then, in this order:**
+
+```
+python tools/corpus_profile.py            # 1. read-only; writes the profile
+python -m maritime_isr.cli scenario status  # 2. read-only; shows the split is 0
+python -m maritime_isr.cli scenario generate --seed 7
+python -m maritime_isr.cli scenario clear   # 4. proves the round trip is clean
+```
+
+Step 1 is read-only and touches nothing. **Run steps 1-2 and paste the output
+back before running step 3** — the profile carries the real schemas and null
+rates, which is what says whether the merge will work at all.
+
+**The known risk, and why it is survivable.** If a column holds a string in the
+real rows and a number in the synthetic ones, Arrow raises on conversion and
+the write fails. `tests/test_scenario_mixed_corpus.py` pins that failure as
+**loud** — it raises naming the column rather than silently coercing — and
+`clear()` is tested to leave real-only partitions untouched and real rows
+byte-identical. The fixtures in that test are *fabricated to the connector
+shapes read off the source*, not real rows; the profile from step 1 is what
+turns that guess into a check.
+
 ### Still to do here
 
 - **Run `tools/corpus_profile.py` on the laptop.** Every generator parameter is
