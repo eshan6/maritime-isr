@@ -233,3 +233,111 @@ def test_without_a_window_the_profiler_says_it_cannot_debias(data_root, capsys):
     profile.build_profile()
     out = capsys.readouterr().out
     assert "CANNOT be de-biased" in out
+
+
+# --------------------------------------------------------------------------
+# the OFAC lookup must never report "0" when it means "I did not run"
+# --------------------------------------------------------------------------
+
+def test_ofac_lookup_explains_a_missing_database(tmp_path, monkeypatch):
+    """"Zero designated vessels" and "the lookup failed" are different facts.
+
+    The first version returned a bare `set()` on every failure path, so the
+    profiler printed `0 vessel IMO(s)` on a machine holding 1,516 designated
+    vessels and the collision guard ran against a denominator of 121 while
+    reporting success. This is the same failure family as the green `doctor`
+    that masked three separate faults (STATE.md): a check that cannot tell
+    absence from breakage.
+    """
+    from maritime_isr import config
+    from maritime_isr.ingest.ofac_lookup import ofac_snapshot
+
+    monkeypatch.setattr(config.cfg, "data_root", tmp_path)
+    snap = ofac_snapshot()
+    assert not snap.ok
+    assert snap.imos == set()
+    assert "UNAVAILABLE" in snap.describe()
+    # The reason has to be actionable, not just present.
+    assert "duckdb" in snap.reason.lower() or "database" in snap.reason.lower()
+
+
+def test_ofac_lookup_names_the_tables_it_looked_for(tmp_path, monkeypatch):
+    """A miss must say what it tried, so a renamed table is a one-line fix."""
+    duckdb = pytest.importorskip("duckdb")
+    from maritime_isr import config
+    from maritime_isr.ingest import ofac_lookup
+
+    monkeypatch.setattr(config.cfg, "data_root", tmp_path)
+    con = duckdb.connect(str(tmp_path / "misr.duckdb"))
+    con.execute("CREATE TABLE something_else (a INTEGER)")
+    con.close()
+
+    snap = ofac_lookup.ofac_snapshot()
+    assert not snap.ok
+    assert "ofac_sdn" in snap.reason, "must name what it looked for"
+    assert "something_else" in snap.reason, "must name what it found"
+
+
+def test_ofac_lookup_reads_imos_out_of_free_text(tmp_path, monkeypatch):
+    """OFAC has no IMO column; the number is regexed out of `remarks`."""
+    duckdb = pytest.importorskip("duckdb")
+    from maritime_isr import config
+    from maritime_isr.ingest import ofac_lookup
+
+    monkeypatch.setattr(config.cfg, "data_root", tmp_path)
+    con = duckdb.connect(str(tmp_path / "misr.duckdb"))
+    con.execute("CREATE TABLE ofac_sdn (sdn_type VARCHAR, remarks VARCHAR)")
+    con.execute("INSERT INTO ofac_sdn VALUES "
+                "('vessel', 'Vessel Registration Identification IMO 9164263'),"
+                "('individual', 'DOB 1970; passport 1234567')")
+    con.close()
+
+    snap = ofac_lookup.ofac_snapshot()
+    assert snap.ok, snap.reason
+    assert "9164263" in snap.imos
+    assert snap.table == "ofac_sdn"
+
+
+def test_ofac_lookup_falls_back_when_the_type_column_is_named_oddly(
+        tmp_path, monkeypatch):
+    """Better to scan the whole table than to return zero and call it a count.
+
+    A person's remarks will not carry a valid IMO check digit, so the vessel
+    filter is an optimisation. Silently returning nothing because the type
+    column was renamed is the outcome to avoid.
+    """
+    duckdb = pytest.importorskip("duckdb")
+    from maritime_isr import config
+    from maritime_isr.ingest import ofac_lookup
+
+    monkeypatch.setattr(config.cfg, "data_root", tmp_path)
+    con = duckdb.connect(str(tmp_path / "misr.duckdb"))
+    con.execute("CREATE TABLE ofac_sdn (kind_of_thing VARCHAR, remarks VARCHAR)")
+    con.execute("INSERT INTO ofac_sdn VALUES ('boat', 'IMO 9164263')")
+    con.close()
+
+    snap = ofac_lookup.ofac_snapshot()
+    assert snap.ok, snap.reason
+    assert "9164263" in snap.imos
+
+
+def test_read_only_connect_works_at_all(tmp_path, monkeypatch):
+    """`connect(read_only=True)` must return a connection, not raise.
+
+    It raised on every call because `_register_views` used a plain
+    `CREATE OR REPLACE VIEW`, which writes to the database file and is refused
+    in read-only mode. Every read-only consumer therefore got an exception, and
+    the one that swallowed it published `0 vessel IMO(s)` on a corpus holding
+    1,516 designated vessels. The views are TEMP now.
+    """
+    duckdb = pytest.importorskip("duckdb")
+    from maritime_isr import config, db
+
+    monkeypatch.setattr(config.cfg, "data_root", tmp_path)
+    duckdb.connect(str(config.cfg.duckdb_path())).close()   # create the file
+
+    con = db.connect(read_only=True)
+    try:
+        assert con.execute("SELECT 1").fetchone() == (1,)
+    finally:
+        con.close()

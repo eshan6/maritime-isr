@@ -43,16 +43,30 @@ def connect(read_only: bool = False) -> duckdb.DuckDBPyConnection:
 
 
 def _register_views(con: duckdb.DuckDBPyConnection) -> None:
+    """Expose the Parquet stores as views on this connection.
+
+    **TEMP views, and that is load-bearing.** A plain `CREATE OR REPLACE VIEW`
+    writes to the database file, which DuckDB refuses in read-only mode — so
+    `connect(read_only=True)` raised here on every call and every read-only
+    consumer got an exception instead of a connection. The OFAC lookup swallowed
+    it and reported `0 vessel IMO(s)` on a machine holding 1,516 designated
+    vessels, which is how a broken connection became a published number.
+
+    Temp views live in memory, are recreated on every connect anyway, and never
+    needed persisting. Making them temporary costs nothing and makes read-only
+    access work at all.
+    """
     for store in PARQUET_STORES:
         pattern = glob_for_reader(store)
         try:
             con.execute(
-                f"CREATE OR REPLACE VIEW {store} AS "
+                f"CREATE OR REPLACE TEMP VIEW {store} AS "
                 f"SELECT * FROM read_parquet('{pattern}', union_by_name=true, filename=true)"
             )
         except duckdb.Error:
             # no partitions yet — expose an empty stub so queries don't crash
-            con.execute(f"CREATE OR REPLACE VIEW {store} AS SELECT NULL WHERE false")
+            con.execute(
+                f"CREATE OR REPLACE TEMP VIEW {store} AS SELECT NULL WHERE false")
 
 
 def table_exists(con: duckdb.DuckDBPyConnection, name: str) -> bool:

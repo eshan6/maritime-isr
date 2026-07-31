@@ -48,7 +48,11 @@ R2, no systemd, no SNAP, no live AIS capture.
 **What that data is, precisely:** GFW's *derived* behaviour events (loitering,
 port visits, encounters, AIS gaps), vessel identity, three sanctions lists, and
 Sentinel-1 scene metadata. **No SAR imagery, no AIS position tracks, and no dark
-vessel detected by us.** GFW's 5 gap events are GFW's finding, not ours. Our own
+vessel detected by us.** GFW's 5 gap events are GFW's finding, not ours — and as
+of 2026-07-31 **all five are flagged by GFW as intentional AIS disabling**,
+which the earlier mapper was not reading and which this file recorded as zero
+for a day. That is five real vessels GFW assessed as deliberately going dark,
+and it is still GFW's assertion rather than our detection. Our own
 dark-vessel detection needs SAR contacts matched against AIS tracks, and neither
 is obtainable free for this AOI (see DATA_SOURCES.md). The synthetic Phase 1–6
 prototype remains green in-sandbox and every metric it produces is synthetic.
@@ -149,8 +153,15 @@ these produce are the point; do not quote any of them until he pastes a run back
 
     1. python -m maritime_isr.cli ingest sanctions-match
     2. python tools/review_matches.py            # DONE - 98/98 pass
-    3. python tools/analytic_rename_gap.py       # DONE - re-run after the fix
-    4. python tools/graph_report.py              # NOT YET RUN
+    3. python tools/analytic_rename_gap.py       # RE-RUN — it ran against nulls
+    4. python tools/graph_report.py              # RE-RUN — same reason
+
+**Both 3 and 4 must be re-run and their earlier results treated as void.** They
+read `gfw_intentional_disabling`, which was null on every gap row until the
+rebuild recovered it. The corpus holds **5 of 5 gaps flagged by GFW as
+intentional disabling**, not zero — see the overturned finding below. Any
+conclusion either tool reached about dark vessels was reached against an empty
+column.
 
 ### Before those: the port-visit work (ADR-020)
 
@@ -316,6 +327,41 @@ true, explicitly false, null) and distinguishes three cases — an empty table
 having genuinely assessed gaps and flagged none (a real negative). **Run it again
 after the fix to see which of the three we are in** — if the column is entirely
 null, the mapping needs checking before any conclusion about vessels.
+
+#### ⛔ OVERTURNED ON HOST 2026-07-31 — it was case two, the mapping bug
+
+`tools/data_health.py`, after `rebuild_conformed.py` re-derived the gaps table
+from raw with the current mapper:
+
+```
+[INFO] flagged dark-vessel gaps
+       5 of 5 AIS gap(s) are flagged by GFW as intentional disabling
+       vessels 324afd84e-ee, 854502228-8e, a76aaca78-8c, a7886313f-f8, e2a85d697-7a
+```
+
+**Not zero. All five.** The verdict column was entirely null because the mapper
+that landed those rows never read `gap.intentionalDisabling` — it was added on
+2026-07-29 and the rows predate it. The negative above was our bug reported as a
+finding about the world, and it stood for a day.
+
+**Everything that "zero flagged gaps" was used to justify has to be re-examined**,
+because it was one of the two numbers behind the decision not to build a graph UI
+and behind ADR-019's framing of the corpus as having nothing to exercise. The
+other number — 0 of 98 OFAC-matched vessels with an encounter edge — is
+independent and still stands until re-measured.
+
+**What this is, stated precisely (CLAUDE.md §6).** These are **GFW's**
+assessments that a vessel deliberately switched off AIS, carried through as
+GFW's assertion. They are **not** our dark-vessel detections: we did not compute
+them, we have no receiver-coverage model over those positions, and asserting
+intentional silence outside demonstrated coverage is a false positive by
+construction. The honest sentence is *"GFW assessed this gap as intentional
+disabling"* — never *"we detected a dark vessel."*
+
+**For the demo this is the single most valuable row in the corpus**: five real
+vessels, in the Arabian Sea, in the last eight weeks, with a named source and a
+traceable assertion. Re-run `tools/analytic_rename_gap.py` and
+`tools/graph_report.py` — both consumed this column and both ran against nulls.
 
 ### 4. THE DECIDING NUMBER — a graph UI has nothing to draw
 

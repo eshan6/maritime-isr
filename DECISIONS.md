@@ -884,3 +884,69 @@ corpus was never in the sandbox, and the correct first move was a ten-line
 diagnostic that printed a payload, not an explanation built on a neighbouring
 column's null rate. Both the structural theory and the "46% dropped by the
 graph" claim would have died in the first minute against a single raw record.
+
+---
+
+## ADR-021 — A check that cannot tell absence from breakage is not a check *(Accepted)*
+**2026-07-31. Generalises the pattern in STATE.md's "host-only bugs" list.**
+
+**Context.** Three separate faults in one day, all the same shape:
+
+1. **`gfw_intentional_disabling` was null on every gap row**, because the mapper
+   that landed them never read the field. `tools/analytic_rename_gap.py` and
+   `graph_report.py` both consumed it, found nothing, and STATE.md recorded
+   *"ZERO GFW-flagged intentionalDisabling gaps in the whole corpus"* as a
+   **finding about the world**. It was a finding about our mapper. Re-derived
+   from raw, **5 of 5 gaps are flagged** — and that number was one of the two
+   inputs to the decision not to build a graph UI.
+2. **`ofac_imos_from_duckdb` returned a bare `set()` on every failure path**, so
+   the profiler printed `0 vessel IMO(s)` on a machine holding 1,516 designated
+   vessels, and the identifier collision guard ran against a denominator of 121
+   while reporting success.
+3. **`connect(read_only=True)` raised on every call** — `_register_views` used
+   `CREATE OR REPLACE VIEW`, which writes to the database file and is refused in
+   read-only mode. This is *why* (2) failed, and nobody knew because (2)
+   swallowed the exception.
+
+Each of these produced a **zero that looked like a measurement**. None produced
+an error. The earlier examples in STATE.md — the green `doctor` that masked
+three faults — are the same family, and the lesson had been written down and
+then not applied.
+
+**Decision.** Any code path that answers "how many X are there" must be able to
+distinguish **"the answer is zero"** from **"the question could not be asked"**,
+and must say which.
+
+Concretely:
+
+- **No bare empty return on a failure path.** Return a result carrying `ok` and
+  a `reason`, or raise. `ofac_lookup.ofac_snapshot()` is the reference shape:
+  it names the table it looked in, the tables it tried, the row count it
+  scanned, and what went wrong.
+- **A reason must be actionable.** "unavailable" is not a reason; "no OFAC table
+  found, tried ofac_sdn/sdn/ofac, the database holds 7 tables including
+  ofac_entries" is.
+- **Report both directions.** `data_health.py`'s dark-vessel-gap check printed a
+  warning only when the count was zero, so the count silently disappeared from
+  the report the moment it went non-zero — hiding the single most demo-relevant
+  number in the corpus. Checks now print the measured value whichever way it
+  falls.
+- **A null column and an absent finding are different.** Before concluding
+  anything from an empty result, check whether the input column is populated at
+  all. `analytic_rename_gap.py` already distinguishes three cases (empty table /
+  all-null verdict / genuine negative) — that pattern is the requirement, not a
+  nicety.
+
+**Alternatives rejected.** Exceptions everywhere — rejected: a profiler that
+dies because one optional lookup is unavailable is worse than one that reports
+the gap and continues, and the caller is the right place to decide. Logging the
+reason instead of returning it — rejected: the number ends up in a report, a
+commit message and a PR description, and the caveat has to travel with it.
+
+**Consequences.** Slightly more ceremony at each lookup. In exchange, a zero in
+any report is now either a measurement or a labelled failure, and the specific
+mistake of publishing "zero flagged dark-vessel gaps" as a finding about the
+Arabian Sea cannot recur silently. **Every prior conclusion drawn from a zero
+should be re-checked against this bar** — the two still outstanding are the
+`0 of 98 OFAC-matched vessels with an encounter edge` figure and the WPI port
+coverage.

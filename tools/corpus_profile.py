@@ -419,13 +419,20 @@ def build_profile() -> dict:
     # parquet table — there is no `sanctions` directory at all. Reading the
     # wrong place gave the collision guard a denominator of 121 (only the IMOs
     # that happened to match) instead of the full ~1,500-vessel list.
+    # `describe()` rather than a count, because "0" and "the lookup did not run"
+    # are different facts and the first version could not tell them apart — it
+    # printed 0 on a machine holding 1,516 designated vessels.
     try:
-        from maritime_isr.ingest.ofac_lookup import ofac_imos_from_duckdb
-        duck = ofac_imos_from_duckdb()
-        print(f"  ofac_sdn (duckdb)            {len(duck):>8,} vessel IMO(s)")
-        ofac_imos.extend(duck)
+        from maritime_isr.ingest.ofac_lookup import ofac_snapshot
+        snap = ofac_snapshot()
+        print(f"  OFAC snapshot (duckdb)       {snap.describe()}")
+        if not snap.ok:
+            print("    the collision guard will run against the "
+                  f"{len(ofac_imos):,} matched IMO(s) only, which is a much "
+                  "smaller denominator than it should have")
+        ofac_imos.extend(snap.imos)
     except Exception as exc:                                   # noqa: BLE001
-        print(f"  ofac_sdn (duckdb)            unavailable ({exc})")
+        print(f"  OFAC snapshot (duckdb)       unavailable ({exc})")
     ofac_imos = sorted(set(ofac_imos))
 
     # ---- corpus window ----
