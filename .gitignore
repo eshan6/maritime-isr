@@ -9,3 +9,8 @@ logs/
 .pytest_cache/
 .DS_Store
 *.egg-info/
+
+# Phase 6 frontend build artifacts
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
