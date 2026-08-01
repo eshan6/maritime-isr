@@ -177,8 +177,15 @@ def audit(kind: str, before: list[dict], after: list[dict]) -> None:
         n = sum(1 for r in rows if r.get(field) is not None)
         return f"{n:,}/{len(rows):,} ({n / len(rows):.1%})"
 
-    fields = ["duration_hours", "port_id", "visit_port_id", "dwell_hours",
-              "visit_confidence", "gfw_confidence_raw", "confidence"]
+    # `port_name` and `visit_port_name` are here because they are what an
+    # operator actually reads on screen. `port_name` is GFW's anchorage name and
+    # is null on ~46% of real visits; `visit_port_name` falls back to
+    # `topDestination`, which is present on 100%. A field that only shows up in
+    # the UI is exactly the kind that gets fixed in code and never verified on
+    # disk, so it goes in the audit.
+    fields = ["duration_hours", "port_id", "port_name", "visit_port_id",
+              "visit_port_name", "dwell_hours", "visit_confidence",
+              "gfw_confidence_raw", "confidence"]
     print(f"    {'field':<24}{'before':>22}{'after':>22}")
     for f in fields:
         print(f"    {f:<24}{cov(before, f):>22}{cov(after, f):>22}")

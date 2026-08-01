@@ -490,3 +490,72 @@ def test_visit_without_a_stop_still_becomes_an_edge(tmp_path, monkeypatch):
     store = GraphStore(tmp_path / "graph.db")
     n, skipped = from_landed.add_port_visits(store, set())
     assert (n, skipped) == (1, 0)
+
+
+# --------------------------------------------------------------------------
+# the readable port name
+# --------------------------------------------------------------------------
+
+def test_unnamed_anchorage_falls_back_to_top_destination():
+    """`ind-ind-76` on screen, when ALANG was one field away.
+
+    Measured on the operator's corpus, `intermediateAnchorage.name` is present
+    on 54.4% of the 3,000 port visits and `topDestination` on 100%. This is the
+    exact record that motivated it: the Alang shipbreaking yard, unnamed.
+    """
+    r = map_event(_visit({
+        "confidence": "4",
+        "startAnchorage": {"id": "ind-ind-76", "name": None,
+                           "topDestination": "ALANG"},
+        "intermediateAnchorage": {"id": "ind-ind-76", "name": None,
+                                  "topDestination": "ALANG"},
+        "endAnchorage": {"id": "ind-ind-76", "name": None,
+                         "topDestination": "ALANG"},
+    }), "port_visits")
+    assert r["port_name"] is None, "GFW's own name field stays untouched"
+    assert r["visit_port_name"] == "ALANG"
+    assert r["visit_port_name_source"] == "top_destination"
+
+
+def test_a_real_anchorage_name_wins_over_top_destination():
+    """They are different claims and the stronger one must win."""
+    r = map_event(_visit({
+        "confidence": "4",
+        "startAnchorage": {"id": "ind-pipavav", "name": "PIPAVAV",
+                           "topDestination": "SOMEWHERE ELSE"},
+        "intermediateAnchorage": {"id": "ind-pipavav", "name": "PIPAVAV",
+                                  "topDestination": "SOMEWHERE ELSE"},
+        "endAnchorage": {"id": "ind-pipavav", "name": "PIPAVAV",
+                         "topDestination": "SOMEWHERE ELSE"},
+    }), "port_visits")
+    assert r["visit_port_name"] == "PIPAVAV"
+    assert r["visit_port_name_source"] == "anchorage_name"
+
+
+def test_gfw_duration_is_read_from_its_own_nested_key():
+    """GFW spells it `durationHrs` and nests it. We were computing our own.
+
+    The two agree on this corpus, so nothing was wrong — but a value we compute
+    and a value the source asserts are different kinds of fact, and substituting
+    one for the other is how a discrepancy stays invisible.
+    """
+    r = map_event(_visit({"confidence": "3", "durationHrs": 126413.72,
+                          "startAnchorage": _anch("ind-mundra"),
+                          "intermediateAnchorage": _anch("ind-vadinar"),
+                          "endAnchorage": _anch("ind-vadinar")},
+                         hours=1.0), "port_visits")
+    assert r["duration_hours"] == pytest.approx(126413.72), (
+        "GFW's own number must win over end - start")
+
+
+def test_gap_duration_accepts_both_spellings():
+    """`gap_duration_hours` was null on every gap for want of one key."""
+    for key in ("durationHrs", "durationHours"):
+        r = map_event({
+            "id": f"g-{key}", "type": "GAP",
+            "start": T.isoformat().replace("+00:00", "Z"),
+            "position": {"lat": 18.0, "lon": 64.0}, "vessel": {"id": "v9"},
+            "gap": {key: 12.72, "intentionalDisabling": True},
+        }, "gaps")
+        assert r["gap_duration_hours"] == pytest.approx(12.72), key
+        assert r["gfw_intentional_disabling"] is True

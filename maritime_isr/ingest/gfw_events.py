@@ -259,12 +259,29 @@ def _port_visit_structure(pv: dict, duration_h: float | None) -> dict:
     else:
         chosen = {}
 
+    # **The readable name, falling back to `topDestination`.** Measured on the
+    # operator's corpus, `intermediateAnchorage.name` is present on 54.4% of the
+    # 3,000 port visits and `topDestination` on 100%. Landing the column without
+    # using it left every second port rendering as `ind-ind-76` in front of an
+    # operator while the readable place — ALANG — sat unused one field away.
+    #
+    # They are not the same claim, so which one was used is recorded rather than
+    # silently blended: `name` is what GFW calls the anchorage, `top_destination`
+    # is where vessels calling there declare they are going. The second is an
+    # inference from traffic and is marked as one.
+    name = chosen.get("name")
+    name_source = "anchorage_name" if name else None
+    if not name and chosen.get("topDestination"):
+        name = chosen["topDestination"]
+        name_source = "top_destination"
+
     return {
         "visit_confidence": pv.get("confidence"),
         "visit_has_stop": has_stop,
         "visit_anchorages_agree": agree,
         "visit_port_id": chosen.get("id"),
-        "visit_port_name": chosen.get("name"),
+        "visit_port_name": name,
+        "visit_port_name_source": name_source,
         "visit_port_source": port_source,
         "dwell_hours": (float(duration_h)
                         if has_stop and agree and duration_h is not None

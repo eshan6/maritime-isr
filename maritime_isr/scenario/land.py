@@ -254,6 +254,14 @@ def apply_visit_structure(row: dict, cls: str) -> dict:
         "visit_port_source": ("intermediate" if stop
                               else "start" if pid or port
                               else "end" if end_id or end_name else None),
+        # Synthetic anchorages are always named, so the name always comes from
+        # the anchorage rather than from a topDestination fallback. Emitting the
+        # column keeps the shape identical to a real row; the *value* differing
+        # is a real fidelity gap and is recorded in the module docstring rather
+        # than faked by nulling a name we do have.
+        "visit_port_name_source": ("anchorage_name"
+                                   if (port if stop else (port or end_name))
+                                   else None),
         "dwell_hours": duration if (stop and agree) else None,
         "port_visit_id": f"pv:{row.get('event_id')}",
         # The connector carries distance context on both ends of every event.
