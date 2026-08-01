@@ -29,6 +29,27 @@ from maritime_isr.config import cfg  # noqa: E402
 from maritime_isr.graph import GraphStore  # noqa: E402
 from maritime_isr.graph import from_landed as fl  # noqa: E402
 from maritime_isr.ingest.landing import read_table  # noqa: E402
+
+#: Real rows only, and it must stay that way.
+#:
+#: Once the scenario generator has run (ADR-019), these tables hold synthetic
+#: rows alongside real ones in the same partitions. This tool quotes numbers
+#: that go into STATE.md and into external material — "98 vessels matched" —
+#: and blending three scenario hulls into that figure would turn a measured
+#: finding into a fabricated one. The hard ban is explicit: never blend real
+#: and synthetic into a single quoted number.
+#:
+#: Scenario counts are available separately from
+#: `python -m maritime_isr.cli scenario status`.
+def real_rows(table: str) -> list[dict]:
+    rows = read_table(table)
+    syn = sum(1 for r in rows if r.get("is_synthetic"))
+    if syn:
+        print(f"[real-only] {table}: excluded {syn:,} synthetic row(s); "
+              f"{len(rows) - syn:,} real row(s) remain")
+    return [r for r in rows if not r.get("is_synthetic")]
+
+
 from maritime_isr.ingest.sanctions_match import MATCH_TABLE  # noqa: E402
 
 RULE = "=" * 88
@@ -128,7 +149,7 @@ def report(store, *, at: float) -> None:
     print("  view; it is a row in a table.\n")
 
     adj, _ = _adjacency(store)
-    matches = read_table(MATCH_TABLE)
+    matches = real_rows(MATCH_TABLE)
     if not matches:
         print("  No matches landed. Run: maritime-isr ingest sanctions-match")
         return

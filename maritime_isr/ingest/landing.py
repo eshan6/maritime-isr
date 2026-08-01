@@ -41,8 +41,10 @@ __all__ = [
     "land_table",
     "conformed_dir",
     "read_table",
+    "split_real_synthetic",
     "table_day_partitions",
     "stamp_envelope",
+    "SYNTHETIC_SOURCE_ID",
 ]
 
 
@@ -77,6 +79,13 @@ def land_raw_json(source: str, name: str, obj: Any, *, day: str | None = None) -
 # provenance + H3
 # --------------------------------------------------------------------------
 
+#: The one source_id scenario data ever carries. Defined here rather than
+#: imported from `scenario/` so the ingest layer has no dependency on the
+#: generator — this module must be able to enforce the rule even in a checkout
+#: where the scenario package is absent.
+SYNTHETIC_SOURCE_ID = "synthetic-scenario"
+
+
 def stamp_envelope(
     row: dict,
     *,
@@ -84,21 +93,41 @@ def stamp_envelope(
     source_ref: str,
     acquired_at: datetime,
     confidence: float | None = None,
+    is_synthetic: bool = False,
 ) -> dict:
-    """Attach the six-column provenance envelope to a row, in place.
+    """Attach the provenance envelope to a row, in place.
 
     `acquired_at` is when the phenomenon was observed, not when we fetched it —
     those differ, and conflating them destroys the ability to reason about how
     stale a fact is.
+
+    **`is_synthetic` and `source_id` must agree, and this is where that is
+    enforced.** Scenario data lives in the same tables as real data so that it
+    exercises the identical code path (ADR-019), which means the *only* thing
+    keeping the two apart is this flag. Two independent markers — a boolean and
+    a source id — are safer than one, but only if they can never drift: a row
+    flagged synthetic with a real source id, or vice versa, would make every
+    "real vs synthetic" split silently wrong in a way no row count would reveal.
+    So the disagreement is refused at the point of stamping rather than
+    detected later.
     """
     if acquired_at.tzinfo is None:
         raise ValueError("acquired_at must be timezone-aware UTC")
+    if is_synthetic and source_id != SYNTHETIC_SOURCE_ID:
+        raise ValueError(
+            f"is_synthetic=True requires source_id={SYNTHETIC_SOURCE_ID!r}, "
+            f"got {source_id!r} — the flag and the envelope must agree")
+    if not is_synthetic and source_id == SYNTHETIC_SOURCE_ID:
+        raise ValueError(
+            f"source_id={SYNTHETIC_SOURCE_ID!r} requires is_synthetic=True — "
+            f"the flag and the envelope must agree")
     row["source_id"] = source_id
     row["source_ref"] = source_ref
     row["acquired_at"] = acquired_at.astimezone(timezone.utc)
     row["ingested_at"] = utcnow()
     row["pipeline_version"] = git_sha()
     row["confidence"] = confidence
+    row["is_synthetic"] = bool(is_synthetic)
     return row
 
 
@@ -225,7 +254,72 @@ def land_table(
         out = _normalise_for_arrow(list(merged.values()))
         pq.write_table(pa.Table.from_pylist(out), path, compression="zstd")
         written[day] = len(out)
+
+    reconcile_null_columns(table)
     return written
+
+
+# --------------------------------------------------------------------------
+# schema reconciliation across partitions
+# --------------------------------------------------------------------------
+
+def _type_hints(table: str) -> dict[str, "pa.DataType"]:
+    """Column -> the concrete Arrow type some partition of `table` uses."""
+    hints: dict[str, pa.DataType] = {}
+    for p in table_day_partitions(table):
+        try:
+            schema = pq.read_schema(p)
+        except Exception:                                      # noqa: BLE001
+            continue
+        for f in schema:
+            if f.name not in hints and not pa.types.is_null(f.type):
+                hints[f.name] = f.type
+    return hints
+
+
+def reconcile_null_columns(table: str) -> int:
+    """Give all-null columns the type their siblings use. Returns partitions fixed.
+
+    **Why this is not optional.** Arrow infers a column's type from the values
+    present, so a day partition where an optional column happens to be null in
+    every row gets that column typed `null`. A sibling partition with one real
+    value types it `double`. Both files are individually fine; read together —
+    which is how every query in this project reads them — DuckDB takes the
+    schema from the first file and fails outright:
+
+        Conversion Error: failed to cast column "dwell_hours" from type DOUBLE
+        to "NULL"
+
+    So one sparse column silently makes an entire table unqueryable, and *which*
+    column depends on which day's rows happened to be empty. That is a landmine
+    with a fuse measured in weeks: it does not fire when the column is added, it
+    fires the first time a partition comes out all-null.
+
+    The fix is to rewrite those partitions with the type its siblings agree on.
+    A null-typed column carries no values, so retyping it cannot change data —
+    it only stops the file lying about what it holds. Partitions with nothing to
+    fix are left alone, so this costs a schema read per partition and no writes
+    in the normal case.
+    """
+    hints = _type_hints(table)
+    if not hints:
+        return 0
+    fixed = 0
+    for p in table_day_partitions(table):
+        try:
+            tbl = pq.read_table(p)
+        except Exception:                                      # noqa: BLE001
+            continue
+        bad = [f.name for f in tbl.schema
+               if pa.types.is_null(f.type) and f.name in hints]
+        if not bad:
+            continue
+        tbl = tbl.cast(pa.schema([
+            pa.field(f.name, hints[f.name]) if f.name in bad else f
+            for f in tbl.schema]))
+        pq.write_table(tbl, p, compression="zstd")
+        fixed += 1
+    return fixed
 
 
 # --------------------------------------------------------------------------
@@ -241,8 +335,30 @@ def table_day_partitions(table: str) -> list[Path]:
 
 
 def read_table(table: str) -> list[dict]:
-    """Read every partition of a conformed table. Small tables only."""
+    """Read every partition of a conformed table. Small tables only.
+
+    **A partition written before `is_synthetic` existed has no such column, and
+    its rows are real.** Defaulting the missing value to False here is what
+    makes the migration zero-recompute: no existing partition is rewritten, and
+    every consumer still sees a populated flag on every row. A reader that left
+    it as None would push the same decision onto every call site, and one of
+    them would eventually get it wrong.
+    """
     rows: list[dict] = []
     for p in table_day_partitions(table):
-        rows.extend(pq.read_table(p).to_pylist())
+        for r in pq.read_table(p).to_pylist():
+            if r.get("is_synthetic") is None:
+                r["is_synthetic"] = False
+            rows.append(r)
     return rows
+
+
+def split_real_synthetic(rows: list[dict]) -> tuple[list[dict], list[dict]]:
+    """(real, synthetic). The split every externally quotable count needs.
+
+    Kept here rather than written out at each call site so that "how many of
+    these are real?" always has one answer computed one way.
+    """
+    real = [r for r in rows if not r.get("is_synthetic")]
+    syn = [r for r in rows if r.get("is_synthetic")]
+    return real, syn

@@ -145,12 +145,27 @@ def _confidence_raw(ev: dict):
     return None
 
 
+_ANCHORAGE_KEYS = ("id", "name", "flag", "lat", "lon", "at_dock",
+                   "distance_from_shore_km", "anchorage_id", "top_destination")
+
+
 def _anchorage_fields(anch, prefix: str) -> dict:
-    """Flatten one GFW anchorage record under `prefix`."""
+    """Flatten one GFW anchorage record under `prefix`.
+
+    **`name` is null on ~46% of real anchorages and `topDestination` is not.**
+    Measured on the operator's corpus: `intermediateAnchorage.name` is present on
+    54.4% of the 3,000 port visits, while `topDestination` is present on 100% and
+    carries the readable place — "VADINAR", "MUNDRA", "ALANG". An anchorage that
+    renders as `ind-ind-76` in front of an operator is a worse answer than one
+    that renders as ALANG, and the information was there the whole time.
+
+    Both are landed. `name` stays exactly what GFW called the anchorage;
+    `top_destination` is where vessels calling there say they are going, which is
+    a different claim and is labelled as one rather than being folded into
+    `name`.
+    """
     if not isinstance(anch, dict):
-        return {f"{prefix}_{k}": None
-                for k in ("id", "name", "flag", "lat", "lon", "at_dock",
-                          "distance_from_shore_km")}
+        return {f"{prefix}_{k}": None for k in _ANCHORAGE_KEYS}
     return {
         f"{prefix}_id": anch.get("id"),
         f"{prefix}_name": anch.get("name"),
@@ -159,6 +174,118 @@ def _anchorage_fields(anch, prefix: str) -> dict:
         f"{prefix}_lon": _f(anch.get("lon")),
         f"{prefix}_at_dock": anch.get("atDock"),
         f"{prefix}_distance_from_shore_km": _f(anch.get("distanceFromShoreKm")),
+        # GFW's own stable key for the anchorage polygon, distinct from `id`.
+        f"{prefix}_anchorage_id": anch.get("anchorageId"),
+        f"{prefix}_top_destination": anch.get("topDestination"),
+    }
+
+
+def _duration_hours(ev: dict, nested: dict, start, end) -> float | None:
+    """The event's duration, preferring the source's own number.
+
+    **GFW spells it `durationHrs` and nests it inside the event's sub-object**,
+    not `durationHours` at the top level. Reading the wrong key meant every
+    duration in the corpus was ours, computed as `end - start`. On this corpus
+    the two agree to the second, so nothing was wrong — but a value we compute
+    and a value the source asserts are different kinds of fact, and quietly
+    substituting one for the other is how a discrepancy stays invisible.
+
+    Both spellings are accepted at both levels, because an API that renamed the
+    field once can rename it again, and the fallback to `end - start` remains so
+    an event without either still lands.
+    """
+    for src in (nested, ev):
+        if not isinstance(src, dict):
+            continue
+        for key in ("durationHrs", "durationHours"):
+            v = _f(src.get(key))
+            if v is not None:
+                return v
+    if start and end:
+        return (end - start).total_seconds() / 3600.0
+    return None
+
+
+def _port_visit_structure(pv: dict, duration_h: float | None) -> dict:
+    """Decide what a port visit's time span actually measures.
+
+    **This is the field that separates a dwell from a span, and its absence is
+    why the conformed table carried port visits of 2.3 years.** A GFW port visit
+    is stitched from up to four sub-events — entry, stop, gap, exit — and the
+    event's `start`..`end` covers whichever of them GFW managed to observe. That
+    span is a *dwell* only when the vessel actually stopped and the anchorage it
+    entered is the anchorage it left. When the stop is missing, or the entry and
+    exit anchorages differ, the same span is measuring something else entirely:
+    a transit across a port polygon, or two observations at different anchorages
+    stitched into one record with everything in between unobserved. Divide
+    metres by the wrong seconds and you get a ship that sat in port for two
+    years.
+
+    So `duration_hours` keeps meaning exactly what GFW said — the event span,
+    unclamped, never "corrected" — and `dwell_hours` is populated only when the
+    structure supports the claim. Everywhere else it is NULL, which is the
+    honest answer: we do not know how long this vessel was alongside.
+
+    `visit_anchorages_agree` is `None` rather than `False` when fewer than two
+    anchorage ids are present. "They disagree" and "we cannot tell" are
+    different facts and collapsing them would let an unknown read as a finding.
+    """
+    if not isinstance(pv, dict):
+        pv = {}
+    start_a = pv.get("startAnchorage")
+    mid_a = pv.get("intermediateAnchorage")
+    end_a = pv.get("endAnchorage")
+
+    ids = [a.get("id") for a in (start_a, mid_a, end_a)
+           if isinstance(a, dict) and a.get("id")]
+    # `has_stop` is None, not False, on an event that carries no port-visit
+    # object at all — encounters and gaps run through here too, and "this event
+    # has no stop" would be an assertion about a record that was never a visit.
+    has_stop: bool | None = isinstance(mid_a, dict) if pv else None
+    agree: bool | None = len(set(ids)) == 1 if len(ids) >= 2 else None
+
+    # Resolve a usable port for the graph. The intermediate anchorage is the
+    # one the vessel stopped at and is preferred; entry and exit are fallbacks
+    # so that a visit without an observed stop still names a place instead of
+    # being dropped on the floor. Which one was used is recorded, because a
+    # port attributed from the exit anchorage is a weaker claim than one
+    # attributed from the stop and a consumer is entitled to know which it has.
+    port_source = None
+    for cand, label in ((mid_a, "intermediate"), (start_a, "start"), (end_a, "end")):
+        if isinstance(cand, dict) and (cand.get("id") or cand.get("name")):
+            port_source = label
+            chosen = cand
+            break
+    else:
+        chosen = {}
+
+    # **The readable name, falling back to `topDestination`.** Measured on the
+    # operator's corpus, `intermediateAnchorage.name` is present on 54.4% of the
+    # 3,000 port visits and `topDestination` on 100%. Landing the column without
+    # using it left every second port rendering as `ind-ind-76` in front of an
+    # operator while the readable place — ALANG — sat unused one field away.
+    #
+    # They are not the same claim, so which one was used is recorded rather than
+    # silently blended: `name` is what GFW calls the anchorage, `top_destination`
+    # is where vessels calling there declare they are going. The second is an
+    # inference from traffic and is marked as one.
+    name = chosen.get("name")
+    name_source = "anchorage_name" if name else None
+    if not name and chosen.get("topDestination"):
+        name = chosen["topDestination"]
+        name_source = "top_destination"
+
+    return {
+        "visit_confidence": pv.get("confidence"),
+        "visit_has_stop": has_stop,
+        "visit_anchorages_agree": agree,
+        "visit_port_id": chosen.get("id"),
+        "visit_port_name": name,
+        "visit_port_name_source": name_source,
+        "visit_port_source": port_source,
+        "dwell_hours": (float(duration_h)
+                        if has_stop and agree and duration_h is not None
+                        else None),
     }
 
 
@@ -188,9 +315,11 @@ def map_event(ev: dict, kind: str) -> dict | None:
     if not isinstance(pv, dict):
         pv = {}
 
-    duration_h = ev.get("durationHours")
-    if duration_h is None and start and end:
-        duration_h = (end - start).total_seconds() / 3600.0
+    # The sub-object that carries this kind's own duration, if any.
+    _nested = pv if kind == "port_visits" else (
+        gap if kind == "gaps" else
+        (ev.get("encounter") if isinstance(ev.get("encounter"), dict) else {}))
+    duration_h = _duration_hours(ev, _nested, start, end)
 
     row = {
         "event_id": str(event_id),
@@ -234,6 +363,8 @@ def map_event(ev: dict, kind: str) -> dict | None:
         **_anchorage_fields(pv.get("startAnchorage"), "start_anchorage"),
         **_anchorage_fields(pv.get("intermediateAnchorage"), "anchorage"),
         **_anchorage_fields(pv.get("endAnchorage"), "end_anchorage"),
+        # What the span above actually measures. See _port_visit_structure.
+        **_port_visit_structure(pv, duration_h),
         # kept for backwards compatibility with rows landed before 2026-07-29
         "port_id": (pv.get("intermediateAnchorage") or {}).get("id")
         if isinstance(pv.get("intermediateAnchorage"), dict) else None,
@@ -243,7 +374,11 @@ def map_event(ev: dict, kind: str) -> dict | None:
         # ---- gaps ----------------------------------------------------------
         "gap_distance_km": _f(gap.get("distanceKm")),
         "gap_implied_speed_kn": _f(gap.get("impliedSpeedKnots")),
-        "gap_duration_hours": _f(gap.get("durationHours")),
+        # `durationHrs` is GFW's spelling — see `_duration_hours`. Reading only
+        # `durationHours` here would have left this null on every gap.
+        "gap_duration_hours": _f(gap.get("durationHrs")
+                                 if gap.get("durationHrs") is not None
+                                 else gap.get("durationHours")),
         # GFW'S OWN dark-vessel judgement. Arguably the single most valuable
         # field in the entire pull, and it was being dropped on the floor.
         # Recorded as GFW's assertion, never re-asserted as ours: per

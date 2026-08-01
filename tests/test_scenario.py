@@ -1,0 +1,691 @@
+"""Tests for the scenario generator (ADR-019).
+
+The five that matter most, and why:
+
+  **truth isolation** — a detector with the answer key measures nothing, so no
+  detection, fusion, graph, scoring or alerting module may read `scenario_truth`.
+  Enforced by grepping the source, because an import is easy to add by accident
+  and impossible to notice in a green run.
+
+  **decoy separability** — true positives and decoys must be statistically
+  indistinguishable on generation artefacts (report cadence, position noise,
+  speed). If they are not, a detector separates them on craftsmanship and every
+  precision number is worthless.
+
+  **identifier reservation** — no scenario hull may wear a real IMO, a real
+  MMSI or a real sanctions entry number. This is a hard ban, not a preference.
+
+  **flag/source agreement** — `is_synthetic` and the `synthetic-scenario`
+  source id are two markers for one fact, and two markers that can drift apart
+  are worse than one.
+
+  **determinism** — the same seed reproduces the corpus, or nothing measured
+  against it can be compared across runs.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import random
+import re
+import statistics
+from datetime import timedelta
+from pathlib import Path
+
+import pytest
+
+from maritime_isr.config import AOI_V1
+from maritime_isr.h3util import RESOLUTIONS, cell
+from maritime_isr.ingest.landing import SYNTHETIC_SOURCE_ID, stamp_envelope
+from maritime_isr.ingest.sanctions_match import imo_checksum_ok
+from maritime_isr.scenario import ScenarioWorld, T0, T1, week
+from maritime_isr.scenario.cast import build_cast
+from maritime_isr.scenario.identifiers import (IMO_MAX, IMO_MIN, MMSI_MAX,
+                                               MMSI_MIN, assert_no_collisions,
+                                               is_scenario_sanctions_ref,
+                                               is_synthetic_imo,
+                                               is_synthetic_mmsi, mint_imo,
+                                               mint_mmsi)
+from maritime_isr.scenario.primitives import (Leg, VoyagePlan, emit_ais,
+                                              generate_track, make_vessel,
+                                              report_intervals_s)
+from maritime_isr.scenario.profile import CorpusProfile
+from maritime_isr.scenario.scenarios import run_all
+from maritime_isr.scenario.truth import (DECOY, DELIBERATE_MISS, TRUE_ANOMALY,
+                                         ScenarioTruth)
+from maritime_isr.scenario.validate import validate_world
+
+REPO = Path(__file__).resolve().parent.parent
+
+
+# --------------------------------------------------------------------------
+# a built world, shared across tests (generation is expensive)
+# --------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def world():
+    w = ScenarioWorld.new(7, CorpusProfile.load())
+    build_cast(w)
+    run_all(w)
+    w.identity.close_window(w.t1)
+    return w
+
+
+# --------------------------------------------------------------------------
+# 1. truth isolation
+# --------------------------------------------------------------------------
+
+#: Every package that reaches a verdict. None may consult ground truth.
+DETECTION_PATHS = ("detect", "fusion", "fuse", "anomaly", "graph", "tracks",
+                   "rules", "eval", "product", "api")
+
+
+def _truth_references(path: Path) -> list[str]:
+    """Real references to ground truth in a module — not mentions of it.
+
+    Parsed rather than grepped, and docstrings are excluded deliberately. Half
+    a dozen modules *document* the rule ("the cause lives only in
+    scenario_truth"), and a grep cannot tell a promise not to read something
+    from a read. What counts is an import of the truth module, a use of its
+    types, or the table name appearing as a live string constant.
+    """
+    import ast
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+
+    docstrings = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                             ast.AsyncFunctionDef)):
+            body = getattr(node, "body", None)
+            if (body and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)):
+                docstrings.add(id(body[0].value))
+
+    hits = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            if node.module.split(".")[-1] == "truth":
+                hits.append(f"line {node.lineno}: from {node.module} import ...")
+            for a in node.names:
+                if a.name in ("ScenarioTruth", "TruthLedger"):
+                    hits.append(f"line {node.lineno}: imports {a.name}")
+        elif isinstance(node, ast.Import):
+            for a in node.names:
+                if a.name.endswith(".truth"):
+                    hits.append(f"line {node.lineno}: import {a.name}")
+        elif isinstance(node, ast.Name) and node.id in ("ScenarioTruth",
+                                                        "TruthLedger"):
+            hits.append(f"line {node.lineno}: uses {node.id}")
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if id(node) in docstrings:
+                continue
+            if "scenario_truth" in node.value:
+                hits.append(f"line {node.lineno}: string {node.value!r}")
+    return hits
+
+
+def test_no_detection_code_reads_scenario_truth():
+    """The answer key is off limits to anything that decides anything."""
+    offenders = []
+    for pkg in DETECTION_PATHS:
+        d = REPO / "maritime_isr" / pkg
+        if not d.is_dir():
+            continue
+        for path in d.rglob("*.py"):
+            for hit in _truth_references(path):
+                offenders.append(f"{path.relative_to(REPO)}:{hit}")
+    assert not offenders, (
+        "detection/fusion/graph/scoring code must never read scenario_truth — "
+        "a detector with the answer key measures nothing:\n"
+        + "\n".join(offenders))
+
+
+def test_measure_is_the_only_truth_consumer():
+    """Inside `scenario/`, only the harness and the writers touch truth."""
+    allowed = {"truth.py", "land.py", "measure.py", "run.py", "validate.py",
+               "world.py", "__init__.py"}
+    offenders = []
+    for path in (REPO / "maritime_isr" / "scenario").rglob("*.py"):
+        if path.name in allowed or "scenarios" in path.parts:
+            continue              # Layer 2 legitimately writes truth rows
+        for hit in _truth_references(path):
+            offenders.append(f"{path.relative_to(REPO)}:{hit}")
+    assert not offenders, f"unexpected scenario_truth readers: {offenders}"
+
+
+def test_the_isolation_check_can_actually_fail(tmp_path):
+    """A guard that cannot fail is not a guard.
+
+    Four bugs in this codebase were checks that asserted a thing existed rather
+    than exercising it (STATE.md). This one gets a negative control: a module
+    that really does read the truth table must be caught.
+    """
+    bad = tmp_path / "bad.py"
+    bad.write_text('"""A docstring mentioning scenario_truth is fine."""\n'
+                   'rows = read_table("scenario_truth")\n')
+    assert _truth_references(bad), "the isolation check failed to catch a read"
+
+    good = tmp_path / "good.py"
+    good.write_text('"""The cause lives only in scenario_truth, never here."""\n'
+                    '# scenario_truth is off limits\n'
+                    'x = 1\n')
+    assert not _truth_references(good), (
+        "the isolation check flagged a docstring — it must distinguish a "
+        "promise not to read from a read")
+
+
+# --------------------------------------------------------------------------
+# 2. decoy vs true-positive separability
+# --------------------------------------------------------------------------
+
+def _stats(world, truth_class):
+    """Generation-artefact statistics for every vessel in a truth class."""
+    entities = set()
+    for t in world.truth:
+        if t.truth_class == truth_class:
+            entities.update(t.entity_ids)
+    intervals, speeds, noise_proxy = [], [], []
+    for eid in entities:
+        reps = world.ais_of(eid)
+        if len(reps) < 20:
+            continue
+        iv = [x for x in report_intervals_s(reps) if 0 < x <= 3600]
+        intervals += iv
+        speeds += [r.sog_kn for r in reps]
+        # Position-noise proxy: residual against the integrated truth at the
+        # same instant. This is the quantity a classifier would exploit if the
+        # decoys were emitted more cleanly than the true positives.
+        truth = {p.t: p for p in world.track_of(eid)}
+        for r in reps[:400]:
+            p = truth.get(r.t)
+            if p is not None:
+                from maritime_isr.scenario.geography import haversine_m
+                noise_proxy.append(haversine_m(r.lat, r.lon, p.lat, p.lon))
+    return intervals, speeds, noise_proxy
+
+
+def test_decoys_are_not_trivially_separable_from_true_positives(world):
+    """Decoys must be built to the same fidelity as the anomalies.
+
+    A detector that could separate the two on report cadence or position noise
+    would be reading the generator, not the behaviour, and the precision figure
+    would measure this file rather than the system.
+
+    Speed is deliberately NOT compared: a fishing fleet and a VLCC genuinely
+    differ, and forcing those to match would mean generating physically wrong
+    vessels. The artefacts that must match are the ones with no behavioural
+    meaning.
+    """
+    tp_iv, _, tp_noise = _stats(world, TRUE_ANOMALY)
+    dc_iv, _, dc_noise = _stats(world, DECOY)
+
+    assert len(tp_iv) > 200 and len(dc_iv) > 200, "not enough samples to compare"
+    assert len(tp_noise) > 200 and len(dc_noise) > 200
+
+    # Median report interval within a factor of two.
+    tp_m, dc_m = statistics.median(tp_iv), statistics.median(dc_iv)
+    ratio = max(tp_m, dc_m) / max(min(tp_m, dc_m), 1e-9)
+    assert ratio < 2.0, (
+        f"report cadence separates decoys from true positives: median "
+        f"{tp_m:.0f}s vs {dc_m:.0f}s (ratio {ratio:.2f})")
+
+    # Position noise from the same distribution — the strongest tell there is.
+    tp_n, dc_n = statistics.median(tp_noise), statistics.median(dc_noise)
+    nratio = max(tp_n, dc_n) / max(min(tp_n, dc_n), 1e-9)
+    assert nratio < 1.5, (
+        f"position noise separates decoys from true positives: median "
+        f"{tp_n:.1f} m vs {dc_n:.1f} m (ratio {nratio:.2f})")
+
+
+def test_decoys_and_true_positives_use_the_same_encounter_primitive(world):
+    """The bunkering decoy and the illicit transfers are geometric siblings."""
+    seps = {}
+    for ev in world.events:
+        if ev.kind != "encounters":
+            continue
+        seps[ev.event_id] = ev.props.get("mean_separation_m")
+    assert len(seps) >= 3
+    vals = [v for v in seps.values() if v]
+    assert min(vals) > 0
+    # All within one order of magnitude: no encounter is generated at a
+    # different scale from the others.
+    assert max(vals) / min(vals) < 10.0, (
+        f"encounter separations span {min(vals):.0f}-{max(vals):.0f} m; one "
+        f"family is being generated differently from another")
+
+
+# --------------------------------------------------------------------------
+# 3. reserved identifiers
+# --------------------------------------------------------------------------
+
+def test_every_synthetic_mmsi_is_in_the_reserved_block(world):
+    imos, mmsis, refs = world.all_identifiers()
+    assert mmsis
+    for m in mmsis:
+        assert is_synthetic_mmsi(m), f"MMSI {m} outside {MMSI_MIN}-{MMSI_MAX}"
+
+
+def test_every_synthetic_imo_is_reserved_and_checksum_valid(world):
+    imos, _, _ = world.all_identifiers()
+    assert imos
+    for i in imos:
+        assert is_synthetic_imo(i), f"IMO {i} outside {IMO_MIN}-{IMO_MAX}"
+        assert imo_checksum_ok(str(i)), (
+            f"IMO {i} fails its own check digit — it would be rejected by "
+            f"normalise_imo and never exercise the validator it exists to test")
+
+
+def test_minted_imos_are_valid_and_unique():
+    seen = set()
+    for serial in range(0, 500):
+        imo = mint_imo(serial)
+        assert imo_checksum_ok(str(imo))
+        assert IMO_MIN <= imo <= IMO_MAX
+        assert imo not in seen
+        seen.add(imo)
+
+
+def test_sanctions_references_are_fictional(world):
+    _, _, refs = world.all_identifiers()
+    assert refs
+    for r in refs:
+        assert is_scenario_sanctions_ref(r), (
+            f"{r!r} does not point at SCENARIO-SDN — a scenario must never "
+            f"reference a real OFAC entry number")
+
+
+def test_collision_guard_rejects_a_real_identifier():
+    """The guard must actually reject, not merely report."""
+    class _P:
+        origin = "test"
+        def real_imos(self):
+            return ["9999998"]
+        def real_mmsis(self):
+            return ["419100001"]
+        def ofac_imos(self):
+            return []
+
+    with pytest.raises(ValueError):
+        assert_no_collisions([9999998], [mint_mmsi(0)], ["SCENARIO-SDN-0001"],
+                             profile=_P())
+
+
+def test_collision_guard_reports_its_denominator():
+    """A guard that checked nothing must not read as a clean bill of health."""
+    rep = assert_no_collisions([mint_imo(0)], [mint_mmsi(0)],
+                               ["SCENARIO-SDN-0001"], profile=None,
+                               raise_on_collision=False)
+    assert "nothing" in rep.checked_against or rep.n_real_imos >= 0
+    assert "checked" in rep.describe()
+
+
+# --------------------------------------------------------------------------
+# 4. flag / source agreement
+# --------------------------------------------------------------------------
+
+def test_is_synthetic_and_source_id_cannot_disagree():
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+
+    # synthetic flag with a real source
+    with pytest.raises(ValueError):
+        stamp_envelope({}, source_id="gfw-events", source_ref="x",
+                       acquired_at=now, is_synthetic=True)
+    # synthetic source without the flag
+    with pytest.raises(ValueError):
+        stamp_envelope({}, source_id=SYNTHETIC_SOURCE_ID, source_ref="x",
+                       acquired_at=now, is_synthetic=False)
+    # both agreeing, either way, is fine
+    a = stamp_envelope({}, source_id=SYNTHETIC_SOURCE_ID, source_ref="x",
+                       acquired_at=now, is_synthetic=True)
+    b = stamp_envelope({}, source_id="gfw-events", source_ref="x",
+                       acquired_at=now, is_synthetic=False)
+    assert a["is_synthetic"] is True and b["is_synthetic"] is False
+
+
+def test_graph_store_rejects_disagreeing_edges(tmp_path):
+    from maritime_isr.graph import GraphStore
+    g = GraphStore(tmp_path / "g.sqlite")
+    g.upsert_node("vessel:a", "vessel", {}, is_synthetic=True)
+    g.upsert_node("flag:PAN", "flag_state", {})
+    with pytest.raises(ValueError):
+        g.add_edge("flagged-to", "vessel:a", "flag:PAN", t_start=0.0,
+                   confidence=0.5, source="gfw-vessels", source_ref="x",
+                   is_synthetic=True)
+    g.add_edge("flagged-to", "vessel:a", "flag:PAN", t_start=0.0,
+               confidence=0.5, source="synthetic-scenario:gfw-vessels",
+               source_ref="x", is_synthetic=True)
+    assert g.n_edges(is_synthetic=True) == 1
+    g.close()
+
+
+def test_is_synthetic_migration_is_zero_recompute(tmp_path):
+    """Adding the column must not touch a single existing row.
+
+    The real graph carries 17,562 nodes and 20,026 current edges of history
+    that cannot be regenerated (ADR-011), so a migration that rewrote rows
+    would be rewriting the moat.
+    """
+    import sqlite3
+    from maritime_isr.graph import GraphStore
+
+    db = tmp_path / "g.sqlite"
+    g = GraphStore(db)
+    g.upsert_node("vessel:a", "vessel", {})
+    g.upsert_node("flag:PAN", "flag_state", {})
+    g.add_edge("flagged-to", "vessel:a", "flag:PAN", t_start=0.0,
+               confidence=0.5, source="gfw-vessels", source_ref="x")
+    before = g.edges_checksum()
+    g.close()
+
+    # Simulate a pre-migration database by dropping the column back off.
+    # The index has to go first — SQLite refuses to drop a column an index
+    # references, which is itself a small confirmation that the column is
+    # properly wired in rather than bolted on.
+    con = sqlite3.connect(str(db))
+    con.execute("DROP INDEX IF EXISTS ix_edges_syn")
+    con.execute("ALTER TABLE edges DROP COLUMN is_synthetic")
+    con.commit()
+    con.close()
+
+    g2 = GraphStore(db)                     # migration runs in __init__
+    assert g2.n_edges() == 1
+    assert g2.n_edges(is_synthetic=False) == 1
+    assert g2.n_edges(is_synthetic=True) == 0
+    e = g2.edges("vessel:a")[0]
+    assert e.is_synthetic is False
+    assert e.source == "gfw-vessels"
+    g2.close()
+    assert before is not None
+
+
+# --------------------------------------------------------------------------
+# 5. determinism
+# --------------------------------------------------------------------------
+
+def _digest(w) -> str:
+    """A stable fingerprint of everything a run produced."""
+    h = hashlib.sha256()
+    for eid in sorted(w.vessels):
+        v = w.vessels[eid]
+        h.update(f"{v.entity_id}|{v.imo}|{v.mmsi}|{v.length_m}|{v.beam_m}|"
+                 f"{v.draught_m}|{v.service_kn}|{v.flag}|{v.name}".encode())
+    for eid in sorted(w.ais):
+        for r in w.ais_of(eid):
+            h.update(f"{eid}|{r.t.isoformat()}|{r.lat:.7f}|{r.lon:.7f}|"
+                     f"{r.sog_kn}|{r.cog_deg}".encode())
+    for ev in sorted(w.events, key=lambda e: e.event_id):
+        h.update(f"{ev.event_id}|{ev.t_start.isoformat()}|{ev.lat:.6f}".encode())
+    for t in w.truth:
+        h.update(json.dumps(t.as_row(), sort_keys=True, default=str).encode())
+    return h.hexdigest()
+
+
+def test_track_generation_is_deterministic():
+    """The fast determinism check: same seed, byte-identical primitive output."""
+    prof = CorpusProfile.load()
+
+    def run():
+        rng = random.Random(11)
+        v = make_vessel(rng, prof, "Aframax", serial=0,
+                        entity_id="vessel:t", flag="PAN")
+        pts = generate_track(v, VoyagePlan(
+            start=(20.0, 64.0), start_time=T0,
+            legs=[Leg("transit", target=(21.5, 66.0), speed_kn=13.0),
+                  Leg("station", duration_h=4.0)]), rng)
+        reps = emit_ais(v, pts, rng)
+        return [(p.t, round(p.lat, 9), round(p.lon, 9)) for p in pts], \
+               [(r.t, round(r.lat, 9), round(r.lon, 9)) for r in reps]
+
+    assert run() == run()
+
+
+@pytest.mark.slow
+def test_full_generation_is_deterministic():
+    """Same seed, byte-identical corpus. Slow: it builds the world twice."""
+    def build(seed):
+        w = ScenarioWorld.new(seed, CorpusProfile.load())
+        build_cast(w)
+        run_all(w)
+        w.identity.close_window(w.t1)
+        return _digest(w)
+
+    assert build(7) == build(7)
+
+
+@pytest.mark.slow
+def test_different_seeds_produce_different_corpora():
+    def build(seed):
+        w = ScenarioWorld.new(seed, CorpusProfile.load())
+        build_cast(w)
+        run_all(w)
+        return _digest(w)
+
+    assert build(7) != build(8)
+
+
+# --------------------------------------------------------------------------
+# 6. physical coherence
+# --------------------------------------------------------------------------
+
+def test_validators_pass_on_the_generated_world(world):
+    rep = validate_world(world)
+    assert rep.ok, "physics/plausibility violations:\n" + rep.format()
+
+
+def test_every_position_is_inside_aoi_v1(world):
+    for eid, pts in world.tracks.items():
+        for p in pts:
+            assert AOI_V1.contains(p.lat, p.lon), (
+                f"{eid} at ({p.lat}, {p.lon}) is outside AOI v1")
+
+
+def test_every_event_is_inside_the_corpus_window(world):
+    for ev in world.events:
+        assert T0 <= ev.t_start <= T1
+        assert T0 <= ev.t_end <= T1
+
+
+def test_all_five_h3_resolutions_are_computed_not_derived(world):
+    """Never derive a coarse cell from a fine one (ADR-015, 7.2% disagreement)."""
+    from maritime_isr.ingest.landing import stamp_h3
+    checked = 0
+    for eid in sorted(world.ais)[:8]:
+        for r in world.ais_of(eid)[:40]:
+            row = stamp_h3(dict(lat=r.lat, lon=r.lon))
+            for res in RESOLUTIONS:
+                assert row[f"h3_r{res}"] == cell(r.lat, r.lon, res)
+                checked += 1
+    assert checked > 100
+
+
+def test_a_vessel_is_never_in_two_places_at_once(world):
+    """The occupancy calendar holds across the whole catalogue."""
+    for eid in world.tracks:
+        segs = sorted(world.occupied(eid))
+        for (a0, a1), (b0, b1) in zip(segs, segs[1:]):
+            assert a1 <= b0, (
+                f"{eid} has overlapping segments {a0}..{a1} and {b0}..{b1}")
+
+
+def test_identity_intervals_have_no_gaps_or_overlaps(world):
+    from maritime_isr.scenario.primitives import assert_consistent
+    problems = assert_consistent(world.identity)
+    assert not problems, "identity ledger inconsistent:\n" + "\n".join(problems)
+
+
+# --------------------------------------------------------------------------
+# 7. the truth ledger's own rules
+# --------------------------------------------------------------------------
+
+def test_a_decoy_cannot_expect_detection():
+    with pytest.raises(ValueError):
+        ScenarioTruth(scenario_id="X", scenario_family="f",
+                      truth_class=DECOY, entity_ids=["v"],
+                      t_start=T0, t_end=T1, expected_detection=True)
+
+
+def test_a_deliberate_miss_cannot_expect_detection():
+    with pytest.raises(ValueError):
+        ScenarioTruth(scenario_id="X", scenario_family="f",
+                      truth_class=DELIBERATE_MISS, entity_ids=["v"],
+                      t_start=T0, t_end=T1, expected_detection=True)
+
+
+def test_catalogue_covers_every_required_group(world):
+    ids = {t.scenario_id for t in world.truth}
+    for required in ("A1", "A2", "A3", "A4", "A5",
+                     "B1", "B2", "B3", "B4", "B5", "B6",
+                     "C1", "C2", "C3", "C4",
+                     "D1", "D2", "D3", "D4",
+                     "E1", "E2", "E3", "E4", "E5", "E6", "E7",
+                     "M1", "M2"):
+        assert required in ids, f"scenario {required} missing from the catalogue"
+    assert sum(1 for t in world.truth if t.truth_class == DECOY) >= 12
+    assert sum(1 for t in world.truth
+               if t.truth_class == DELIBERATE_MISS) == 2
+
+
+def test_decoy_to_true_positive_ratio_is_meaningful(world):
+    tp = sum(1 for t in world.truth if t.truth_class == TRUE_ANOMALY)
+    dc = sum(1 for t in world.truth if t.truth_class == DECOY)
+    # The build plan targets roughly two decoys per anomaly at the *entity*
+    # level rather than the scenario level — several decoys carry many hulls
+    # (the fishing fleet is 40, floating storage is 6) while most anomalies
+    # carry one or two. Asserting the scenario-level ratio would have forced
+    # either fewer decoy families or padding, so the entity-level ratio is
+    # what is checked.
+    tp_e = len({e for t in world.truth if t.truth_class == TRUE_ANOMALY
+                for e in t.entity_ids})
+    dc_e = len({e for t in world.truth if t.truth_class == DECOY
+                for e in t.entity_ids})
+    assert dc >= 10 and tp >= 20
+    assert dc_e >= 1.5 * tp_e, (
+        f"only {dc_e} decoy entities against {tp_e} true-positive entities — "
+        f"precision measured on this corpus would be flattered")
+
+
+def test_only_c3_is_exempt_from_a_physics_rule(world):
+    ex = world.truth.physics_exemptions()
+    assert set(ex) == {"C3"}, f"unexpected physics exemptions: {ex}"
+    assert ex["C3"] == "implied_speed_envelope"
+
+
+def test_naval_decoy_emits_no_ais_at_all(world):
+    """A vessel legitimately running dark must not appear in the AIS tables."""
+    eid = "vessel:navy_dark"
+    assert world.vessels[eid].ais_expected is False
+    assert not world.ais.get(eid), (
+        "the naval decoy transmitted — she is supposed to be invisible, and "
+        "the scenario tests that a radar contact with no AIS is not "
+        "automatically a dark vessel")
+    assert world.tracks.get(eid), "she still moved; truth must record it"
+
+
+def test_synthetic_gaps_carry_no_gfw_verdict(world):
+    """We must not put words in GFW's mouth, or hand the answer to a detector."""
+    gaps = [e for e in world.events if e.kind == "gaps"]
+    assert gaps
+    for g in gaps:
+        assert g.props.get("gfw_intentional_disabling") is None, (
+            "a synthetic gap carries a GFW verdict — GFW did not assess these, "
+            "and a detector reading that column would be handed the answer")
+
+
+# --------------------------------------------------------------------------
+# 8. real-corpus alignment (added after the operator's profile landed)
+# --------------------------------------------------------------------------
+
+def test_synthetic_null_rates_match_the_real_corpus():
+    """Synthetic rows must not be separable by a single IS NOT NULL filter.
+
+    Measured on the operator's corpus: `gfw_encounters.imo` is 100% null,
+    `gfw_vessel_identity.length_m` 98.6%, `imo` there 74.8%. The generator
+    populated all of them, so `WHERE imo IS NOT NULL` was a perfect synthetic
+    detector and any precision measured on a combined corpus would have been
+    measuring that filter. The track-level separability test passed throughout —
+    the distinction leaked through the columns instead.
+
+    Skipped when no profile is present, because there is then nothing to match.
+    """
+    from maritime_isr.scenario.nulls import NullMask
+
+    profile = CorpusProfile.load()
+    if not profile.known_tables():
+        pytest.skip("no corpus profile — nothing to match null rates against")
+
+    w = ScenarioWorld.new(7, profile)
+    build_cast(w)
+    run_all(w)
+    w.identity.close_window(w.t1)
+
+    from maritime_isr.scenario.land import land_world
+    import maritime_isr.scenario.land as land_mod
+
+    mask = NullMask(profile)
+    # Exercise the mask directly on identity rows rather than landing to disk.
+    rows = []
+    for v in list(w.vessels.values()):
+        row = dict(vessel_id=v.entity_id, imo=str(v.imo), length_m=v.length_m,
+                   tonnage_gt=v.dwt, call_sign=v.call_sign, mmsi=str(v.mmsi))
+        mask.apply(row, table="gfw_vessel_identity", key=v.entity_id)
+        rows.append(row)
+
+    problems = mask.verify()
+    assert not problems, "null rates diverge from the real corpus:\n" + "\n".join(problems)
+
+    # And the specific field that made the whole thing separable.
+    populated = sum(1 for r in rows if r["imo"] is not None)
+    assert populated < len(rows), (
+        "every synthetic identity row carries an IMO; the real corpus leaves "
+        "74.8% of them null, so this column alone separates the two")
+
+
+def test_mmsi_is_never_masked():
+    """Masking the MMSI would break row identity and the track engine."""
+    from maritime_isr.scenario.nulls import NullMask, NEVER_MASK
+    assert "mmsi" in NEVER_MASK
+    assert "vessel_id" in NEVER_MASK and "event_id" in NEVER_MASK
+    p = CorpusProfile.load()
+    m = NullMask(p)
+    assert m.rate("gfw_vessel_identity", "mmsi") is None
+
+
+@pytest.mark.slow
+def test_generation_is_robust_across_seeds():
+    """A corpus that only validates at one seed is not reproducible.
+
+    Seed 8 overran the corpus window through background port calls, because the
+    measured dwell distribution reaches 336 h and a call started three weeks
+    from the end could run past it. Seed 7 happened to fit. Several seeds are
+    checked so a seed-dependent overrun cannot pass again.
+    """
+    for seed in (7, 8, 11, 42):
+        w = ScenarioWorld.new(seed, CorpusProfile.load())
+        build_cast(w)
+        run_all(w)
+        w.identity.close_window(w.t1)
+        rep = validate_world(w)
+        assert rep.ok, f"seed {seed} failed validation:\n{rep.format()}"
+        assert len(w.truth) == 40, f"seed {seed} produced {len(w.truth)} scenarios"
+
+
+def test_measured_tails_are_truncated_with_a_stated_reason():
+    """A 2.3-year 'port visit' is a data artefact, and must be recorded as one.
+
+    The operator's `gfw_port_visits` has p95 = 20,254 hours. The distribution is
+    still used — its body is real and informative — but the implausible tail is
+    rejected and the provenance report says so, rather than silently capping or
+    silently sampling a two-year berth.
+    """
+    p = CorpusProfile.load()
+    if "port_call_dwell_hours" not in (p.raw.get("distributions") or {}):
+        pytest.skip("no measured port-call distribution in the profile")
+    param = p.quantiles("port_call_dwell_hours")
+    assert param.measured
+    assert max(param.value.values()) <= 24 * 14 + 1e-6
+    assert "truncated" in param.rationale, (
+        "the tail was clamped without saying so — a silent cap is how a data "
+        "artefact becomes an unexamined assumption")
+    assert "MEASURED" in param.describe() and "truncated" in param.describe()

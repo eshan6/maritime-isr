@@ -8,11 +8,19 @@ session. `CLAUDE.md`, `ARCHITECTURE.md`, `DECISIONS.md` are stable contracts;
 > between status buckets, record what was verified vs assumed, log anything now
 > broken, and set "Next up." If you don't update it, the next session starts blind.
 
-**Last updated:** 2026-07-30. Matcher corrections landed (ADR-018), the
-reported-vs-landed bug class turned into a check (`ingest/checks.py`), Phase 1
-and xView3 recorded as deferred (ADR-017), and the graph populator plus two
-analytics written **but not yet run on the real data** — that is Eshan's next
-run, see "Next up".
+**Last updated:** 2026-07-31 (second pass). The real corpus profile landed
+from the laptop and **found six defects in the generator**, all now fixed —
+most seriously, synthetic rows were separable from real ones by a single
+`IS NOT NULL` filter. Seven of fifteen parameters are now MEASURED from 12,483
+real rows. See "Real-corpus alignment" below.
+
+Synthetic scenario corpus built and landed (ADR-019): 40 scenarios in the same tables as real data, flagged `is_synthetic`,
+exercising the identical code path. Validators green, determinism and
+truth-isolation tests passing, full suite 379 green. The pipeline ran over the
+corpus and produced the first measured detection numbers — **precision 100%,
+recall 18%** on the synthetic suite. Four real defects in the existing codebase
+were found by landing scenario data through the real path; one of them is still
+open and is the highest-value next fix. See "Scenario corpus" below.
 
 ---
 
@@ -40,7 +48,11 @@ R2, no systemd, no SNAP, no live AIS capture.
 **What that data is, precisely:** GFW's *derived* behaviour events (loitering,
 port visits, encounters, AIS gaps), vessel identity, three sanctions lists, and
 Sentinel-1 scene metadata. **No SAR imagery, no AIS position tracks, and no dark
-vessel detected by us.** GFW's 5 gap events are GFW's finding, not ours. Our own
+vessel detected by us.** GFW's 5 gap events are GFW's finding, not ours — and as
+of 2026-07-31 **all five are flagged by GFW as intentional AIS disabling**,
+which the earlier mapper was not reading and which this file recorded as zero
+for a day. That is five real vessels GFW assessed as deliberately going dark,
+and it is still GFW's assertion rather than our detection. Our own
 dark-vessel detection needs SAR contacts matched against AIS tracks, and neither
 is obtainable free for this AOI (see DATA_SOURCES.md). The synthetic Phase 1–6
 prototype remains green in-sandbox and every metric it produces is synthetic.
@@ -74,7 +86,7 @@ prototype remains green in-sandbox and every metric it produces is synthetic.
 | GFW SAR (gridded + portal CSV) | ⬜ | Upstream offline since 2026-07-03. Both paths degrade cleanly. |
 | Ingest report | ✅ | Prints real counts, date ranges, AOI checks and disk usage. |
 
-**Test tally:** 273 tests passing in-sandbox. Sandbox-green ≠ host-verified — do
+**Test tally:** 390 tests passing in-sandbox. Sandbox-green ≠ host-verified — do
 **not** report this as "273 tests prove it works on real data." Every number the
 system has ever produced comes from synthetic fixtures or fixture-driven tests.
 
@@ -141,8 +153,57 @@ these produce are the point; do not quote any of them until he pastes a run back
 
     1. python -m maritime_isr.cli ingest sanctions-match
     2. python tools/review_matches.py            # DONE - 98/98 pass
-    3. python tools/analytic_rename_gap.py       # DONE - re-run after the fix
-    4. python tools/graph_report.py              # NOT YET RUN
+    3. python tools/analytic_rename_gap.py       # RE-RUN — it ran against nulls
+    4. python tools/graph_report.py              # RE-RUN — same reason
+
+**Both 3 and 4 must be re-run and their earlier results treated as void.** They
+read `gfw_intentional_disabling`, which was null on every gap row until the
+rebuild recovered it. The corpus holds **5 of 5 gaps flagged by GFW as
+intentional disabling**, not zero — see the overturned finding below. Any
+conclusion either tool reached about dark vessels was reached against an empty
+column.
+
+### Before those: the port-visit work (ADR-020)
+
+    python tools/rebuild_conformed.py --dry-run     # DONE 2026-07-31, orphans 0
+    python tools/data_health.py                     # NEXT — the demo gate
+    python tools/port_visit_forensics.py            # raw only, writes nothing
+    python tools/rebuild_conformed.py               # after backing up data/conformed
+    python tools/corpus_profile.py                  # refresh the profile
+    python tools/restamp_h3.py --dry-run            # must still report 0 added
+
+**`data_health.py` is the demo gate.** Read-only, exits 1 on any BLOCKER. It
+grades the data on disk rather than the code's intentions: H3 coverage at all
+five resolutions, the provenance envelope on every row, `is_synthetic` and
+`source_id` never disagreeing, whether the raw store is complete enough to
+re-derive, whether a row count is really an API page limit, and whether there is
+anything in the corpus to demo at all. Run it before every demo. A blocker means
+the demo would fail outright or state something false on screen.
+
+**The forensics run is about the open question**, not the demo. The dry run
+refuted the structural explanation (see the correction above); this reads
+`data/raw/` and writes nothing, so it is safe to run before deciding anything.
+
+Re-derives the conformed GFW tables from the immutable raw JSON with the current
+mapper. **No network** — it reads `data/raw/gfw-events/`, so ADR-013 holds and
+the corpus window does not move.
+
+*What the dry run showed (2026-07-31):* `confidence`, `gfw_confidence_raw` and
+`visit_confidence` all 0% → **100%**; `visit_port_id` 0% → 100% but changing
+nothing, because `port_id` was already 100%; `dwell_hours` 87%;
+`duration_hours` quantiles **identical** before and after, confirming nothing
+clamps; **`orphans: 0` on all four kinds.**
+
+*`orphans: 0` is the load-bearing one.* It is the first direct check that raw is
+sufficient to regenerate the conformed layer — "every derived output is
+regenerable from raw + git SHA" (CLAUDE.md §4.2) is now measured on this corpus
+rather than asserted. Anything other than 0 would have meant part of raw is
+missing; the tool preserves those rows rather than deleting them, and says so.
+
+*Failure mode:* `no raw payloads on disk` for every kind means `data/raw/` was
+not kept. Nothing is written in that case and the conformed table is left as-is;
+report it, because the fix then requires a re-download and that is an ADR-013
+decision, not a tooling one.
 
 **The `maritime-isr` console script is not installed on the laptop.** It is
 declared in `pyproject.toml` but the package was never `pip install`ed, so the
@@ -267,6 +328,41 @@ having genuinely assessed gaps and flagged none (a real negative). **Run it agai
 after the fix to see which of the three we are in** — if the column is entirely
 null, the mapping needs checking before any conclusion about vessels.
 
+#### ⛔ OVERTURNED ON HOST 2026-07-31 — it was case two, the mapping bug
+
+`tools/data_health.py`, after `rebuild_conformed.py` re-derived the gaps table
+from raw with the current mapper:
+
+```
+[INFO] flagged dark-vessel gaps
+       5 of 5 AIS gap(s) are flagged by GFW as intentional disabling
+       vessels 324afd84e-ee, 854502228-8e, a76aaca78-8c, a7886313f-f8, e2a85d697-7a
+```
+
+**Not zero. All five.** The verdict column was entirely null because the mapper
+that landed those rows never read `gap.intentionalDisabling` — it was added on
+2026-07-29 and the rows predate it. The negative above was our bug reported as a
+finding about the world, and it stood for a day.
+
+**Everything that "zero flagged gaps" was used to justify has to be re-examined**,
+because it was one of the two numbers behind the decision not to build a graph UI
+and behind ADR-019's framing of the corpus as having nothing to exercise. The
+other number — 0 of 98 OFAC-matched vessels with an encounter edge — is
+independent and still stands until re-measured.
+
+**What this is, stated precisely (CLAUDE.md §6).** These are **GFW's**
+assessments that a vessel deliberately switched off AIS, carried through as
+GFW's assertion. They are **not** our dark-vessel detections: we did not compute
+them, we have no receiver-coverage model over those positions, and asserting
+intentional silence outside demonstrated coverage is a false positive by
+construction. The honest sentence is *"GFW assessed this gap as intentional
+disabling"* — never *"we detected a dark vessel."*
+
+**For the demo this is the single most valuable row in the corpus**: five real
+vessels, in the Arabian Sea, in the last eight weeks, with a named source and a
+traceable assertion. Re-run `tools/analytic_rename_gap.py` and
+`tools/graph_report.py` — both consumed this column and both ran against nulls.
+
 ### 4. THE DECIDING NUMBER — a graph UI has nothing to draw
 
 `python tools/graph_report.py`, 352s over the landed tables:
@@ -328,6 +424,422 @@ and the report stay in the tree for exactly that — re-running them is the test
 
 **A second OFAC snapshot.** It unblocks the freshness split (§2) and is the only
 cheap thing on the list — one `registries --only ofac` run on a later date.
+
+---
+
+## Scenario corpus (2026-07-31) — ADR-019
+
+**What was built.** `maritime_isr/scenario/`, a two-layer generator. Layer 1 is
+primitives with no idea what a scenario means — vessel factory, great-circle
+track integrator with per-class acceleration and turn-rate limits, an AIS
+emitter following ITU-R M.1371 intervals with reception thinning and heavy-tailed
+position noise, rendezvous, gaps, port calls, identity events, corporate
+structure. Layer 2 composes them into 40 scenarios, each writing exactly one
+`scenario_truth` row.
+
+**Landed, read back from disk (not what was built — what exists):**
+
+```
+ais_position               97,314 synthetic        0 real
+gfw_loitering                  51 synthetic        0 real
+gfw_port_visits                45 synthetic        0 real
+gfw_vessel_identity           122 synthetic        0 real
+gfw_ais_gaps                   12 synthetic        0 real
+gfw_encounters                  6 synthetic        0 real
+scenario_truth                 40 synthetic        0 real
+scenario_organizations         11 | scenario_ownership 37 | detections 6
+```
+
+The `0 real` column is not a claim that real data vanished — **the real corpus
+is on Eshan's laptop and was never in this sandbox** (`data/` is gitignored).
+Every figure below is scenario-only and must be re-run where the real data lives
+to produce a genuinely combined view.
+
+**Catalogue:** 22 true anomalies, 16 decoys, 2 deliberate misses. Cast is 74
+principal vessels plus a 40-vessel fishing fleet — over the 45-60 the plan asked
+for, deliberately, because a hull cannot be in two places at once and the
+catalogue needs the hulls. See ADR-019.
+
+### Measured detection results — the honest numbers
+
+```
+true anomalies    :  22   DETECTED 4   MISSED 18
+decoys            :  16   FALSE POSITIVE 0   correctly quiet 16
+deliberate misses :   2   correctly silent 2
+
+precision 100%    recall 18%     (ADR-004 target: precision >= 70%)
+of 4 detections, 2 came from the rule the scenario expected
+alerts on entities with no truth row (background traffic): 1
+```
+
+By family: identity_manipulation P100/R33, spoofing P100/R33,
+graph_ownership P100/R50, dark_transfer P n/a / **R 0%**,
+behavioural_geographic P n/a / **R 0%**.
+
+**Read this as tuning information, not as failure — and no thresholds were
+touched this session** (measure first, tune as a separate decision).
+
+**Why recall is 18% — four causes, all diagnosable:**
+
+1. **The vessel-keyspace split (the big one).** `from_landed` keys hulls
+   `vessel:gfw:<vessel_id>`; `graph.identity.resolve_mmsi` mints
+   `vessel:mmsi:<mmsi>`. Alerts land on nodes the landed graph has never heard
+   of. This is the **ADR-015 failure class again**. The measurement bridges it
+   with an explicit alias map and says so; the defect itself is **not fixed**.
+   **This is the highest-value next fix in the repo.**
+2. **Every gap classified `COVERAGE_GAP`, none `INTENTIONAL_SILENCE`** (2,276 of
+   2,276). The coverage model learns reception from our own emitted data, and
+   our modelled reception is terrestrial-only (ADR-005), so no silence is
+   attributable anywhere. That is the honesty rule working exactly as designed —
+   and it means the whole `dark_transfer` family (A1-A5) cannot currently fire.
+3. **6,438 encounters detected by the track engine, 6 `met-with` edges in the
+   graph.** The graph populator reads landed `gfw_encounters` only; the track
+   engine's own encounters are never fed to it. Another seam.
+4. **The fusion path was not exercised** — `dark_vessel` needs association
+   verdicts, which need SAR scenes we do not process (ADR-017). The 6 synthetic
+   SAR contacts land but nothing consumes them yet.
+
+**What did work.** Zero false positives across all 16 decoys, including the
+clean-vessel-dirty-neighbour case (proximity is not association), the legitimate
+bunkering built by the same primitive call as the illicit transfer, and the
+40-vessel fishing aggregation. Both deliberate misses stayed correctly silent
+with their capability boundary recorded and a number attached.
+
+### Four defects found in the EXISTING codebase by landing through the real path
+
+1. **`GraphStore.__init__` would crash on any existing graph.** The
+   `is_synthetic` index was declared in `_SCHEMA`, which runs *before* the
+   migration adding the column, so every pre-migration `graph.sqlite` would
+   raise `no such column: is_synthetic`. **Fixed.**
+2. **Two vessel keyspaces that do not join** (above). **Open.**
+3. **`VoyagePlan` had no initial speed**, so every leg boundary restarted the
+   vessel from rest — 165 degrees of course change in one 60 s step on a hull
+   limited to 0.25 deg/s. **Fixed.**
+4. **Landing merges within a day partition only**, so a re-run whose timing
+   shifted landed duplicate truth rows. **Fixed** — `generate` clears first.
+
+### FIRST RUN ON THE LAPTOP — do this before generating
+
+**Back up `data/conformed/` first.** Scenario rows land into the *same day
+partitions* as real rows, so `land_table` reads each partition, merges, and
+rewrites it. Raw is immutable and conformed is re-derivable, but re-deriving is
+a re-run of every connector — a copy is cheaper:
+
+```
+xcopy /E /I data\conformed data\conformed_backup     (Windows)
+```
+
+**Then, in this order:**
+
+```
+python tools/corpus_profile.py            # 1. read-only; writes the profile
+python -m maritime_isr.cli scenario status  # 2. read-only; shows the split is 0
+python -m maritime_isr.cli scenario generate --seed 7
+python -m maritime_isr.cli scenario clear   # 4. proves the round trip is clean
+```
+
+Step 1 is read-only and touches nothing. **Run steps 1-2 and paste the output
+back before running step 3** — the profile carries the real schemas and null
+rates, which is what says whether the merge will work at all.
+
+**The known risk, and why it is survivable.** If a column holds a string in the
+real rows and a number in the synthetic ones, Arrow raises on conversion and
+the write fails. `tests/test_scenario_mixed_corpus.py` pins that failure as
+**loud** — it raises naming the column rather than silently coercing — and
+`clear()` is tested to leave real-only partitions untouched and real rows
+byte-identical. The fixtures in that test are *fabricated to the connector
+shapes read off the source*, not real rows; the profile from step 1 is what
+turns that guess into a check.
+
+### Still to do here
+
+- **Run `tools/corpus_profile.py` on the laptop.** Every generator parameter is
+  currently an ASSUMED published prior, and the generation report says so in a
+  measured-vs-assumed table with a row count behind each. The profiler reads the
+  real tables and emits `data_profiles/real_corpus_profile.json` (~100-200 KB,
+  committable), after which the same parameters are re-sampled from real
+  distributions with no code change. **Until then, no distribution in this
+  corpus is measured.**
+- **Re-run the collision guard where the corpus lives.** In the sandbox it fell
+  back to the profile and reported `0 real IMOs known` — it says so rather than
+  claiming a clean check.
+
+---
+
+## Real-corpus alignment (2026-07-31, second pass)
+
+`tools/corpus_profile.py` ran on the laptop and produced
+`data_profiles/real_corpus_profile.json` (159 KB, committed). It carries
+distributions, **table schemas with per-column types and null rates**, and the
+identifier lists the collision guard needs. Running the generator against it
+found six defects.
+
+### Six defects in the generator, found by the real profile
+
+1. **Synthetic rows were separable by a single `IS NOT NULL` filter.** The real
+   corpus leaves `gfw_encounters.imo` **100% null**,
+   `gfw_vessel_identity.length_m` and `tonnage_gt` **98.6%**, `imo` there
+   **74.8%**, `call_sign` **55.3%**. The generator populated all of them. Any
+   precision measured on a combined corpus would have been measuring that
+   filter. **The track-level separability test passed the whole time** — it
+   compares cadence, noise and speed, and the distinction leaked through the
+   *columns*. Fixed: `scenario/nulls.py` masks each field at its measured rate,
+   deterministically, with a declared exemption set for the handful of hulls
+   whose scenarios need a field present. `verify()` checks the achieved rate
+   against the real one and a test locks it in.
+2. **`sanctions` was an invented table.** The generator wrote a conformed
+   `sanctions` table. There is no such table — real OFAC lives in **DuckDB as
+   `ofac_sdn`**. Renamed to `scenario_sanctions`.
+3. **The collision guard had the wrong denominator.** It read
+   `read_table("sanctions")`, found nothing, and reported clean. Now reads the
+   real OFAC snapshot from DuckDB via `ingest/ofac_lookup.py`.
+4. **The corpus window ran five days past the real data.** T1 was 2026-07-30;
+   the last real event is **2026-07-25 22:53**. Pulled back; E4 and two truth
+   windows rescheduled to fit.
+5. **Generation was seed-dependent.** Seed 8 overran the window through
+   background port calls, because the measured dwell distribution reaches 336 h.
+   Seed 7 happened to fit. Background calls are now bounded by the remaining
+   window and seeds 7/8/11/42 all validate.
+6. **A 2.3-year "port visit" was being sampled as a duration.** See below.
+
+### Two findings in the REAL data
+
+**`gfw_port_visits` durations have a broken tail.** p50 = 107 h, p75 = **1,263 h
+(52 days)**, p95 = **20,254 h — 2.3 years**. A port visit does not last 2.3
+years. Something in the GFW port-visit ingest produces degenerate durations
+across the 3,000-row table. The generator now truncates the tail at 14 days and
+**says so in the provenance report** rather than capping silently; the body of
+the distribution is still used because it is real. **Worth investigating on the
+ingest side — this is a real-data defect, not a scenario one.**
+
+**✅ RESOLVED ON HOST 2026-07-31 — ADR-020. Nothing was wrong with the data;
+the measurement was wrong.** Two explanations were tried and refuted before the
+raw payloads settled it. What follows is the original reasoning, kept because
+the error is instructive; the resolution is at the end of this section.
+
+The durations are not corrupt. The number being profiled was `duration_hours`,
+GFW's **event span**, read as though it were time alongside.
+
+A GFW port visit is stitched from up to four sub-events — entry, stop, gap,
+exit — and its span covers whichever of them GFW observed. That span is a dwell
+only when the vessel **stopped** and the anchorage it **entered is the anchorage
+it left**. Otherwise the same number measures a transit across a port polygon,
+or two observations at different anchorages with the middle unobserved.
+
+The mapper that wrote those 3,000 rows recorded none of the fields that decide
+it. Measured on the corpus: `confidence` and `gfw_confidence_raw` null on
+**100%** of port visits, `port_name` — which comes from the stop anchorage and
+nowhere else — null on **45.6%**. The mapper was fixed on 2026-07-29; the rows
+were not.
+
+What changed:
+
+- `dwell_hours`, populated only where the structure supports the claim.
+  `duration_hours` is untouched and unclamped — it still means what GFW said.
+- `tools/rebuild_conformed.py` re-derives the conformed tables from the
+  **immutable raw JSON** with the current mapper. No network (ADR-013), no new
+  window of events, synthetic rows carried through untouched, orphaned real rows
+  preserved and reported.
+- **~46% of real port visits were being dropped by the graph.** `add_port_visits`
+  keyed on `port_id`, which is read from the stop anchorage alone, so every
+  stop-less visit was counted as `port_visits_skipped` and never became an edge.
+  `visit_port_id` resolves across entry/stop/exit and records which it used.
+- A latent landing-layer bug surfaced: a day partition whose optional column is
+  all-null gets Arrow type `null` while its sibling gets `double`, and reading
+  them together fails outright — **one sparse column makes a whole table
+  unqueryable**. `landing.reconcile_null_columns` fixes it after every land.
+- The generator emits the same structure mix (stratified, not sampled — 45
+  visits cannot hit a 40% target on independent draws; the first attempt landed
+  at 64%), so `WHERE dwell_hours IS NULL` is not a synthetic-row detector.
+
+**Still separable, and recorded rather than hidden:** synthetic port-visit
+`duration_hours` cannot reproduce the real multi-week tail.
+
+#### CORRECTION — the host run refuted the above (2026-07-31)
+
+`tools/rebuild_conformed.py --dry-run` on the real corpus, `orphans: 0`,
+`duration_hours` quantiles identical before and after:
+
+```
+observed a stop              3,000 (100.0%)
+entry and exit agree         2,611 (87.0%)
+entry and exit differ          389 (13.0%)
+dwell_hours populated        2,611 (87.0%)
+
+                     p05     p25     p50        p75            p95
+duration_hours      4.0h   21.0h   107h   1,261h (52d)   20,242h (843d)
+dwell_hours         3.7h   18.8h    92h   1,184h (49d)   19,862h (828d)
+```
+
+**Structure does not explain the tail.** Every visit has a stop; 87% are clean
+dwells; the clean-dwell p95 is still 828 days; two of the five longest spans
+(>5,000 days each) classify as `dwell`.
+
+Two claims were false and are withdrawn:
+
+- **"~46% of visits have no observed stop."** `port_name` is null on 45.6% of
+  rows and I read that as a missing stop. The intermediate anchorage is present
+  on **100%** of visits — it just has no `name` on 46% of them.
+- **"~46% of port visits were dropped by the graph."** Follows from the above
+  and is equally false. `port_id` was **100% populated before the change**, and
+  `add_port_visits` keyed on it. Nothing was being skipped. **The number was
+  never measured — it was inferred from a null rate on a different column.**
+
+**What did survive the host run, all measured:**
+
+| Field | Before | After |
+|---|---|---|
+| `confidence` | 0% | **100%** |
+| `gfw_confidence_raw` | 0% | **100%** |
+| `visit_confidence` | 0% | **100%** |
+| `visit_port_id` | 0% | 100% (changes nothing today) |
+| `dwell_hours` | 0% | 87% |
+
+Plus: `orphans: 0` across all four kinds — **raw really is sufficient to
+regenerate the conformed layer, so CLAUDE.md §4.2 holds on this corpus.** That
+is the first time it has been checked. And the all-null-column landing bug is
+real and fixed.
+
+`dwell_hours` is a narrower, better-defined field than `duration_hours` and is
+**not** a fix for the long durations. Any claim that it is "distributionally
+matched" is withdrawn.
+
+#### The live hypothesis — needs no bug anywhere
+
+The connector asks GFW for events **overlapping** an eight-week window. A visit
+lasting fourteen years overlaps every possible window; one lasting twelve hours
+only overlaps if it falls inside. An overlap query therefore over-samples long
+events **in direct proportion to their length**, so the observed distribution is
+not the distribution of port calls — it is that distribution multiplied by
+duration. Separately, the pull returned **exactly 3,000** events, which is a
+result cap, not a count.
+
+If that holds, the fix is in **the profiler, not ingest**: measure only visits
+fully contained in the query window, and state the cap. Ingest keeps landing
+what GFW returned.
+
+#### RESOLVED — the raw payloads, 2026-07-31
+
+`tools/port_visit_forensics.py` on the real corpus. Length bias is the whole
+effect and the long visits are genuine.
+
+```
+query window: 2026-06-04 .. 2026-07-30 (56 days)
+fully inside : 1,278 (42.6%)      crossing an edge: 1,722 (57.4%)
+
+                        p05     p25     p50        p75          p95           max
+all visits             4.0h   21.0h    107h  1,261h(53d)  20,242h(843d) 126,414h(5,267d)
+contained (unbiased)   2.2h    7.6h   18.7h     46.5h       262h(11d)     1,224h(51d)
+crossing an edge      24.2h   133h    855h   2,556h(107d) 35,545h(1,481d) 126,414h
+```
+
+**Median contained 18.7 h. Median straddling 856 h. A 46x ratio.** The contained
+distribution is an ordinary population of port calls topping out at the window
+length. The tail lives entirely in visits already in progress when we started
+looking.
+
+**The extremes are correct.** The 5,022-day visit sits at `ind-ind-76`,
+`topDestination: ALANG` — **the world's largest shipbreaking yard**, arrived
+2012 to be scrapped. Two more are laid up at Pipavav and Ghogha since 2012.
+Calling these degenerate was our error, not GFW's.
+
+**GFW's own duration agrees with ours to the second** (`durationHrs`
+126,413.72 vs `end - start` 126,413.72). There was never a discrepancy.
+
+Fix is in the profiler and nowhere else — already landed.
+
+#### Three unrelated fields were being read from the wrong place
+
+Found by printing the payloads, none related to the original question:
+
+1. **`durationHrs`, not `durationHours`, nested in the sub-object.** Every
+   duration was ours, computed from `end - start`, while GFW's sat unread. They
+   agree — but **`gap.durationHrs` was affected identically**, so
+   `gap_duration_hours` was null on every gap. Both spellings now accepted at
+   both levels.
+2. **`topDestination` present on 100% of anchorages, `name` on 54.4%.** The
+   readable place — VADINAR, MUNDRA, ALANG — was there all along and unlanded.
+   An anchorage rendering as `ind-ind-76` in front of an operator is a worse
+   answer than one rendering as ALANG. Now landed, and the generator matches
+   the 45.6% unnamed rate so the corpus stays non-separable.
+3. **`anchorageId`** is a distinct stable key from `id`. Now landed.
+
+#### Still open: the 3,000 cap
+
+The pull returned **exactly 3,000** port visits in one file — a page limit. The
+corpus is a sample of unknown size and unknown selection, so **no count taken
+from it describes the Arabian Sea**. `data_health.py` flags any round row count.
+Paginating the events connector is the fix and is **not done**.
+
+**Process note.** The first explanation was built by reasoning about what a
+field means from a null rate on a *neighbouring* column, and it survived an ADR,
+a tool, a validator, sixteen tests and a PR description before meeting the data.
+All of it was internally consistent and jointly wrong. The audit output in
+`rebuild_conformed.py` is what caught it — an argument for tools that print what
+changed rather than assert that it worked.
+
+**✅ RESOLVED ON HOST 2026-07-31 — the landed events carried only `h3_r7`
+and `h3_r9`.**
+
+```
+table              parts     rows  positioned  cells added  corrected
+gfw_encounters         6       14          14           42          0
+gfw_loitering         86   24,153      24,153       72,459          0
+gfw_port_visits      407    3,000       3,000        9,000          0
+gfw_ais_gaps           4        5           5           15          0
+                                        27,172       81,516          0
+```
+
+**`corrected: 0` is the number that matters.** Every H3 cell already present
+was correct — nothing had been derived from a parent resolution, so the 7.2%
+ADR-015 failure mode had never occurred in this data. Only the three missing
+resolutions (r4, r6, r8) needed adding, and 27,172 × 3 = 81,516 confirms
+exactly that with nothing unexplained.
+
+Run on Eshan's laptop against the real corpus, `data/conformed` backed up
+first (3,373 files). **This is host-verified, not sandbox-green.** Original
+finding below.
+
+ ADR-015 requires all five
+resolutions, and the code does that now — but these rows were landed **before**
+the fix, so the ingest↔fusion join at res 6 still returns nothing. New tool:
+`python tools/restamp_h3.py --dry-run` reports, without `--dry-run` recomputes
+the missing cells from lat/lon. This is legitimate rather than a patch of the
+conformed layer: an H3 cell is a pure function of the row's own coordinates, so
+recomputing produces exactly what re-running the connector would. It also flags
+any cell that is present but *wrong*, which would mean something derived a cell
+instead of computing it (the 7.2% ADR-015 measured).
+
+### Parameters now measured (7 of 15, from 12,483 real rows)
+
+| Parameter | Old prior | Measured | Rows |
+|---|---|---|---|
+| flag distribution | IND 8% | **IND 72.5%** | 9,315 |
+| port-call dwell (median) | 26 h | **107 h** (tail truncated) | 3,000 |
+| loiter duration (median) | 10 h | 5.8 h | 24,153 |
+| encounter duration (median) | 6.5 h | 9.2 h | 14 |
+| fishing length (median) | 27 m | 14.1 m | 60 |
+| bulker / general cargo length | 225 / 120 m | 171.7 m | 46 |
+| reefer length | 145 m | 141.1 m | 2 |
+
+Still ASSUMED: all four tanker classes, dhow, naval, encounter separation,
+anchorage wait. GFW's `vessel_type` taxonomy is too coarse to separate VLCC from
+Suezmax, and 98.6% of identity rows have no length at all — so those stay
+published priors and the report says so.
+
+### Measured results after alignment
+
+```
+true anomalies:  22   DETECTED 3   MISSED 19
+decoys:          16   FALSE POSITIVE 0
+deliberate misses: 2   correctly silent 2
+precision 100%   recall 14%
+```
+
+Recall moved 18% -> 14% between passes. That is **not** a regression to chase:
+the null masking removed IMO and length from most rows, which is what the real
+data looks like, so the identity-based detectors have less to work with. The
+earlier 18% was measured against a corpus that was easier than reality.
 
 ---
 
@@ -472,3 +984,59 @@ cheap thing on the list — one `registries --only ofac` run on a later date.
    `D-01` or `D-02` in the file. Session notes referring to "D-01" mean
    **ADR-001** (free data first). Flagging rather than renaming, since ADR IDs
    are cited across the docs.
+
+---
+
+## Demo readiness (2026-07-31)
+
+**`python tools/data_health.py` — run it before every demo.** Read-only, exits 1
+on any BLOCKER. It grades the bytes on disk, not the code's intentions, because
+every data defect this project has hit was found late and by accident while
+looking at something else: the H3 resolutions (ADR-015), the two vessel
+keyspaces, the port-visit durations (ADR-020). Each was invisible in a row count
+and obvious the moment somebody printed the right number.
+
+| Level | Meaning |
+|---|---|
+| **BLOCKER** | the demo would state something false, or a core query returns nothing |
+| **WARN** | it works, but a number on screen is weaker than it looks |
+| **INFO** | measured context |
+
+Blockers: unreadable table (including the all-null-column type conflict that
+takes down a whole table at once), missing H3 at any of the five resolutions, a
+gap in the provenance envelope, `is_synthetic` disagreeing with `source_id`, and
+a missing raw store.
+
+Warnings currently expected on the real corpus:
+
+- **No flagged dark-vessel gaps.** The demo cannot show a *real* dark vessel
+  from this corpus. Run the scenario corpus alongside and label every figure as
+  synthetic (ADR-019), or widen the pull.
+- **Thin encounter graph.** 14 encounters across the whole AOI and window; a
+  network view has nearly nothing to draw, so prefer a ranked table.
+- **Multi-year port-visit spans.** Do not render these as "time alongside" —
+  ADR-020 is open.
+- **Possible result cap.** Exactly 3,000 port visits is an API page limit, not a
+  count of what is in the Arabian Sea. Say "the first N returned"; an operator
+  will otherwise reasonably hear the second thing.
+
+### The duration measurement is now de-biased
+
+`tools/corpus_profile.py` measures `port_call_dwell_hours` from **visits that
+began and ended inside the query window**, and writes the unfiltered figure
+separately as `port_visit_span_hours` so the difference is visible in the
+profile rather than argued about.
+
+The reason is arithmetic, not a theory about GFW: the connector asks for events
+*overlapping* an eight-week window, and an overlap query over-samples long
+events **in direct proportion to their length**. A fourteen-year visit overlaps
+every possible window; a twelve-hour one only overlaps if it falls inside. Any
+quantile over the whole table inherits that, which is how the figure reached a
+p95 of 2.3 years while every visit in it was structurally sound.
+
+The cost is stated rather than hidden: genuine long stays are excluded, so the
+de-biased figure **understates** the real tail. For a number that feeds a
+generator which must not put a background vessel alongside for two years, that
+is the right way round. When `data/raw/` is absent the window cannot be
+recovered and the profiler **says it cannot de-bias** instead of silently
+falling back.

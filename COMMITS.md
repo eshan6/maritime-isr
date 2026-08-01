@@ -56,3 +56,60 @@ git add maritime_isr/infra/install_snap.sh \
         maritime_isr/cli.py tests/test_preprocess.py
 git commit -m "0.2: SNAP preprocessing chain (pyroSAR gpt), sigma0 validator, doctor, memory-capped install"
 ```
+
+---
+
+# Scenario corpus (ADR-019)
+
+```
+git add maritime_isr/scenario/ tools/corpus_profile.py \
+        tools/run_scenario_pipeline.py tests/test_scenario.py \
+        maritime_isr/ingest/landing.py maritime_isr/graph/store.py \
+        maritime_isr/graph/from_landed.py maritime_isr/graph/identity.py \
+        maritime_isr/cli.py DECISIONS.md STATE.md COMMITS.md
+git commit -m "scenario: synthetic corpus in the real tables, flagged is_synthetic (ADR-019)"
+```
+
+Run order on a machine that holds the real data:
+
+```
+python tools/corpus_profile.py                      # measure the real corpus
+python -m maritime_isr.cli scenario generate --seed 7
+python -m maritime_isr.cli scenario status
+python tools/run_scenario_pipeline.py               # pipeline + measurement
+python -m maritime_isr.cli scenario clear           # remove every synthetic row
+```
+
+---
+
+# Real-corpus repairs (ADR-020, ADR-021)
+
+Four units, landed after the corpus profile came back from the laptop and the
+generator was aligned to it. Each was found by measuring, not by reading code.
+
+```
+git commit -m "ingest: a port visit's span is not its dwell (ADR-020)"
+git commit -m "data: correct the ADR-020 diagnosis, de-bias the duration, gate the demo"
+git commit -m "ingest: ADR-020 resolved from the raw payloads — the data was fine"
+git commit -m "fix: three zeros that were breakage, not measurement (ADR-021)"
+git commit -m "ingest: render the port name an operator can read"
+```
+
+Run order on a machine that holds the real data. Everything here is offline —
+`rebuild_conformed` reads `data/raw/`, so ADR-013 holds and the corpus window
+does not move.
+
+```
+python tools/data_health.py                     # the demo gate; exits 1 on a blocker
+python tools/restamp_h3.py --dry-run            # must report 0 cells added
+python tools/rebuild_conformed.py --dry-run     # audit; watch `orphans`, must be 0
+python tools/rebuild_conformed.py               # back up data/conformed first
+python tools/corpus_profile.py                  # refresh the profile, now de-biased
+python tools/port_visit_forensics.py            # raw only; the ADR-020 investigation
+```
+
+**Host-verified 2026-07-31**, all of the above run on the operator's laptop
+against the real corpus: 81,516 H3 cells added with 0 corrected; `orphans: 0`
+across all four event kinds; GFW confidence recovered from 0% to 100% on 3,000
+port visits; `visit_port_name` from 54.4% to 100%; 5 of 5 AIS gaps flagged by
+GFW as intentional disabling, where this repo had recorded zero.

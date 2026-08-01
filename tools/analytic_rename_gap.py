@@ -33,6 +33,27 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from maritime_isr.ingest.landing import read_table  # noqa: E402
+
+#: Real rows only, and it must stay that way.
+#:
+#: Once the scenario generator has run (ADR-019), these tables hold synthetic
+#: rows alongside real ones in the same partitions. This tool quotes numbers
+#: that go into STATE.md and into external material — "98 vessels matched" —
+#: and blending three scenario hulls into that figure would turn a measured
+#: finding into a fabricated one. The hard ban is explicit: never blend real
+#: and synthetic into a single quoted number.
+#:
+#: Scenario counts are available separately from
+#: `python -m maritime_isr.cli scenario status`.
+def real_rows(table: str) -> list[dict]:
+    rows = read_table(table)
+    syn = sum(1 for r in rows if r.get("is_synthetic"))
+    if syn:
+        print(f"[real-only] {table}: excluded {syn:,} synthetic row(s); "
+              f"{len(rows) - syn:,} real row(s) remain")
+    return [r for r in rows if not r.get("is_synthetic")]
+
+
 from maritime_isr.ingest.sanctions_match import (  # noqa: E402
     MATCH_TABLE, normalise_name,
 )
@@ -158,7 +179,7 @@ def gap_flag_census() -> dict[str, int]:
     """
     census = {"total": 0, "flagged_true": 0, "explicit_false": 0, "null": 0,
               "with_vessel_id": 0}
-    for r in read_table("gfw_ais_gaps"):
+    for r in real_rows("gfw_ais_gaps"):
         census["total"] += 1
         if r.get("vessel_id"):
             census["with_vessel_id"] += 1
@@ -175,7 +196,7 @@ def gap_flag_census() -> dict[str, int]:
 def intentional_gaps() -> dict[str, list[dict]]:
     """vessel_id -> gaps GFW flagged as looking like intentional disabling."""
     out: dict[str, list[dict]] = {}
-    for r in read_table("gfw_ais_gaps"):
+    for r in real_rows("gfw_ais_gaps"):
         if not r.get("gfw_intentional_disabling"):
             continue
         vid = r.get("vessel_id")
@@ -192,13 +213,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--csv", default=None)
     args = ap.parse_args(argv)
 
-    matches = read_table(MATCH_TABLE)
+    matches = real_rows(MATCH_TABLE)
     if not matches:
         print("No matches landed. Run: maritime-isr ingest sanctions-match")
         return 1
 
     identity_by_vessel: dict[str, list[dict]] = {}
-    for r in read_table("gfw_vessel_identity"):
+    for r in real_rows("gfw_vessel_identity"):
         vid = r.get("vessel_id")
         if vid:
             identity_by_vessel.setdefault(vid, []).append(r)
