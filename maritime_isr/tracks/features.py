@@ -27,12 +27,12 @@ from .kalman import epoch_s
 RESAMPLE_S = 300
 ENC_RES = 7  # ~5 km² cells; 500 m radius always inside cell ∪ 1-ring
 
-# Minimal AOI port layer (WPI fold-in replaces this on the deploy host).
-AOI_PORTS = {
-    "Mumbai": (18.95, 72.84), "JNPT": (18.95, 72.95), "Kandla": (23.02, 70.22),
-    "Mundra": (22.74, 69.70), "Porbandar": (21.63, 69.60),
-    "Karachi": (24.79, 66.98), "Kochi": (9.97, 76.24), "Mangalore": (12.92, 74.80),
-}
+# The one shared gazetteer (ADR-023). This list used to be local and held 8
+# ports with **no Sikka and no Vadinar** — the two Gujarat crude terminals most
+# tanker traffic in this AOI calls at — so a laden voyage into Vadinar produced
+# an empty `port_calls` and every port-based rule saw nothing.
+from ..ports import PORTS as AOI_PORTS      # noqa: E402  (kept as a re-export)
+from ..ports import port_at
 
 
 def _hav_m(lat1, lon1, lat2, lon2):
@@ -166,11 +166,11 @@ def extract_features(track) -> dict:
     # port-call sequence
     calls, cur = [], None
     for k in range(len(pts)):
-        port = None
-        for name, (pla, plo) in AOI_PORTS.items():
-            if _hav_m(pts.lat.iloc[k], pts.lon.iloc[k], pla, plo) < PORT_RADIUS_KM * 1000:
-                port = name
-                break
+        # Nearest port wins. This used to break on the first dictionary hit,
+        # so at Mumbai and JNPT — 11 km apart, both inside the radius — the
+        # answer depended on iteration order rather than distance.
+        port = port_at(pts.lat.iloc[k], pts.lon.iloc[k],
+                       radius_km=PORT_RADIUS_KM)
         if port != cur:
             if port:
                 calls.append(port)

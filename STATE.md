@@ -1180,3 +1180,99 @@ Recorded, not fixed. It is a design question, not a bug.
 - **Three separate port gazetteers**: `tracks/features.AOI_PORTS` (8 ports, no
   Sikka or Vadinar — where most scenario tanker traffic goes),
   `anomaly/library.HIGH_RISK_PORTS` (2), and `scenario/geography.PORTS` (11).
+
+---
+
+## Demo scope-cut, 2026-08-01 — fusion wired, gazetteer consolidated
+
+Two plumbing fixes only. **No thresholds tuned. Coverage model, graph detector
+and events table deliberately untouched.**
+
+### 1. The fusion stage now runs (Phase 3)
+
+`tools/run_scenario_pipeline.py` passed `associations=[]` and `verdicts=[]` as
+**literals**, so `detect_dark_vessel` iterated an empty list and
+`detect_dark_rendezvous` short-circuited on all 5,880 encounters. Two of six
+detectors had never been asked a question, and were being reported as silent.
+
+Now running, over the same corpus:
+
+```
+scenes           : 4 (6 contacts)
+registry entries : 9 MMSI -> length
+associations     : 6  (2 matched, 4 unmatched)
+dark verdicts    : 4  {'suppressed_coverage': 4}
+```
+
+**Also fixed:** association rows carried no `lat`/`lon`, and
+`detect_dark_rendezvous` read `a["props"]["lat"]` — a key nothing ever wrote.
+Its footprint branch could never be taken; the rule could only fire through
+`gap_party`. The contact's position now travels with the association.
+
+**Both dark rules still fire zero, for reasons that are not thresholds:**
+
+- `dark_vessel` — all 4 verdicts are `suppressed_coverage` with
+  **`hearable_conf = 0.0`**. The contacts sit in the deep basin, outside
+  terrestrial reception, and there is no satellite AIS. The cascade is
+  **correct** to suppress: asserting darkness where we cannot hear is a false
+  positive by construction (CLAUDE.md §6). This is ADR-005's unfunded feed, not
+  a detector fault.
+- `dark_rendezvous` — the nearest unmatched contact is **730 km** from any
+  encounter; the threshold is 3 km. The SAR contacts and the encounters are in
+  different parts of the AOI entirely. **Scenario-authoring gap**, flagged not
+  fixed: A1–A3 place a rendezvous and a SAR contact but never co-locate them.
+
+### 2. One port gazetteer (ADR-023)
+
+`tracks.features.AOI_PORTS` held 8 ports with **no Sikka and no Vadinar** — the
+two Gujarat crude terminals the generator places most tanker traffic at. A full
+laden voyage into Vadinar produced an **empty** `port_calls` list, silently.
+
+Consolidated into `maritime_isr/ports.py` (16 ports), plus five real-corpus
+ports using GFW's own anchorage coordinates (Pipavav, Alang, Hazira, Magdalla,
+Ghogha). Port matching now takes the **nearest** port rather than the first
+dictionary hit — Mumbai and JNPT are 11 km apart and both inside the radius, so
+the old answer depended on iteration order.
+
+**Measured:**
+
+```
+tracks with >=1 port call : 81 / 104
+ports called              : Vadinar 64, Mundra 48, Sikka 33, Mumbai 20,
+                            Mangalore 14, Kochi 11, JNPT 9, Kandla 8, Pipavav 1
+calls at a high-risk port : 8  (Kandla)
+```
+
+Vadinar and Sikka — the top two — were invisible before. Scenario generation is
+byte-identical; determinism test green.
+
+`port_risk_propagation` **still fires zero, and that one IS a threshold**:
+Kandla's weight is 0.4, the rule's threshold is 0.5, so a Kandla call alone can
+never clear it. Karachi (0.7) would, and no track calls there. **Not tuned —
+reported**, per the standing instruction.
+
+### Re-measured: unchanged
+
+```
+true anomalies    :  22   DETECTED 3   MISSED 19
+decoys            :  16   FALSE POSITIVE 0   correctly quiet 16
+deliberate misses :   2   correctly silent 2
+precision 100%    recall 14%
+```
+
+Three sessions have now moved recall by zero. That is itself the finding: the
+misses are **not** in the detectors' logic. They are upstream of it — an
+unfunded satellite feed, an empty events table, a scenario whose SAR contacts
+and encounters do not overlap, and one threshold set above the only weight any
+track can reach.
+
+446 tests green.
+
+### Flagged this session, no action taken
+
+- **Only 9 of 103 vessels have a length in the registry**, because `length_m` is
+  null-masked to match the real corpus (98.6% null). Association therefore
+  applies almost no length gate and is running on proximity alone. Real, and a
+  direct consequence of the fidelity work — not a regression.
+- **A1–A3 do not co-locate their SAR contact with their rendezvous.** 730 km
+  apart. Fixing it means regenerating the corpus.

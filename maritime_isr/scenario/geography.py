@@ -19,6 +19,8 @@ here would be false precision.
 """
 from __future__ import annotations
 
+from ..ports import SCENARIO_PORTS
+
 import math
 
 from ..config import AOI_V1
@@ -34,29 +36,15 @@ M_PER_NM = 1852.0
 # --------------------------------------------------------------------------
 
 #: Ports and terminals, (lat, lon). Real coordinates for real facilities.
-PORTS: dict[str, tuple[float, float]] = {
-    # Gujarat crude/product cluster — the destination for most of the tanker
-    # traffic these scenarios model.
-    "Sikka":     (22.43, 69.84),
-    "Vadinar":   (22.28, 69.73),
-    "Mundra":    (22.74, 69.70),
-    "Kandla":    (22.99, 70.22),
-    # Pakistan
-    "Karachi":   (24.81, 66.97),
-    # Gwadar's berths sit at ~25.12N, which is **north of AOI v1's 25N edge**.
-    # The coordinate here is the seaward approach anchorage, which is inside the
-    # box and is where a vessel calling at Gwadar is actually observable to us.
-    # Using the berth put track points at 25.0005N and failed the AOI check —
-    # correctly, because a position outside the AOI is outside everything this
-    # system is scoped to. Moving the reference to the approach is the honest
-    # fix; pretending the berth is in-AOI would not be.
-    "Gwadar":    (24.88, 62.32),
-    # Indian west coast
-    "JNPT":      (18.95, 72.95),
-    "Mumbai":    (18.92, 72.83),
-    "Mangalore": (12.92, 74.80),
-    "Kochi":     (9.97, 76.26),
-}
+#: The ports the scenario places vessels at. **Sourced from the one shared
+#: gazetteer** (ADR-023) rather than defined here, so the generator and the
+#: feature extractor cannot disagree about where a port is — they did, and a
+#: vessel could call somewhere the extractor had no name for.
+#:
+#: The coordinates are unchanged by the consolidation: the scenario's values
+#: were the authoritative ones, including Gwadar's approach anchorage, so
+#: generated tracks are byte-identical and the determinism test still holds.
+PORTS: dict[str, tuple[float, float]] = dict(SCENARIO_PORTS)
 
 #: Anchorage waiting areas, offset from the berth. A vessel waiting for a berth
 #: sits here, not alongside — the distinction is what makes E5 (floating storage)
