@@ -51,11 +51,11 @@ maritime_isr/
   graph/     object graph: ontology, edges, event engine, confidence decay
   rules/     anomaly library + risk scoring
   eval/      the permanent evaluation harness
-  api/       FastAPI serving layer
-  ui/        React + MapLibre frontend (Vercel-deployable)
+  api/       FastAPI serving layer (Phase 6 — see below)
   inspect/   throwaway inspection dashboards (ugly on purpose, pre-Phase 6)
   infra/     cron entries, VM setup scripts, R2 config
   schemas/   canonical schemas (versioned) + the shared H3 helper
+frontend/    React + MapLibre product surface (Phase 6) — Map · Alerts · Vessels · Graph
 ```
 
 ---
@@ -133,6 +133,75 @@ maritime-isr inspect v0
 
 Each command's exit test is defined in `maritime-isr-execution-spec.md`. A command
 "working in the sandbox" is not the same as its exit test passing on the VM.
+
+---
+
+## Phase 6 — the product surface (API + map UI)
+
+The first screen this project has: a local **FastAPI** backend plus a
+**React + MapLibre** frontend, both on `localhost`. Real and scenario data share
+every table and are **always shown separately, never blended** (ADR-019); the
+scenario rows carry a `SCENARIO` badge and a distinct violet treatment
+everywhere they appear.
+
+### Prerequisites
+
+- The corpus landed under `data/` (real, from the ingest connectors, and/or the
+  scenario corpus from `maritime-isr scenario generate`).
+- The graph populated with alerts, if you want the alert queue and graph views to
+  have content: `python tools/run_scenario_pipeline.py`.
+- `pip install -e ".[api]"` (adds FastAPI + uvicorn to the base install).
+- Node 18+ for the frontend.
+
+### 1. Start the API (one command)
+
+```bash
+python -m maritime_isr.api          # serves 127.0.0.1:8000
+```
+
+It reads the conformed Parquet tables through DuckDB and the object graph through
+SQLite, and writes nothing except alert dispositions. Auth is a shared token
+(`X-API-Token`, default `maritime-isr-dev`, override with `MISR_API_TOKEN`);
+CORS is scoped to the dev frontend origin. Interactive docs at
+`http://127.0.0.1:8000/docs`.
+
+Endpoints: `/vessels`, `/vessels/{id}`, `/vessels/{id}/track`,
+`/vessels/{id}/neighbourhood`, `/alerts`, `/alerts/{id}`,
+`/alerts/{id}/disposition`, `/events`, `/scenes`, `/ports`, `/stats`. Every
+vessel/edge payload carries `is_synthetic` and the provenance envelope; every
+count returns `{real, synthetic}` separately.
+
+### 2. Start the frontend (one command)
+
+```bash
+cd frontend && npm install && npm run dev     # serves localhost:5173
+```
+
+The dev server proxies `/api` to the backend and injects the auth token, so no
+secret lives in the browser and there is no CORS to configure. Point
+`MISR_API_URL` / `MISR_API_TOKEN` at a non-default backend if needed. `npm run
+build && npm run preview` serves the production build on `:4173` the same way.
+
+Four views: **Map** (AOI framed on the Arabian Sea, toggleable layers, an 8-week
+time scrubber with play/pause, click a vessel for its entity panel), **Alerts**
+(a short, high-signal queue — each alert's evidence chain rendered as labelled
+hops, with confirm/watch/dismiss buttons that persist), **Vessels** (a sortable,
+filterable table), and **Graph** (seed-and-expand from one vessel, one hop per
+click, never a hairball).
+
+### Verifying against real data
+
+The API is written in a sandbox with no real data, so schema assumptions are
+provisional until measured on the machine that holds the corpus. Run the
+profiler there and commit its output:
+
+```bash
+python tools/api_schema_profile.py     # -> data_profiles/api_schema_profile.json
+```
+
+The exercise tests (`tests/test_api_exercise.py`) hit every endpoint against the
+landed DuckDB/Parquet corpus and assert non-empty, correctly-shaped results (not
+existence checks); they skip cleanly when no corpus is landed.
 
 ---
 

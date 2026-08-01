@@ -1,0 +1,23 @@
+{
+  "name": "maritime-isr-frontend",
+  "private": true,
+  "version": "0.7.0",
+  "type": "module",
+  "description": "Phase 6 product surface — React + MapLibre GL analyst UI for the Maritime ISR prototype.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "cytoscape": "^3.30.2",
+    "maplibre-gl": "^4.7.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.26.2"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.2",
+    "vite": "^5.4.8"
+  }
+}
