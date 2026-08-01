@@ -113,3 +113,35 @@ against the real corpus: 81,516 H3 cells added with 0 corrected; `orphans: 0`
 across all four event kinds; GFW confidence recovered from 0% to 100% on 3,000
 port visits; `visit_port_name` from 54.4% to 100%; 5 of 5 AIS gaps flagged by
 GFW as intentional disabling, where this repo had recorded zero.
+
+---
+
+# One canonical vessel key (ADR-022)
+
+Single-focus session. Diagnose, fix structurally, guard with an exercise test,
+re-measure without tuning.
+
+```
+git add maritime_isr/schemas/keys.py maritime_isr/schemas/__init__.py \
+        maritime_isr/graph/from_landed.py maritime_isr/graph/identity.py \
+        maritime_isr/graph/store.py maritime_isr/scenario/measure.py \
+        tests/test_vessel_keyspace.py tests/test_graph_from_landed.py \
+        DECISIONS.md STATE.md COMMITS.md
+git commit -m "graph: one canonical vessel key, published by the side that owns it (ADR-022)"
+```
+
+Verification, in this order:
+
+```
+python -m pytest tests/test_vessel_keyspace.py -q   # the exercise test
+python -m pytest tests/ -q                          # 446 green
+python -m maritime_isr.cli scenario generate --seed 7
+python tools/run_scenario_pipeline.py               # recall must be UNCHANGED
+```
+
+**Recall is expected to stay at 14%.** It did — 3 of 22 before and after,
+precision 100% both times, 0 false positives across 16 decoys both times. The
+keyspace defect governed what an alert *connected to*, not whether it was
+raised, and reporting that plainly was the point of the session. What changed:
+MMSI-to-hull resolution went from **0 of 103** to **102 of 103**, and an alert
+now reaches a hull with a median of 4 edges instead of a provisional stub with 1.

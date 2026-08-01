@@ -94,25 +94,33 @@ def load_truth() -> list[dict]:
 
 
 def alias_map() -> dict[str, str]:
-    """Every graph node id that means "this scenario vessel", mapped to it.
+    """Graph node id -> the scenario entity id `scenario_truth` names it by.
 
-    **The pipeline uses two vessel keyspaces and they do not join.** The landed
-    graph populator keys hulls by `vessel:gfw:<vessel_id>`; the Phase 2/5 path
-    resolves an AIS track through `graph.identity.resolve_mmsi`, which mints
-    `vessel:mmsi:<mmsi>`. An alert raised by the anomaly library therefore
-    lands on a node the truth table has never heard of, and the first
-    measurement run scored 0 of 23 true anomalies entirely because of it.
+    **This is no longer bridging a defect.** It used to: the populator keyed
+    hulls `vessel:gfw:<vessel_id>` while `resolve_mmsi` minted
+    `vessel:mmsi:<mmsi>`, and an alert landed on a node the truth table had
+    never heard of. ADR-022 gave both sides one canonical key, so the graph is
+    now internally consistent and `resolve_mmsi` returns the populated hull.
 
-    That is a real defect in the codebase — the same class as ADR-015, where
-    two modules computed different keys and every join between them silently
-    returned nothing — and it is reported as a finding rather than papered over.
-    This map exists so the *measurement* can still be taken while the defect
-    stands; it is built from the landed identity table, which is data, and it
-    is used only after the pipeline has finished. No detector sees it.
+    What remains is a genuine and unavoidable translation, in one direction
+    only: `scenario_truth` records participants by the generator's own entity id
+    (`vessel:spine`), because that is the id the scenario *authored*, while the
+    graph namespaces it as `vessel:gfw:spine`. Rewriting the truth table to hold
+    graph node ids would couple the ground truth to the graph's naming — and a
+    scenario's identity must not change because the populator renames something.
 
-    A vessel that changed MMSI mid-window (B1's phoenix, B5's clone) has
-    several aliases, and all of them map back to the one hull.
+    So this is a measurement-side mapping between an author's names and a
+    system's names, built through the same canonical constructor the graph uses.
+    It runs after the pipeline has finished and no detector sees it. The
+    provisional `vessel:mmsi:*` form is still accepted, because a vessel
+    genuinely unknown to the registry legitimately resolves that way and a
+    measurement that silently dropped those alerts would understate detection.
+
+    A vessel that changed MMSI mid-window (B1's phoenix, B5's clone) has several
+    aliases; all of them map back to the one hull.
     """
+    from ..schemas.keys import vessel_node_id
+
     out: dict[str, str] = {}
     for r in read_table("gfw_vessel_identity"):
         if not r.get("is_synthetic"):
@@ -121,10 +129,10 @@ def alias_map() -> dict[str, str]:
         if not vid:
             continue
         out[vid] = vid
-        out[f"vessel:gfw:{vid}"] = vid
+        out[vessel_node_id(vid)] = vid
         mmsi = r.get("mmsi")
         if mmsi not in (None, ""):
-            out[f"vessel:mmsi:{int(mmsi)}"] = vid
+            out[vessel_node_id(str(int(mmsi)), source="mmsi")] = vid
     return out
 
 

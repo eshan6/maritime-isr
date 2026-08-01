@@ -950,3 +950,103 @@ Arabian Sea cannot recur silently. **Every prior conclusion drawn from a zero
 should be re-checked against this bar** — the two still outstanding are the
 `0 of 98 OFAC-matched vessels with an encounter edge` figure and the WPI port
 coverage.
+
+---
+
+## ADR-022 — One canonical vessel key, published by the side that owns it *(Accepted)*
+**2026-08-01. Same failure family as ADR-015 and ADR-021.**
+
+**Context.** Two modules built vessel node ids with their own f-strings and had
+never met. Measured on the synthetic corpus before the fix:
+
+| Keyspace | Minted by | Nodes | Out-edges | Edges/node |
+|---|---|---|---|---|
+| `vessel:gfw:<vessel_id>` | `from_landed.vessel_node_id` | **114** | **616** | **5.4** |
+| `vessel:mmsi:<mmsi>` | `identity.resolve_mmsi` | **8** | **8** | **1.0** |
+
+**8 of 8** of the second kind had a fully-populated twin under the first. Every
+alert the anomaly library raised landed on the second kind.
+
+**The symptom was not the one recorded in STATE.md.** That said alerts "land on
+nodes the landed graph never sees". They resolved — **4 of 4, 100%** — so a
+presence check passed. They resolved to a node whose entire content was
+`{"mmsi": 999000012, "provisional": true}` and one self-referential edge, while
+the hull with flag, owner, sanctions, port calls and encounters sat one keyspace
+away. **A shadow stub, not a severed join.** An analyst clicking that alert
+reaches nothing, which is a demo blocker regardless of any recall number.
+
+**The root cause was narrower than either description.** `resolve_mmsi` works by
+walking `identified-as` edges into an `id:mmsi:<mmsi>` node — the right design.
+It fell through to minting a provisional hull because
+`from_landed.add_identities` emitted **`id:name:*` nodes only**: 115 name nodes,
+**zero** `id:mmsi:*` or `id:imo:*`. The lookup had nothing to find. The two sides
+did not merely disagree on a format; **one side never published the key the
+other side reads.**
+
+**Decision — three parts.**
+
+**(a) One constructor per key, in `schemas/keys.py`**, imported by both the
+populator and the resolver. Hull ids come from `vessel_node_id`, identity ids
+from `identity_node_id`. `identity_node_id` refuses an unregistered kind, so
+adding one is a deliberate edit in the shared file rather than a new f-string in
+whichever module needed it.
+
+**(b) The populator publishes `id:mmsi:*` and `id:imo:*` nodes** with time-scoped
+`identified-as` edges. This is what makes the fix structural rather than a
+translation shim: after it, the resolver finds the hull on its own and no second
+node is created. **A shim would have been the wrong fix** — it would have to be
+consulted by every present and future consumer, and the first one that forgot
+would silently see half a graph, which is precisely the failure being repaired.
+
+**(c) Identifier values are normalised through one function.**
+`gfw_vessel_identity.mmsi` lands as a string, `ais_position.mmsi` as an int, and
+a Parquet round-trip can produce a float. `str(999000012)` and
+`str(999000012.0)` are different node ids and the join would miss for a reason
+no row count reveals — the ADR-015 shape again.
+
+**Measured after the fix:** **102 of 103** distinct MMSIs resolve to a populated
+hull (median 4 out-edges), up from **0 of 103**. The one that does not is a
+vessel's *second* MMSI probed before its swap — the identity model working, and
+a "fix" that forced 103/103 would have broken B1's phoenix and B4's zombie.
+
+**Two defects in the same area, fixed with it.**
+
+**`is_synthetic` was omitted on every vessel node.** `add_vessels` never passed
+the argument and the column defaults to 0, so **all 114 scenario hulls landed
+flagged as real** while the identity and gap nodes beside them were flagged
+correctly. ADR-019 makes that flag the only thing separating the two
+populations. **Every real-vs-synthetic vessel count taken before 2026-08-01 is
+void**, and wrong in the direction that inflates the real side. `GraphStore.node`
+also did not return the column, so the one accessor most callers use could not
+see it.
+
+**The double prefix `vessel:gfw:vessel:spine`.** The scenario generator writes
+its own entity id into the `vessel_id` column GFW fills with a bare id, so the
+namespace was applied twice on synthetic rows and once on real ones — the two
+corpora did not share a node-id *shape*. `native_vessel_id` strips it, and is
+**idempotent**, which the first version was not: it turned an already-canonical
+id into `vessel:gfw:gfw:spine`. Caught by a round-trip assertion in the test,
+not by inspection.
+
+**Migration is zero-recompute on landed data.** Nothing under `data/conformed/`
+is read. The graph's own node ids are rewritten in place, because the graph
+accumulates edge history that cannot be regenerated (CLAUDE.md §6) — rebuilding
+it is the destructive option here, not the safe one. Renaming a key changes no
+fact. A graph with no double-prefixed node pays one indexed scan and no writes.
+Where both spellings already exist the migration **declines to merge** and says
+so, rather than picking a winner between two histories on a guess.
+
+**Consequences — and the honest one first.**
+
+- **Recall did not move: 3 of 22 before, 3 of 22 after, precision 100% both
+  times, 0 false positives across 16 decoys both times.** This was predicted
+  before the fix and is reported rather than dressed up. **The 14% was not
+  primarily a join artifact**, so no prior tuning conclusion needs voiding on
+  those grounds.
+- **What it did fix is the click-through.** An alert now resolves to a hull with
+  a median of 4 edges instead of a stub with 1. That was the second thing the
+  session was called for and it is a demo blocker on its own.
+- The measurement harness's `alias_map` stopped being a bridge over a defect and
+  became what it should always have been: a translation between the *author's*
+  names in `scenario_truth` and the *system's* node ids. Ground truth must not be
+  renamed because the populator renames something.

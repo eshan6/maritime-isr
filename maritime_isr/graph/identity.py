@@ -18,13 +18,38 @@ from __future__ import annotations
 
 import time
 
+from ..schemas.keys import identity_node_id
+from ..schemas.keys import vessel_node_id as _canonical_vessel_node_id
+
 
 def vessel_id(imo: int | None, mmsi: int | None = None) -> str:
-    return f"vessel:imo:{imo}" if imo else f"vessel:mmsi:{mmsi}"
+    """A hull id minted from an identifier, when no source id is available.
+
+    **This is the fallback, not the primary key.** The primary key is the
+    source's own vessel id, minted by `schemas.keys.vessel_node_id`, and a hull
+    should reach this function only when nothing has published an `id:imo:*` or
+    `id:mmsi:*` node for it — which after ADR-022 means the vessel is genuinely
+    unknown to the registry, not merely that the populator forgot to say so.
+
+    Both branches route through the one canonical constructor, so the namespace
+    separator, the stripping rule and the shape cannot drift from the populator's
+    again. They already had: this module said `vessel:mmsi:<m>` while the
+    populator said `vessel:gfw:<id>`, and neither knew the other existed.
+    """
+    if imo:
+        return _canonical_vessel_node_id(str(imo), source="imo")
+    return _canonical_vessel_node_id(str(mmsi), source="mmsi")
 
 
 def identity_id(kind: str, value) -> str:
-    return f"id:{kind}:{value}"
+    """Kept as the module's public name; the definition is now shared.
+
+    The populator constructs the very same ids when it publishes identity nodes,
+    because it imports the same function. That is the whole repair — the two
+    sides previously built this string independently and one of them only ever
+    built it for `kind="name"`.
+    """
+    return identity_node_id(kind, value)
 
 
 def _current_identity(store, vid: str, kind: str):
