@@ -1040,3 +1040,143 @@ generator which must not put a background vessel alongside for two years, that
 is the right way round. When `data/raw/` is absent the window cannot be
 recovered and the profiler **says it cannot de-bias** instead of silently
 falling back.
+
+---
+
+## Vessel keyspace — CLOSED 2026-08-01 (ADR-022)
+
+### The framing in this file was wrong, and the correction matters
+
+This file recorded: *"alerts land on nodes the landed graph never sees."*
+**Measured: alerts resolve to a node 4 of 4 — 100%.** A presence check passed
+throughout. The defect was an **empty provisional stub shadowing a populated
+hull**, not a severed join:
+
+| Keyspace | Minted by | Nodes | Out-edges | Edges/node |
+|---|---|---|---|---|
+| `vessel:gfw:<vessel_id>` | `from_landed` | **114** | **616** | **5.4** |
+| `vessel:mmsi:<mmsi>` | `resolve_mmsi` | **8** | **8** | **1.0** |
+
+8 of 8 stubs had a fully-populated twin. Every alert landed on the stub, whose
+entire content was `{"mmsi": …, "provisional": true}`. Clicking it reached
+nothing.
+
+**Root cause, narrower than either description:** `from_landed.add_identities`
+published **`id:name:*` nodes only** — 115 of them, **zero** `id:mmsi:*` or
+`id:imo:*`. `resolve_mmsi` reads `id:mmsi:*`, found nothing, and minted a twin.
+One side never published the key the other side reads.
+
+**There were four keyspaces, not two:** `vessel:gfw:*`, `vessel:mmsi:*`,
+`vessel:imo:*`, and the scenario's own `vessel:<key>` in the `vessel_id` column
+and in `scenario_truth`.
+
+### Measured after the fix
+
+| | Before | After |
+|---|---|---|
+| MMSIs resolving to a populated hull | **0 / 103** | **102 / 103 (99.0%)** |
+| Median out-edges on a resolved hull | 1 | **4** |
+| Provisional stubs minted | 8 | **0** for known MMSIs |
+| Node id shape | `vessel:gfw:vessel:spine` | `vessel:gfw:spine` |
+
+The one MMSI that does not resolve is a vessel's **second** MMSI probed before
+its swap — time scoping working as designed. Forcing 103/103 would break B1's
+phoenix and B4's zombie.
+
+### **The 14% was NOT primarily a join artifact**
+
+```
+                     BEFORE          AFTER
+true anomalies       22  DET 3       22  DET 3
+decoys               16  FP 0        16  FP 0
+deliberate misses     2  silent 2     2  silent 2
+precision           100%            100%
+recall               14%             14%
+```
+
+**Unchanged, exactly as predicted before the fix.** No prior tuning conclusion
+needs voiding on join grounds. What the fix bought is the click-through — an
+alert now reaches a hull with a median of 4 edges instead of a stub with 1 —
+which was a demo blocker on its own.
+
+### ⛔ Every real-vs-synthetic VESSEL count before 2026-08-01 is void
+
+`add_vessels` omitted `is_synthetic`, and the column defaults to 0, so **all 114
+scenario hulls landed flagged as real** while identity and gap nodes beside them
+were flagged correctly. ADR-019 makes that flag the only thing separating the
+two populations. The error runs in the direction that **inflates the real side**.
+`GraphStore.node` also did not return the column, so the accessor most callers
+use could not see it. Both fixed; guarded by a test that checks the flag **per
+node type**, because that is exactly how it hid — the totals looked plausible
+while one type was entirely wrong.
+
+*Provisional, not measured:* this sandbox holds synthetic rows only. The
+real-corpus behaviour of all of the above needs a host run to confirm.
+
+---
+
+## Why 19 of 22 scenarios still miss — the miss-cause account
+
+Attributed by the rule each scenario's `scenario_truth` row expects. **None of
+these is a threshold. Nothing was tuned.**
+
+| Blocking cause | Rules blocked | Scenarios | Evidence |
+|---|---|---|---|
+| **Fusion stage never runs** | `dark_vessel`, `dark_rendezvous` | A1, A2, A3, A4, B1, E6 | `tools/run_scenario_pipeline.py` passes `associations=[]`, `verdicts=[]` |
+| **`events` table is empty (0 rows)** | `identity_then_anomaly` | B1, B2, B3, B6, D2 | rule reads `SELECT … FROM events WHERE event_type='identity_changed'` |
+| **`INTENTIONAL_SILENCE` is unreachable** | everything gap-based | A-group, C-group | see below |
+| **Spoof detector sensitivity** | `ais_spoofing` | A3, C1, C2, C3 | 1 spoof event from 103 tracks |
+| **Geofence coverage** | `loitering_sensitive` | A4, E1, E2, E3, E7 | **4 of 50** synthetic loitering events fall inside any of the 4 `SENSITIVE_ZONES` |
+| **High-risk port list** | `port_risk_propagation` | A5, E4, E6 | `HIGH_RISK_PORTS = {Karachi, Kandla}` only |
+
+### The gap classifier is not conservative — it is unreachable
+
+All 4,108 gaps classify `COVERAGE_GAP`. That is **structural, not a threshold**:
+
+```
+default SatPassSchedule windows : 0
+passes_within(any interval)     : 0
+nominal_period_s()              : 0.0
+```
+
+Walking `classify_gaps`'s decision tree with those values:
+
+1. `covered and n_passes >= 2 and not in_spoof` — `n_passes` is always 0 → **never taken**
+2. `n_passes == 0 and period and …` — `period` is `0.0`, falsy → **never taken**
+3. `sat_cov >= 0.5` — needs a receiver whose name starts `sat`; the corpus is terrestrial-only → **never taken**
+4. `else: COVERAGE_GAP` → **always**
+
+`INTENTIONAL_SILENCE` requires ≥2 satellite passes (ADR-004's conviction rule),
+and **no satellite AIS feed is configured** (ADR-005 — Spire unfunded). So
+`dark_rendezvous` is silent because of an upstream classifier that cannot reach
+its own positive branch, not because of its own logic. **Not fixed this
+session.** The honest reading is that this is ADR-005's cost arriving in the
+detector, and it is a funding decision rather than a code one.
+
+### Architecture finding: the graph is populated and no detector reads it
+
+`port_risk_propagation` looked like the one graph-traversal rule. It is not — it
+reads `extract_features(track)["port_calls"]`, string-matches against a
+two-entry dict, and writes a `docked-at` edge as **after-the-fact evidence**.
+Checking the other five: `dark_vessel`, `dark_rendezvous`, `ais_spoofing` and
+`loitering_sensitive` all take their inputs from the track engine and use the
+graph only to resolve an id and record evidence. `identity_then_anomaly` reads
+the `events` table, which is empty.
+
+**No detector traverses the graph to reach a conclusion.** We have 624 edges of
+ownership, flag, sanctions, port and encounter structure that nothing in the
+detection path consults. That is the distance between *"we built a graph"* and
+*"the graph does work"*, and it is the reason D1's ownership convergence can only
+be detected by accident.
+
+Recorded, not fixed. It is a design question, not a bug.
+
+### Flagged only, no action taken
+
+- **`events` table empty**, blocking `identity_then_anomaly` outright.
+- **Layout drift from CLAUDE.md §7**: empty `fuse/` and `rules/` packages sit
+  alongside the populated `fusion/` and `anomaly/`. Two of the four module
+  boundaries named in the operating contract do not exist as described.
+- **Three separate port gazetteers**: `tracks/features.AOI_PORTS` (8 ports, no
+  Sikka or Vadinar — where most scenario tanker traffic goes),
+  `anomaly/library.HIGH_RISK_PORTS` (2), and `scenario/geography.PORTS` (11).

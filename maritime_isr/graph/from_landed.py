@@ -37,6 +37,8 @@ import time
 from datetime import datetime, timezone
 
 from ..ingest.landing import read_table
+from ..schemas.keys import identity_node_id
+from ..schemas.keys import vessel_node_id as _vessel_node_id
 from ..ingest.sanctions_match import (MATCH_TABLE, TIER_CONFIDENCE,
                                      normalise_name)
 
@@ -66,8 +68,11 @@ GAP_EDGE_SPEC = dict(src=["vessel"], dst=[GAP_NODE_TYPE],
                      half_life_days=None, kind="event")
 
 
-def vessel_node_id(gfw_vessel_id: str) -> str:
-    return f"vessel:gfw:{gfw_vessel_id}"
+#: Re-exported so existing callers keep working; the definition now lives in
+#: `schemas.keys` alongside `identity_node_id`, because the populator and the
+#: identity resolver have to agree on both and previously agreed on neither
+#: (ADR-022).
+vessel_node_id = _vessel_node_id
 
 
 def _epoch(v, default: float | None = None) -> float | None:
@@ -163,12 +168,27 @@ def load_vessels() -> dict[str, dict]:
 
 
 def add_vessels(store, vessels: dict[str, dict]) -> int:
+    """Hull nodes, each carrying the synthetic flag of the rows it came from.
+
+    **`is_synthetic` was omitted here and defaulted to 0**, so all 114 scenario
+    hulls landed as real while the identity and gap nodes beside them were
+    flagged correctly. ADR-019 makes that flag the only thing separating the two
+    populations, so every real-vs-synthetic vessel count taken before
+    2026-08-01 was wrong — and wrong in the direction that inflates the real
+    side, which is the worse direction.
+
+    Taken from the intervals rather than assumed: a hull is synthetic when the
+    identity rows describing it are, and `stamp_envelope` already refuses to let
+    a row's flag disagree with its source id.
+    """
     for vid, rec in vessels.items():
+        intervals = rec.get("intervals", [])
+        syn = any(_syn(iv) for iv in intervals)
         store.upsert_node(vessel_node_id(vid), "vessel", dict(
             gfw_vessel_id=vid, imo=rec.get("imo"), mmsi=rec.get("mmsi"),
             name=rec.get("ship_name"), flag=rec.get("flag"),
-            n_identity_records=len(rec.get("intervals", [])),
-        ))
+            n_identity_records=len(intervals),
+        ), is_synthetic=syn)
     return len(vessels)
 
 
@@ -239,7 +259,7 @@ def add_identities(store, vessels: dict[str, dict]) -> tuple[int, int]:
                            for x in intervals[i + 1:]}
             later_names.discard(None)
             is_superseded = bool(later_names - {key})
-            nid = f"id:name:{key}"
+            nid = identity_node_id("name", key)
             store.upsert_node(nid, "identity", dict(kind="name", value=name),
                               is_synthetic=_syn(iv))
             store.add_edge(
@@ -258,7 +278,72 @@ def add_identities(store, vessels: dict[str, dict]) -> tuple[int, int]:
             total += 1
             if is_superseded:
                 superseded += 1
+
+        total += _add_key_identities(store, vid, rec)
     return total, superseded
+
+
+#: Identity kinds that are *lookup keys* into a hull, as opposed to labels.
+#: `name` is handled above because it carries the supersession analysis; these
+#: three are pure keys and need only a time-scoped assertion.
+_KEY_IDENTITY_FIELDS = (("mmsi", "mmsi"), ("imo", "imo"),
+                        ("call_sign", "call_sign"))
+
+
+def _add_key_identities(store, vid: str, rec: dict) -> int:
+    """Publish the `id:mmsi:*` / `id:imo:*` nodes the resolver reads.
+
+    **This is the fix for the shadow-stub defect (ADR-022), and the omission was
+    the whole cause.** `identity.resolve_mmsi` answers "which hull was
+    broadcasting this MMSI at time t" by walking `identified-as` edges into an
+    `id:mmsi:<mmsi>` node. That is the right design. But this populator emitted
+    **`id:name:*` nodes only** — measured on the synthetic corpus, 115 name
+    nodes and **zero** mmsi or imo nodes — so the lookup had nothing to find and
+    fell through to minting a provisional `vessel:mmsi:<mmsi>` hull.
+
+    The result was two nodes per ship: a populated one with flag, owner,
+    sanctions and port calls, and an empty twin carrying `provisional: true`.
+    Every alert landed on the twin. It *resolved* — a presence check passed —
+    and an analyst clicking it reached nothing.
+
+    Publishing these nodes means the resolver finds the hull on its own. No
+    translation table, no alias map, nothing for a future consumer to remember
+    to call: the two sides now read and write the same key because they call
+    the same function to build it.
+
+    Intervals are time-scoped, so an MMSI swap produces two edges with disjoint
+    windows and a track under the old number still resolves to the right hull —
+    which is what makes B1's phoenix and B4's zombie legible at all.
+    """
+    n = 0
+    for iv in rec.get("intervals", []):
+        t0 = _epoch(iv.get("valid_from"))
+        if t0 is None:
+            continue
+        t1 = _epoch(iv.get("valid_to"))
+        for field, kind in _KEY_IDENTITY_FIELDS:
+            raw = iv.get(field)
+            if raw in (None, "", 0):
+                continue
+            value = str(raw).strip()
+            if not value:
+                continue
+            nid = identity_node_id(kind, value)
+            store.upsert_node(nid, "identity", dict(kind=kind, value=value),
+                              is_synthetic=_syn(iv))
+            store.add_edge(
+                "identified-as", vessel_node_id(vid), nid,
+                t_start=t0, t_end=t1,
+                confidence=0.9 if iv.get("record_kind") == "registry" else 0.7,
+                observed_at=t0, source=_src(iv, "gfw-vessels"),
+                source_ref=str(iv.get("source_ref") or f"{vid}:{kind}:{value}"),
+                props=dict(kind=kind, value=value,
+                           record_kind=iv.get("record_kind"),
+                           interval_closed=t1 is not None),
+                is_synthetic=_syn(iv),
+            )
+            n += 1
+    return n
 
 
 # --------------------------------------------------------------------------

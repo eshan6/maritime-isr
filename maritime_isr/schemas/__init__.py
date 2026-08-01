@@ -201,6 +201,8 @@ STATIC_OBJECT = pa.schema([
 # Live-data path schema objects (execution-spec unit 0.0): dataclass
 # record types + provenance envelope used by ingest/, process/, writer.
 # ---------------------------------------------------------------------
+from .keys import (IDENTITY_KINDS, identity_node_id, native_vessel_id,
+                   vessel_node_id)
 from .provenance import ENVELOPE_COLUMNS, Provenance, git_sha, utcnow
 from .records import (
     SCHEMA_VERSION,

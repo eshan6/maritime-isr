@@ -101,6 +101,7 @@ class GraphStore:
         self._con = sqlite3.connect(self.db_path)
         self._con.executescript(_SCHEMA)
         self._migrate_is_synthetic()
+        self._migrate_vessel_keys()
         self._seed_ontology()
 
     # ---------------- migration ----------------
@@ -134,6 +135,62 @@ class GraphStore:
         self._con.execute(
             "CREATE INDEX IF NOT EXISTS ix_edges_syn ON edges(is_synthetic)")
         self._con.commit()
+
+    def _migrate_vessel_keys(self) -> int:
+        """Collapse `vessel:gfw:vessel:<key>` to the canonical `vessel:gfw:<key>`.
+
+        **Zero-recompute on landed data**, which is the invariant that matters:
+        nothing under `data/conformed/` is read or rewritten. What is rewritten
+        is the graph's own node ids, in place, because the graph accumulates
+        edge history that cannot be regenerated (CLAUDE.md §6) — rebuilding it
+        from scratch would be the destructive option, not the safe one.
+
+        The double prefix arose because the scenario generator writes its own
+        entity id (`vessel:spine`) into the `vessel_id` column that GFW fills
+        with a bare id, so the namespace was applied twice on synthetic rows and
+        once on real ones. Two corpora that do not share a node-id shape cannot
+        be compared on node id at all.
+
+        Renaming is a pure string operation on a key, so it changes no fact. It
+        is skipped entirely when no such node exists, which is the case for any
+        graph built from real data alone — so a real-only host pays a single
+        indexed scan and no writes.
+
+        The provisional `vessel:mmsi:*` stubs are deliberately **not** merged
+        here. They will simply stop being created once the populator publishes
+        the `id:mmsi:*` nodes the resolver reads (ADR-022), and merging them
+        would mean deciding which of two histories wins — a judgement this
+        migration has no business making silently. `tools/graph_report.py`
+        counts any that survive.
+        """
+        rows = self._con.execute(
+            "SELECT node_id FROM nodes WHERE node_id LIKE 'vessel:%:vessel:%'"
+        ).fetchall()
+        if not rows:
+            return 0
+        n = 0
+        for (old,) in rows:
+            head, _, tail = old.partition(":vessel:")
+            new = f"{head}:{tail}"
+            # A collision means both spellings already exist. Leave the old one
+            # alone rather than merging two histories on a guess; the exercise
+            # test will fail loudly and a human can decide.
+            if self._con.execute("SELECT 1 FROM nodes WHERE node_id=?",
+                                 (new,)).fetchone():
+                continue
+            self._con.execute("UPDATE nodes SET node_id=? WHERE node_id=?",
+                              (new, old))
+            self._con.execute("UPDATE edges SET src=? WHERE src=?", (new, old))
+            self._con.execute("UPDATE edges SET dst=? WHERE dst=?", (new, old))
+            for table, col in (("alerts", "subject"), ("events", "subject")):
+                try:
+                    self._con.execute(
+                        f"UPDATE {table} SET {col}=? WHERE {col}=?", (new, old))
+                except sqlite3.Error:
+                    pass          # table absent on an older graph
+            n += 1
+        self._con.commit()
+        return n
 
     @staticmethod
     def _check_synthetic_agreement(is_synthetic: bool, source: str) -> None:
@@ -230,10 +287,19 @@ class GraphStore:
         self._con.commit()
 
     def node(self, node_id: str) -> dict | None:
+        """One node, **including its synthetic flag**.
+
+        `is_synthetic` was stored but not returned here, so the only accessor
+        most callers use could not see it and any real-vs-synthetic decision
+        made through `node()` was made blind. ADR-019 puts the entire
+        real/synthetic separation on that one column; a reader that hides it
+        guarantees somebody eventually gets the split wrong.
+        """
         r = self._con.execute(
-            "SELECT node_id, node_type, props FROM nodes WHERE node_id=?",
-            (node_id,)).fetchone()
-        return (dict(node_id=r[0], node_type=r[1], props=json.loads(r[2]))
+            "SELECT node_id, node_type, props, is_synthetic "
+            "FROM nodes WHERE node_id=?", (node_id,)).fetchone()
+        return (dict(node_id=r[0], node_type=r[1], props=json.loads(r[2]),
+                     is_synthetic=bool(r[3]))
                 if r else None)
 
     def n_nodes(self, node_type: str | None = None) -> int:

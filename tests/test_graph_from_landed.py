@@ -129,9 +129,15 @@ def test_a_reflagging_becomes_two_flagged_to_edges(store):
 def test_a_superseded_name_is_the_formerly_identified_as_edge(store):
     """A LATER interval with a DIFFERENT name is what makes one former."""
     counts = fl.populate(store)
-    assert counts["identified_as"] == 3
+    # `identified_as` counts every identity kind, not just names — the
+    # populator publishes mmsi/imo/call_sign nodes too, because `resolve_mmsi`
+    # reads them and its not doing so was the ADR-022 shadow-stub defect. The
+    # supersession analysis is a property of NAMES, so filter to those.
+    assert counts["identified_as"] >= 3
     assert counts["identified_as_superseded"] == 1, "OLD NAME was replaced"
-    edges = store.edges(fl.vessel_node_id("v-a"), "identified-as")
+    edges = [e for e in store.edges(fl.vessel_node_id("v-a"), "identified-as")
+             if e.props.get("kind") == "name"]
+    assert len(edges) == 2, "v-a carries two distinct names"
     former = [e for e in edges if e.props["superseded_by_later_name"]]
     assert [e.props["value"] for e in former] == ["OLD NAME"]
 
@@ -142,8 +148,11 @@ def test_a_closed_interval_with_no_successor_is_not_a_former_identity(store):
     queried. Reading closure as replacement labelled the whole fleet as having
     changed identity."""
     fl.populate(store)
-    # v-b has one interval, open-ended, and is nobody's predecessor
-    edges = store.edges(fl.vessel_node_id("v-b"), "identified-as")
+    # v-b has one interval, open-ended, and is nobody's predecessor.
+    # Filtered to names: the same interval also publishes mmsi/imo/call_sign
+    # identity edges (ADR-022), and those carry no supersession claim.
+    edges = [e for e in store.edges(fl.vessel_node_id("v-b"), "identified-as")
+             if e.props.get("kind") == "name"]
     assert len(edges) == 1
     assert edges[0].props["superseded_by_later_name"] is False
 
