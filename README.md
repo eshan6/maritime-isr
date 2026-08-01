@@ -150,7 +150,7 @@ everywhere they appear.
   scenario corpus from `maritime-isr scenario generate`).
 - The graph populated with alerts, if you want the alert queue and graph views to
   have content: `python tools/run_scenario_pipeline.py`.
-- `pip install -e .` plus the API deps: `pip install fastapi uvicorn`.
+- `pip install -e ".[api]"` (adds FastAPI + uvicorn to the base install).
 - Node 18+ for the frontend.
 
 ### 1. Start the API (one command)
