@@ -144,50 +144,55 @@ every table and are **always shown separately, never blended** (ADR-019); the
 scenario rows carry a `SCENARIO` badge and a distinct violet treatment
 everywhere they appear.
 
-### Prerequisites
+### Run the demo — Python only, no Node (the easy path)
 
-- The corpus landed under `data/` (real, from the ingest connectors, and/or the
-  scenario corpus from `maritime-isr scenario generate`).
-- The graph populated with alerts, if you want the alert queue and graph views to
-  have content: `python tools/run_scenario_pipeline.py`.
-- `pip install -e ".[api]"` (adds FastAPI + uvicorn to the base install).
-- Node 18+ for the frontend.
-
-### 1. Start the API (one command)
+The backend serves the pre-built frontend itself, so the whole demo is **one
+process and needs only Python**. On Windows, if the `pip` shortcut is broken,
+run it through Python: `python -m pip ...`.
 
 ```bash
-python -m maritime_isr.api          # serves 127.0.0.1:8000
+python -m pip install -e ".[api]"                    # FastAPI + uvicorn
+
+# one-time: land the scenario corpus and populate the graph so the alert queue
+# and graph views have content (a few minutes — runs the track engine):
+python -m maritime_isr.cli scenario generate --seed 7
+python tools/run_scenario_pipeline.py
+
+python -m maritime_isr.api                            # serves 127.0.0.1:8000
 ```
 
-It reads the conformed Parquet tables through DuckDB and the object graph through
-SQLite, and writes nothing except alert dispositions. Auth is a shared token
-(`X-API-Token`, default `maritime-isr-dev`, override with `MISR_API_TOKEN`);
-CORS is scoped to the dev frontend origin. Interactive docs at
-`http://127.0.0.1:8000/docs`.
+Then open **http://127.0.0.1:8000** in a browser. That's the whole demo — Map,
+Alerts, Vessels, Graph. Nav routes, hard refreshes and pasted deep links all
+work; the backend falls back to the app's `index.html` for any non-`/api` path.
 
-Endpoints: `/vessels`, `/vessels/{id}`, `/vessels/{id}/track`,
-`/vessels/{id}/neighbourhood`, `/alerts`, `/alerts/{id}`,
-`/alerts/{id}/disposition`, `/events`, `/scenes`, `/ports`, `/stats`. Every
-vessel/edge payload carries `is_synthetic` and the provenance envelope; every
-count returns `{real, synthetic}` separately.
+The API reads the conformed Parquet tables through DuckDB and the object graph
+through SQLite, and writes nothing except alert dispositions. Auth is a shared
+token (`X-API-Token`, default `maritime-isr-dev`, override with `MISR_API_TOKEN`
+— injected into the served page so you never type it). JSON lives under `/api`:
+`/api/vessels`, `/api/vessels/{id}` (+ `/track`, `/neighbourhood`), `/api/alerts`
+(+ detail, `/disposition`), `/api/events`, `/api/scenes`, `/api/ports`,
+`/api/stats`, and interactive docs at `/docs`. Every vessel/edge payload carries
+`is_synthetic` and the provenance envelope; every count returns `{real,
+synthetic}` separately.
 
-### 2. Start the frontend (one command)
-
-```bash
-cd frontend && npm install && npm run dev     # serves localhost:5173
-```
-
-The dev server proxies `/api` to the backend and injects the auth token, so no
-secret lives in the browser and there is no CORS to configure. Point
-`MISR_API_URL` / `MISR_API_TOKEN` at a non-default backend if needed. `npm run
-build && npm run preview` serves the production build on `:4173` the same way.
-
-Four views: **Map** (AOI framed on the Arabian Sea, toggleable layers, an 8-week
-time scrubber with play/pause, click a vessel for its entity panel), **Alerts**
-(a short, high-signal queue — each alert's evidence chain rendered as labelled
-hops, with confirm/watch/dismiss buttons that persist), **Vessels** (a sortable,
+The four views: **Map** (AOI framed on the Arabian Sea, toggleable layers, an
+8-week time scrubber with play/pause, click a vessel for its entity panel),
+**Alerts** (a short, high-signal queue — each alert's evidence chain as labelled
+hops, with confirm/watch/dismiss that persist), **Vessels** (a sortable,
 filterable table), and **Graph** (seed-and-expand from one vessel, one hop per
 click, never a hairball).
+
+### Developing the frontend (needs Node)
+
+The committed `frontend/dist/` is what the backend serves. To change the UI,
+edit `frontend/src`, run the Vite dev server (hot reload, proxies `/api` to the
+backend), then rebuild and commit `dist/`:
+
+```bash
+cd frontend && npm install
+npm run dev            # localhost:5173, proxies /api to 127.0.0.1:8000
+npm run build          # rebuild dist/ — commit it so the Python-only path updates
+```
 
 ### Verifying against real data
 

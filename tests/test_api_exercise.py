@@ -77,7 +77,7 @@ def alerts_or_skip(client, H):
     When it is empty there is nothing to exercise, so these tests skip with
     instructions rather than fail — the same posture the module takes when no
     corpus is landed at all."""
-    items = client.get("/alerts", headers=H).json()["items"]
+    items = client.get("/api/alerts", headers=H).json()["items"]
     if not items:
         pytest.skip("graph has no alerts — run "
                     "`python tools/run_scenario_pipeline.py` to populate it")
@@ -89,8 +89,8 @@ def alerts_or_skip(client, H):
 # --------------------------------------------------------------------------
 
 def test_requires_token(client):
-    assert client.get("/vessels").status_code == 401
-    assert client.get("/health").status_code == 200  # health is open
+    assert client.get("/api/vessels").status_code == 401
+    assert client.get("/api/health").status_code == 200  # health is open
 
 
 # --------------------------------------------------------------------------
@@ -98,7 +98,7 @@ def test_requires_token(client):
 # --------------------------------------------------------------------------
 
 def test_stats_splits_real_and_synthetic(client, H):
-    s = client.get("/stats", headers=H).json()
+    s = client.get("/api/stats", headers=H).json()
     for key in ("vessels", "alerts", "sanctions_matches", "graph_nodes",
                 "graph_edges"):
         assert set(s[key]) == {"real", "synthetic"}, f"{key} must be split only"
@@ -117,7 +117,7 @@ def test_stats_splits_real_and_synthetic(client, H):
 # --------------------------------------------------------------------------
 
 def test_vessels_list_shaped_and_provenanced(client, H):
-    r = client.get("/vessels?limit=25", headers=H).json()
+    r = client.get("/api/vessels?limit=25", headers=H).json()
     assert r["items"], "a landed corpus must return vessels"
     assert set(r["count"]) == {"real", "synthetic"}
     for v in r["items"]:
@@ -132,14 +132,14 @@ def test_vessels_list_shaped_and_provenanced(client, H):
 
 
 def test_vessels_filter_synthetic(client, H):
-    syn = client.get("/vessels?synthetic=true&limit=500", headers=H).json()
+    syn = client.get("/api/vessels?synthetic=true&limit=500", headers=H).json()
     assert syn["items"]
     assert all(v["is_synthetic"] for v in syn["items"])
 
 
 def test_vessel_detail_has_history_and_decomposed_risk(client, H):
-    vid = client.get("/vessels?limit=1", headers=H).json()["items"][0]["id"]
-    d = client.get(f"/vessels/{vid}", headers=H).json()
+    vid = client.get("/api/vessels?limit=1", headers=H).json()["items"][0]["id"]
+    d = client.get(f"/api/vessels/{vid}", headers=H).json()
     assert d["current"]["name"] is not None or d["current"]["mmsi"] is not None
     assert len(d["identity_history"]) >= 1
     for iv in d["identity_history"]:
@@ -153,11 +153,11 @@ def test_vessel_detail_has_history_and_decomposed_risk(client, H):
 
 def test_sanctioned_vessel_shows_tier_not_bare_flag(client, H):
     # find a vessel with a sanctions match, if any exist in this corpus
-    vessels = client.get("/vessels?sanctioned=true&limit=50", headers=H).json()
+    vessels = client.get("/api/vessels?sanctioned=true&limit=50", headers=H).json()
     if not vessels["items"]:
         pytest.skip("no sanctions matches in this corpus")
     vid = vessels["items"][0]["id"]
-    d = client.get(f"/vessels/{vid}", headers=H).json()
+    d = client.get(f"/api/vessels/{vid}", headers=H).json()
     assert d["sanctions"], "a sanctioned vessel must carry its match rows"
     for m in d["sanctions"]:
         assert m["match_tier"] is not None
@@ -167,7 +167,7 @@ def test_sanctioned_vessel_shows_tier_not_bare_flag(client, H):
 
 
 def test_missing_vessel_404(client, H):
-    assert client.get("/vessels/vessel:gfw:does-not-exist", headers=H).status_code == 404
+    assert client.get("/api/vessels/vessel:gfw:does-not-exist", headers=H).status_code == 404
 
 
 # --------------------------------------------------------------------------
@@ -177,10 +177,10 @@ def test_missing_vessel_404(client, H):
 def test_some_vessel_has_a_track(client, H):
     # scan a handful — offshore vessels legitimately have no AIS (ADR-005)
     vids = [v["id"] for v in
-            client.get("/vessels?limit=40", headers=H).json()["items"]]
+            client.get("/api/vessels?limit=40", headers=H).json()["items"]]
     found = False
     for vid in vids:
-        t = client.get(f"/vessels/{vid}/track", headers=H).json()
+        t = client.get(f"/api/vessels/{vid}/track", headers=H).json()
         assert "points" in t and "note" in t
         if t["points"]:
             p = t["points"][0]
@@ -197,10 +197,10 @@ def test_some_vessel_has_a_track(client, H):
 def test_neighbourhood_is_bounded_and_acyclic(client, H):
     # pick a vessel that is actually in the graph
     vids = [v["id"] for v in
-            client.get("/vessels?limit=40", headers=H).json()["items"]]
+            client.get("/api/vessels?limit=40", headers=H).json()["items"]]
     nb = None
     for vid in vids:
-        r = client.get(f"/vessels/{vid}/neighbourhood?hops=1", headers=H)
+        r = client.get(f"/api/vessels/{vid}/neighbourhood?hops=1", headers=H)
         if r.status_code == 200 and r.json()["edges"]:
             nb = r.json()
             break
@@ -217,15 +217,15 @@ def test_neighbourhood_is_bounded_and_acyclic(client, H):
 
 def test_neighbourhood_two_hops_expands(client, H):
     vid = None
-    for v in client.get("/vessels?limit=40", headers=H).json()["items"]:
-        r1 = client.get(f"/vessels/{v['id']}/neighbourhood?hops=1", headers=H)
+    for v in client.get("/api/vessels?limit=40", headers=H).json()["items"]:
+        r1 = client.get(f"/api/vessels/{v['id']}/neighbourhood?hops=1", headers=H)
         if r1.status_code == 200 and r1.json()["edges"]:
             vid = v["id"]
             n1 = r1.json()
             break
     if not vid:
         pytest.skip("no connected vessel")
-    n2 = client.get(f"/vessels/{vid}/neighbourhood?hops=2", headers=H).json()
+    n2 = client.get(f"/api/vessels/{vid}/neighbourhood?hops=2", headers=H).json()
     assert len(n2["nodes"]) >= len(n1["nodes"])
 
 
@@ -234,7 +234,7 @@ def test_neighbourhood_two_hops_expands(client, H):
 # --------------------------------------------------------------------------
 
 def test_alerts_carry_evidence_chains(client, H, alerts_or_skip):
-    a = client.get("/alerts", headers=H).json()
+    a = client.get("/api/alerts", headers=H).json()
     assert set(a["count"]) == {"real", "synthetic"}
     for al in alerts_or_skip:
         assert al["subject"].startswith("vessel:")
@@ -244,25 +244,25 @@ def test_alerts_carry_evidence_chains(client, H, alerts_or_skip):
 
 def test_alert_detail_matches_list(client, H, alerts_or_skip):
     first = alerts_or_skip[0]
-    d = client.get(f"/alerts/{first['id']}", headers=H).json()
+    d = client.get(f"/api/alerts/{first['id']}", headers=H).json()
     assert d["id"] == first["id"]
     assert d["anomaly_type"] == first["anomaly_type"]
 
 
 def test_disposition_persists(client, H, alerts_or_skip):
     aid = alerts_or_skip[0]["id"]
-    r = client.post(f"/alerts/{aid}/disposition", headers=H,
+    r = client.post(f"/api/alerts/{aid}/disposition", headers=H,
                     json={"alert_id": aid, "disposition": "watch"})
     assert r.status_code == 200
     assert r.json()["disposition"] == "watch"
     # re-read from a fresh query proves it was written, not just echoed
-    again = client.get(f"/alerts/{aid}", headers=H).json()
+    again = client.get(f"/api/alerts/{aid}", headers=H).json()
     assert again["disposition"] == "watch"
 
 
 def test_bad_disposition_rejected(client, H, alerts_or_skip):
     aid = alerts_or_skip[0]["id"]
-    r = client.post(f"/alerts/{aid}/disposition", headers=H,
+    r = client.post(f"/api/alerts/{aid}/disposition", headers=H,
                     json={"alert_id": aid, "disposition": "banana"})
     assert r.status_code == 422
 
@@ -272,7 +272,7 @@ def test_bad_disposition_rejected(client, H, alerts_or_skip):
 # --------------------------------------------------------------------------
 
 def test_events_split_by_kind_and_filter_by_bbox(client, H):
-    ev = client.get("/events?limit=5000", headers=H).json()
+    ev = client.get("/api/events?limit=5000", headers=H).json()
     assert ev["items"], "the corpus has events"
     assert set(ev["count"]) == {"real", "synthetic"}
     for e in ev["items"]:
@@ -285,20 +285,20 @@ def test_events_split_by_kind_and_filter_by_bbox(client, H):
             assert e["classification"] is not None
     # bbox filter is a real filter, not a no-op
     full = ev["count"]["real"] + ev["count"]["synthetic"]
-    tiny = client.get("/events?bbox=60,5,61,6&limit=5000", headers=H).json()
+    tiny = client.get("/api/events?bbox=60,5,61,6&limit=5000", headers=H).json()
     tiny_n = tiny["count"]["real"] + tiny["count"]["synthetic"]
     assert tiny_n <= full
 
 
 def test_scenes_shape(client, H):
-    sc = client.get("/scenes", headers=H).json()
+    sc = client.get("/api/scenes", headers=H).json()
     assert "items" in sc
     for s in sc["items"]:
         assert s["scene_id"] and "prov" in s
 
 
 def test_ports_non_empty_and_split(client, H):
-    po = client.get("/ports", headers=H).json()
+    po = client.get("/api/ports", headers=H).json()
     assert po["items"], "the gazetteer must have ports"
     assert set(po["count"]) == {"real", "synthetic"}
     for p in po["items"]:

@@ -14,14 +14,23 @@ are contract-level guarantees (see :mod:`.models`), not conventions.
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 
 from . import graph_service as gsvc
 from . import models, service
 from .settings import settings
+
+#: The built frontend, if present. `frontend/npm run build` writes it here; when
+#: it exists the API serves the whole UI itself, so the demo needs only Python
+#: and one process — no Node, no second server. When it is absent the API is
+#: still a pure JSON backend and the frontend runs from the Vite dev server.
+DIST_DIR = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
 
 
 def require_token(x_api_token: Optional[str] = Header(default=None)) -> None:
@@ -48,13 +57,18 @@ def create_app() -> FastAPI:
 
     guard = [Depends(require_token)]
 
+    # All JSON routes live under /api so they never collide with the SPA's own
+    # client-side routes (/vessels, /alerts, /graph) when the UI is served from
+    # this same process.
+    api = APIRouter()
+
     # ---- health (no auth) ------------------------------------------------
-    @app.get("/health")
+    @api.get("/health")
     def health() -> dict:
         return {"status": "ok", "graph": gsvc.graph_exists()}
 
     # ---- vessels ---------------------------------------------------------
-    @app.get("/vessels", dependencies=guard)
+    @api.get("/vessels", dependencies=guard)
     def vessels(
         flag: Optional[str] = None,
         sanctioned: Optional[bool] = None,
@@ -73,21 +87,21 @@ def create_app() -> FastAPI:
             "items": [models.VesselSummary(**v).model_dump() for v in res["items"]],
         }
 
-    @app.get("/vessels/{vessel_id}", dependencies=guard)
+    @api.get("/vessels/{vessel_id}", dependencies=guard)
     def vessel_detail(vessel_id: str) -> dict:
         v = service.get_vessel(vessel_id)
         if v is None:
             raise HTTPException(404, f"no vessel {vessel_id!r}")
         return models.VesselDetail(**v).model_dump()
 
-    @app.get("/vessels/{vessel_id}/track", dependencies=guard)
+    @api.get("/vessels/{vessel_id}/track", dependencies=guard)
     def vessel_track(vessel_id: str, start: Optional[str] = None,
                      end: Optional[str] = None,
                      limit: int = Query(default=5000, ge=1, le=50000)) -> dict:
         t = service.get_track(vessel_id, start=start, end=end, limit=limit)
         return models.VesselTrack(**t).model_dump()
 
-    @app.get("/vessels/{vessel_id}/neighbourhood", dependencies=guard)
+    @api.get("/vessels/{vessel_id}/neighbourhood", dependencies=guard)
     def vessel_neighbourhood(vessel_id: str,
                              hops: int = Query(default=1, ge=1, le=2)) -> dict:
         n = gsvc.neighbourhood(vessel_id, hops=hops)
@@ -96,7 +110,7 @@ def create_app() -> FastAPI:
         return models.Neighbourhood(**n).model_dump()
 
     # ---- alerts ----------------------------------------------------------
-    @app.get("/alerts", dependencies=guard)
+    @api.get("/alerts", dependencies=guard)
     def alerts(synthetic: Optional[bool] = None,
                disposition: Optional[str] = None) -> dict:
         rows = gsvc.list_alerts(is_synthetic=synthetic, disposition=disposition)
@@ -107,14 +121,14 @@ def create_app() -> FastAPI:
             "items": [models.Alert(**a).model_dump() for a in rows],
         }
 
-    @app.get("/alerts/{alert_id}", dependencies=guard)
+    @api.get("/alerts/{alert_id}", dependencies=guard)
     def alert_detail(alert_id: str) -> dict:
         a = gsvc.get_alert(alert_id)
         if a is None:
             raise HTTPException(404, f"no alert {alert_id!r}")
         return models.Alert(**a).model_dump()
 
-    @app.post("/alerts/{alert_id}/disposition", dependencies=guard)
+    @api.post("/alerts/{alert_id}/disposition", dependencies=guard)
     def dispose(alert_id: str, body: models.Disposition) -> dict:
         if body.disposition not in ("confirm", "dismiss", "watch"):
             raise HTTPException(422, "disposition must be confirm|dismiss|watch")
@@ -124,7 +138,7 @@ def create_app() -> FastAPI:
         return gsvc.get_alert(alert_id)
 
     # ---- events / scenes / ports ----------------------------------------
-    @app.get("/events", dependencies=guard)
+    @api.get("/events", dependencies=guard)
     def events(kinds: Optional[str] = Query(default=None,
                description="comma list: encounter,loitering,port_visit,gap"),
                start: Optional[str] = None, end: Optional[str] = None,
@@ -143,7 +157,7 @@ def create_app() -> FastAPI:
             "items": [models.Event(**e).model_dump() for e in res["items"]],
         }
 
-    @app.get("/scenes", dependencies=guard)
+    @api.get("/scenes", dependencies=guard)
     def scenes(limit: int = Query(default=2000, ge=1, le=20000)) -> dict:
         res = service.list_scenes(limit=limit)
         return {
@@ -151,7 +165,7 @@ def create_app() -> FastAPI:
             "items": [models.Scene(**s).model_dump() for s in res["items"]],
         }
 
-    @app.get("/ports", dependencies=guard)
+    @api.get("/ports", dependencies=guard)
     def ports() -> dict:
         res = service.list_ports()
         return {
@@ -160,11 +174,52 @@ def create_app() -> FastAPI:
         }
 
     # ---- stats -----------------------------------------------------------
-    @app.get("/stats", dependencies=guard)
+    @api.get("/stats", dependencies=guard)
     def stats() -> dict:
         return models.Stats(**service.get_stats()).model_dump()
 
+    app.include_router(api, prefix="/api")
+    _mount_frontend(app)
     return app
+
+
+def _mount_frontend(app: FastAPI) -> None:
+    """Serve the built frontend from this process when it has been built.
+
+    This is what makes the demo Python-only: no Node, no Vite dev server, one
+    command. The built assets are served from `frontend/dist/assets`, and every
+    other path falls back to `index.html` so the client-side router (which owns
+    /vessels, /alerts, /graph, /vessels/:id) works on a hard refresh or a pasted
+    link. When `dist/` is absent this is a no-op and the API stays a pure JSON
+    backend for the Vite dev server to proxy.
+    """
+    if not (DIST_DIR / "index.html").exists():
+        return
+
+    assets = DIST_DIR / "assets"
+    if assets.is_dir():
+        app.mount("/assets", StaticFiles(directory=str(assets)), name="assets")
+
+    index_html = (DIST_DIR / "index.html").read_text(encoding="utf-8")
+    # Hand the browser the configured token, so a non-default MISR_API_TOKEN
+    # still works when the UI is served from here rather than proxied by Vite.
+    # On localhost the token is a convenience, not a boundary (ADR-013).
+    injected = index_html.replace(
+        "</head>",
+        f'<script>window.__MISR_TOKEN__="{settings.token}";</script></head>')
+
+    @app.get("/", response_class=HTMLResponse)
+    def _index() -> HTMLResponse:
+        return HTMLResponse(injected)
+
+    @app.get("/{full_path:path}", response_class=HTMLResponse)
+    def _spa(full_path: str):
+        # A real file under dist (favicon, etc.) is served as-is; anything else
+        # is a client-side route and gets index.html.
+        candidate = DIST_DIR / full_path
+        if full_path and candidate.is_file():
+            return FileResponse(str(candidate))
+        return HTMLResponse(injected)
 
 
 def _parse_bbox(bbox: Optional[str]) -> Optional[tuple]:
