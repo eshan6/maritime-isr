@@ -8,11 +8,13 @@ import react from "@vitejs/plugin-react";
 const API_TARGET = process.env.MISR_API_URL || "http://127.0.0.1:8000";
 const API_TOKEN = process.env.MISR_API_TOKEN || "maritime-isr-dev";
 
+// The backend now serves its JSON under /api itself, so the dev proxy forwards
+// /api/* through unchanged (no path rewrite). The token is still injected here
+// as a convenience for dev; the client also sends it.
 const proxy = {
   "/api": {
     target: API_TARGET,
     changeOrigin: true,
-    rewrite: (p) => p.replace(/^\/api/, ""),
     configure: (proxy) => {
       proxy.on("proxyReq", (proxyReq) => {
         proxyReq.setHeader("X-API-Token", API_TOKEN);

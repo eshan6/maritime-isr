@@ -1,8 +1,18 @@
-// Thin API client. All requests go to /api (the Vite proxy rewrites to the
-// FastAPI backend and injects the auth token — see vite.config.js), so nothing
-// here holds a secret and there is no CORS to negotiate.
+// Thin API client. All requests go to /api on the same origin.
+//
+// Two serving modes, one code path:
+//   * Python-only demo — the FastAPI backend serves this bundle and the /api
+//     routes itself, and injects window.__MISR_TOKEN__ into the page.
+//   * Vite dev server — proxies /api to the backend (see vite.config.js).
+// Either way we send the token header ourselves, defaulting to the dev token.
 
 const BASE = "/api";
+const TOKEN =
+  (typeof window !== "undefined" && window.__MISR_TOKEN__) || "maritime-isr-dev";
+
+function authHeaders(extra) {
+  return { "X-API-Token": TOKEN, ...(extra || {}) };
+}
 
 async function get(path, params) {
   const url = new URL(BASE + path, window.location.origin);
@@ -12,7 +22,7 @@ async function get(path, params) {
     }
   }
   const r = await fetch(url.pathname + url.search, {
-    headers: { Accept: "application/json" },
+    headers: authHeaders({ Accept: "application/json" }),
   });
   if (!r.ok) {
     const detail = await r.text().catch(() => "");
@@ -24,7 +34,7 @@ async function get(path, params) {
 async function post(path, body) {
   const r = await fetch(BASE + path, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
   });
   if (!r.ok) throw new Error(`${r.status} ${path}`);

@@ -12,5 +12,8 @@ logs/
 
 # Phase 6 frontend build artifacts
 frontend/node_modules/
-frontend/dist/
 frontend/.vite/
+# NB: frontend/dist/ is deliberately COMMITTED, not ignored. It lets the Python
+# backend serve the UI with no Node/npm on the demo machine (see app.py
+# _mount_frontend). Rebuild it with `cd frontend && npm run build` after any
+# frontend change, and commit the result.
