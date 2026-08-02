@@ -77,6 +77,20 @@ class Reader:
         ).fetchone()
         return bool(r and r[0])
 
+    def columns(self, table: str) -> set[str]:
+        """Column names of a table/view, or empty set if it can't be read.
+
+        The real and scenario corpora do **not** always share a schema — the
+        real `sanctioned_vessel_matches` has no `is_synthetic` column, for
+        instance — so any query that references an optional column must check
+        here first rather than assume it exists and 500 on the real data.
+        """
+        try:
+            return {r[0] for r in
+                    self.con.execute(f"DESCRIBE SELECT * FROM {table}").fetchall()}
+        except duckdb.Error:
+            return set()
+
     def rows(self, sql: str, params: list | None = None) -> list[dict]:
         cur = self.con.execute(sql, params or [])
         cols = [d[0] for d in cur.description]

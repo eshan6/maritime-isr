@@ -147,7 +147,16 @@ def list_vessels(*, flag: Optional[str] = None, sanctioned: Optional[bool] = Non
         current = reader.rows(_CURRENT_IDENTITY_SQL)
         sanctions = _sanctions_by_vessel(reader)
         last_seen = _last_seen_map(reader)
-    risk = gsvc.risk_index()
+
+    # Risk scoring walks the graph per vessel — cheap for a small corpus, minutes
+    # for the 9,184-vessel real one. On a large corpus, score only the vessels
+    # worth scoring (alerted or sanctioned); the rest render "—". A small corpus
+    # gets the full, cached index so every scenario vessel shows a number.
+    if len(current) <= 500:
+        risk = gsvc.risk_index()
+    else:
+        interesting = set(sanctions.keys()) | gsvc.alert_subjects()
+        risk = gsvc.risk_index(only=interesting)
 
     items = []
     for r in current:
@@ -400,7 +409,7 @@ def list_events(*, kinds: Optional[list[str]] = None, start: Optional[str] = Non
                 lon0, lat0, lon1, lat1 = bbox
                 clauses.append("lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?")
                 params += [lat0, lat1, lon0, lon1]
-            if synthetic is not None:
+            if synthetic is not None and "is_synthetic" in reader.columns(table):
                 clauses.append("is_synthetic = ?")
                 params.append(synthetic)
             where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
@@ -508,8 +517,14 @@ def list_ports() -> dict:
 # --------------------------------------------------------------------------
 
 def _split(reader: Reader, table: str) -> dict:
+    """Row count split real vs synthetic. Tolerates a table with no
+    `is_synthetic` column (the real corpus has such tables) by counting it all
+    as real — real rows are exactly what an absent flag means."""
     if not reader.has(table):
         return {"real": 0, "synthetic": 0}
+    if "is_synthetic" not in reader.columns(table):
+        n = reader.scalar(f"SELECT count(*) FROM {table}") or 0
+        return {"real": int(n), "synthetic": 0}
     rows = reader.rows(
         f"SELECT COALESCE(is_synthetic, FALSE) AS s, count(*) AS n "
         f"FROM {table} GROUP BY 1")
@@ -522,6 +537,10 @@ def _split(reader: Reader, table: str) -> dict:
 def _distinct_vessels_split(reader: Reader) -> dict:
     if not reader.has("gfw_vessel_identity"):
         return {"real": 0, "synthetic": 0}
+    if "is_synthetic" not in reader.columns("gfw_vessel_identity"):
+        n = reader.scalar(
+            "SELECT count(DISTINCT vessel_id) FROM gfw_vessel_identity") or 0
+        return {"real": int(n), "synthetic": 0}
     rows = reader.rows(
         "SELECT COALESCE(is_synthetic, FALSE) AS s, count(DISTINCT vessel_id) AS n "
         "FROM gfw_vessel_identity GROUP BY 1")
@@ -539,10 +558,18 @@ def get_stats() -> dict:
         matches = _split(reader, "sanctioned_vessel_matches")
         findings = {"real": 0, "synthetic": 0}
         if reader.has("sanctioned_vessel_matches"):
-            for r in reader.rows(
-                "SELECT COALESCE(is_synthetic,FALSE) s, count(*) n FROM "
-                "sanctioned_vessel_matches WHERE is_finding GROUP BY 1"):
-                findings["synthetic" if r["s"] else "real"] += int(r["n"])
+            cols = reader.columns("sanctioned_vessel_matches")
+            finding_clause = "WHERE is_finding" if "is_finding" in cols else ""
+            if "is_synthetic" in cols:
+                for r in reader.rows(
+                    "SELECT COALESCE(is_synthetic,FALSE) s, count(*) n FROM "
+                    f"sanctioned_vessel_matches {finding_clause} GROUP BY 1"):
+                    findings["synthetic" if r["s"] else "real"] += int(r["n"])
+            else:
+                n = reader.scalar(
+                    f"SELECT count(*) FROM sanctioned_vessel_matches "
+                    f"{finding_clause}") or 0
+                findings["real"] = int(n)
         scenes_real = reader.scalar("SELECT count(*) FROM scene_catalog") \
             if reader.has("scene_catalog") else 0
         window = _corpus_window(reader)

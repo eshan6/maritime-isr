@@ -69,28 +69,42 @@ def _iso(epoch: float | None) -> str | None:
 # risk
 # --------------------------------------------------------------------------
 
-def risk_index() -> dict[str, float]:
-    """{vessel_node_id: risk_score} for every vessel node, cached on graph mtime.
+def risk_index(only: set[str] | None = None) -> dict[str, float]:
+    """{vessel_node_id: risk_score}.
 
-    Sorting the vessels table by risk needs every score, and recomputing all of
-    them on each list request would be wasteful; the corpus is ~100 vessels so
-    one full pass is cheap, and the mtime key means a re-populated graph or a new
-    disposition is reflected on the next request without a manual bust.
+    Each score walks the graph (ownership chains, alert scan), which is cheap for
+    a ~100-vessel corpus but **minutes** for the 9,184-vessel real one. So the
+    caller passes `only` — the demo-relevant vessels (those with an alert or a
+    sanctions match) — and everyone else is left out of the index and renders as
+    "—". A vessel with no alert and no sanctioned neighbour scores ~0 anyway, so
+    nothing meaningful is lost; what is saved is thousands of graph traversals on
+    every list request.
+
+    When `only` is None the full index is computed and cached on the graph's
+    mtime (the right choice for a small corpus). A bounded request is small
+    enough to compute fresh each time and is not cached.
     """
     p = graph_path()
     if not p.exists():
         return {}
-    mtime = p.stat().st_mtime
-    if _risk_cache["mtime"] == mtime:
-        return _risk_cache["index"]
     from ..anomaly.risk import risk_score
+
+    if only is None:
+        mtime = p.stat().st_mtime
+        if _risk_cache["mtime"] == mtime:
+            return _risk_cache["index"]
+
     idx: dict[str, float] = {}
     with open_graph() as g:
         if g is None:
             return {}
         at = time.time()
-        vids = [r[0] for r in g._con.execute(
-            "SELECT node_id FROM nodes WHERE node_type='vessel'")]
+        if only is None:
+            vids = [r[0] for r in g._con.execute(
+                "SELECT node_id FROM nodes WHERE node_type='vessel'")]
+        else:
+            # only score ids that actually exist as vessel nodes
+            vids = [v for v in only if g.node(v) is not None]
         for v in vids:
             try:
                 idx[v] = risk_score(g, v, at)["risk_score"]
@@ -98,8 +112,19 @@ def risk_index() -> dict[str, float]:
                 # A single vessel's traversal failing must not blank the whole
                 # index; it simply has no score and renders as "—".
                 idx[v] = 0.0
-    _risk_cache.update(mtime=mtime, index=idx)
+    if only is None:
+        _risk_cache.update(mtime=p.stat().st_mtime, index=idx)
     return idx
+
+
+def alert_subjects() -> set[str]:
+    """Vessel node ids that carry at least one alert. Cheap — reads the alerts
+    table only. Used to bound risk scoring to the vessels worth scoring."""
+    with open_graph() as g:
+        if g is None:
+            return set()
+        return {r[0] for r in g._con.execute(
+            "SELECT DISTINCT subject FROM alerts")}
 
 
 def risk_for(vessel_id: str) -> dict | None:

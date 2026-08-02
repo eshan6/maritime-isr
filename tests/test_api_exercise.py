@@ -85,6 +85,29 @@ def alerts_or_skip(client, H):
 
 
 # --------------------------------------------------------------------------
+# schema robustness — the real corpus has tables without is_synthetic
+# --------------------------------------------------------------------------
+
+def test_split_tolerates_table_without_is_synthetic():
+    """The real `sanctioned_vessel_matches` has no is_synthetic column; a split
+    over it must count every row as real, not 500. Regression for the live crash
+    on 2026-08-01. Needs no corpus — builds its own table."""
+    import duckdb
+
+    from maritime_isr.api import service
+    from maritime_isr.api.reader import Reader
+
+    con = duckdb.connect()
+    con.execute("CREATE TABLE sanctioned_vessel_matches "
+                "(vessel_id VARCHAR, is_finding BOOLEAN)")
+    con.execute("INSERT INTO sanctioned_vessel_matches VALUES "
+                "('a', true), ('b', false), ('c', true)")
+    r = Reader(con)
+    assert service._split(r, "sanctioned_vessel_matches") == {"real": 3, "synthetic": 0}
+    con.close()
+
+
+# --------------------------------------------------------------------------
 # auth
 # --------------------------------------------------------------------------
 
