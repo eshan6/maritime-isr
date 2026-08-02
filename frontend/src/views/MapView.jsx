@@ -1,7 +1,13 @@
-// The map — primary view. AOI framed on the Arabian Sea, toggleable layers, a
-// time scrubber across the 8-week window with play/pause, and click-to-open the
-// vessel entity panel. Built on MapLibre GL with a light CARTO raster basemap
-// (no key); if tiles are blocked it degrades to a clean ocean canvas.
+// The map — primary view. AOI framed on the Arabian Sea, toggleable layers, and
+// a time scrubber that animates vessels ALONG THEIR AIS TRACKS: at each clock
+// tick every vessel is drawn at its interpolated position, so ships glide across
+// the 8-week window rather than blinking on and off. Events (encounters,
+// loitering, port visits, gaps) are persistent context markers, not the time
+// signal. Click a vessel to open its entity panel.
+//
+// On the real corpus there are no free AIS tracks (ADR-005), so nothing moves —
+// which is the honest picture; the events and sanctioned-vessel markers still
+// render.
 import { useEffect, useMemo, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
@@ -30,8 +36,8 @@ const BASEMAP = {
 };
 
 const LAYERS = [
-  { id: "tracks", label: "Vessel tracks", color: "#1a5fb4" },
   { id: "positions", label: "Vessel positions", color: "#1a5fb4" },
+  { id: "tracks", label: "Vessel tracks", color: "#7aa8dd" },
   { id: "encounter", label: "Encounters", color: "#b0221b" },
   { id: "loitering", label: "Loitering", color: "#9a6300" },
   { id: "port_visit", label: "Port visits", color: "#1f7a4d" },
@@ -40,6 +46,8 @@ const LAYERS = [
   { id: "ports", label: "Ports", color: "#55636f" },
   { id: "alerts", label: "Alert markers", color: "#b0221b" },
 ];
+
+const EVENT_COLOR = { encounter: "#b0221b", loitering: "#9a6300", port_visit: "#1f7a4d", gap: "#b0221b" };
 
 export function MapView() {
   const mapEl = useRef(null);
@@ -51,7 +59,8 @@ export function MapView() {
     positions: true, tracks: false, encounter: true, loitering: true,
     port_visit: true, gap: true, scenes: false, ports: true, alerts: true,
   });
-  const [data, setData] = useState({ events: [], ports: [], scenes: [], alerts: [], vessels: [] });
+  const [data, setData] = useState({ events: [], ports: [], scenes: [], alerts: [] });
+  const [tracks, setTracks] = useState([]);
   const [window_, setWindow] = useState(null); // {start,end} epoch ms
   const [t, setT] = useState(1); // 0..1 across the window
   const [playing, setPlaying] = useState(false);
@@ -74,11 +83,8 @@ export function MapView() {
     return () => m.remove();
   }, []);
 
-  // ---- load data ----
-  // Each layer loads independently (allSettled): on the real corpus one slow or
-  // failing endpoint must not blank the whole map. Events are capped — the real
-  // corpus has 24k+ loitering events and neither the wire nor the canvas wants
-  // them all; a few thousand is plenty for the picture.
+  // ---- load data (each layer independently; one slow/failing call must not
+  //      blank the rest) ----
   useEffect(() => {
     let live = true;
     const set = (patch) => live && setData((d) => ({ ...d, ...patch }));
@@ -86,6 +92,7 @@ export function MapView() {
     api.ports().then((r) => set({ ports: r.items })).catch(() => {});
     api.scenes().then((r) => set({ scenes: r.items })).catch(() => {});
     api.alerts().then((r) => set({ alerts: r.items })).catch(() => {});
+    api.tracks({ max_points: 160 }).then((r) => live && setTracks(r.items || [])).catch(() => {});
     api.stats().then((s) => {
       const w = s.corpus_window || {};
       if (live && w.start && w.end) {
@@ -95,28 +102,34 @@ export function MapView() {
     return () => { live = false; };
   }, []);
 
-  const clock = useMemo(() => {
+  const clockMs = useMemo(() => {
     if (!window_) return null;
     return window_.start + t * (window_.end - window_.start);
   }, [window_, t]);
+  const clockSec = clockMs ? clockMs / 1000 : null;
 
-  // ---- render sources/layers when data + map ready ----
+  // ---- static layers: events, ports, scenes, alert markers, track lines ----
   useEffect(() => {
     if (!ready || !map.current) return;
-    renderLayers(map.current, data, visible, clock, (id) => setSelected(id));
-  }, [ready, data, visible, clock]);
+    renderStatic(map.current, data, tracks, visible, (id) => setSelected(id));
+  }, [ready, data, tracks, visible]);
 
-  // ---- play/pause the scrubber ----
+  // ---- moving vessels: interpolate each track to the clock and glide ----
+  useEffect(() => {
+    if (!ready || !map.current) return;
+    renderVessels(map.current, tracks, clockSec, visible.positions, (id) => setSelected(id));
+  }, [ready, tracks, clockSec, visible.positions]);
+
+  // ---- play/pause ----
   useEffect(() => {
     if (!playing) return;
     const h = setInterval(() => {
-      setT((x) => {
-        const nx = x + 0.008;
-        return nx >= 1 ? 0 : nx;
-      });
-    }, 60);
+      setT((x) => (x >= 1 ? 0 : Math.min(1, x + 0.004)));
+    }, 55);
     return () => clearInterval(h);
   }, [playing]);
+
+  const movingCount = tracks.length;
 
   return (
     <div style={{ position: "absolute", inset: 0 }}>
@@ -143,7 +156,7 @@ export function MapView() {
             {playing ? "❚❚" : "▶"}
           </button>
           <span className="clock">
-            {clock ? fmtDate(new Date(clock).toISOString(), true) : "—"}
+            {clockMs ? fmtDate(new Date(clockMs).toISOString(), true) : "—"}
           </span>
           <input
             type="range"
@@ -157,8 +170,9 @@ export function MapView() {
             }}
           />
           <span className="muted" style={{ fontSize: 11.5 }}>
-            {fmtDate(new Date(window_.start).toISOString())} –{" "}
-            {fmtDate(new Date(window_.end).toISOString())}
+            {movingCount > 0
+              ? `${movingCount} vessel${movingCount === 1 ? "" : "s"} on AIS`
+              : "no AIS tracks (real corpus has no free AIS)"}
           </span>
         </div>
       )}
@@ -204,18 +218,41 @@ function addAoi(m) {
   });
 }
 
-const EVENT_COLOR = { encounter: "#b0221b", loitering: "#9a6300", port_visit: "#1f7a4d", gap: "#b0221b" };
+// ---- interpolation: a vessel's [lon,lat] at epoch-seconds t, or null if the
+//      clock is outside its track's time span (it hasn't started / has ended). ----
+function posAt(points, tSec) {
+  if (!points || points.length === 0 || tSec == null) return null;
+  if (tSec < points[0][2] || tSec > points[points.length - 1][2]) return null;
+  let lo = 0, hi = points.length - 1;
+  while (lo < hi - 1) {
+    const mid = (lo + hi) >> 1;
+    if (points[mid][2] <= tSec) lo = mid;
+    else hi = mid;
+  }
+  const a = points[lo], b = points[hi];
+  const span = b[2] - a[2] || 1;
+  const f = (tSec - a[2]) / span;
+  return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f];
+}
 
-// Build/refresh all the GeoJSON layers. Called on every data/visibility/time
-// change; layers are added once then updated in place.
-function renderLayers(m, data, visible, clock, onSelect) {
-  const eventsBefore = clock
-    ? data.events.filter((e) => !e.start_time || +new Date(e.start_time) <= clock)
-    : data.events;
+function renderVessels(m, tracks, clockSec, on, onSelect) {
+  const feats = [];
+  for (const tr of tracks) {
+    const pos = posAt(tr.points, clockSec);
+    if (!pos) continue;
+    feats.push({
+      type: "Feature",
+      geometry: { type: "Point", coordinates: pos },
+      properties: { vessel_id: tr.vessel_id, synthetic: tr.is_synthetic ? 1 : 0 },
+    });
+  }
+  upsertCircleLayer(m, "vessels", feats, "#1a5fb4", on, onSelect, 5);
+}
 
-  // ---- events (points) ----
+function renderStatic(m, data, tracks, visible, onSelect) {
+  // events (persistent context — not filtered by the clock, so nothing blinks)
   for (const kind of ["encounter", "loitering", "port_visit", "gap"]) {
-    const feats = eventsBefore
+    const feats = data.events
       .filter((e) => e.kind === kind && e.lat != null && e.lon != null)
       .map((e) => ({
         type: "Feature",
@@ -226,10 +263,18 @@ function renderLayers(m, data, visible, clock, onSelect) {
           label: `${kind}${e.place ? " · " + e.place : ""}`,
         },
       }));
-    upsertCircleLayer(m, `ev-${kind}`, feats, EVENT_COLOR[kind], visible[kind], onSelect);
+    upsertCircleLayer(m, `ev-${kind}`, feats, EVENT_COLOR[kind], visible[kind], onSelect, 4);
   }
 
-  // ---- ports ----
+  // track polylines
+  const lineFeats = tracks.map((tr) => ({
+    type: "Feature",
+    geometry: { type: "LineString", coordinates: tr.points.map((p) => [p[0], p[1]]) },
+    properties: { synthetic: tr.is_synthetic ? 1 : 0 },
+  }));
+  upsertLineLayer(m, "tracklines", lineFeats, "#7aa8dd", visible.tracks);
+
+  // ports
   const portFeats = data.ports
     .filter((p) => p.lat != null && p.lon != null)
     .map((p) => ({
@@ -239,7 +284,7 @@ function renderLayers(m, data, visible, clock, onSelect) {
     }));
   upsertCircleLayer(m, "ports", portFeats, "#55636f", visible.ports, onSelect, 4);
 
-  // ---- alert markers ----
+  // alert markers (at the alert subject's first known event location)
   const alertPts = [];
   for (const a of data.alerts) {
     const ev = data.events.find((e) => e.vessel_id === a.subject && e.lat != null);
@@ -256,26 +301,14 @@ function renderLayers(m, data, visible, clock, onSelect) {
   }
   upsertCircleLayer(m, "alerts", alertPts, "#b0221b", visible.alerts, onSelect, 7, true);
 
-  // ---- vessel positions (from event points as a proxy for "where vessels are") ----
-  const posFeats = eventsBefore
-    .filter((e) => e.vessel_id && e.lat != null && e.lon != null)
-    .map((e) => ({
-      type: "Feature",
-      geometry: { type: "Point", coordinates: [e.lon, e.lat] },
-      properties: { vessel_id: e.vessel_id, synthetic: e.is_synthetic ? 1 : 0, label: e.mmsi || "vessel" },
-    }));
-  upsertCircleLayer(m, "positions", posFeats, "#1a5fb4", visible.positions, onSelect, 3.5);
-
-  // ---- scenes (footprint outlines from WKT bbox) ----
-  const sceneFeats = data.scenes
-    .map((s) => wktToFeature(s.footprint_wkt))
-    .filter(Boolean);
+  // Sentinel-1 footprints
+  const sceneFeats = data.scenes.map((s) => wktToFeature(s.footprint_wkt)).filter(Boolean);
   upsertPolyLayer(m, "scenes", sceneFeats, "#6039c4", visible.scenes);
 }
 
 function upsertCircleLayer(m, id, feats, color, on, onSelect, radius = 5, star = false) {
-  const src = m.getSource(id);
   const fc = { type: "FeatureCollection", features: feats };
+  const src = m.getSource(id);
   if (src) src.setData(fc);
   else {
     m.addSource(id, { type: "geojson", data: fc });
@@ -284,21 +317,40 @@ function upsertCircleLayer(m, id, feats, color, on, onSelect, radius = 5, star =
       paint: {
         "circle-radius": star ? radius + 1 : radius,
         "circle-color": ["case", ["==", ["get", "synthetic"], 1], "#6039c4", color],
-        "circle-opacity": 0.82,
+        "circle-opacity": 0.85,
         "circle-stroke-width": star ? 2 : 1,
         "circle-stroke-color": "#fff",
       },
     });
     m.on("click", id, (e) => {
       const p = e.features[0].properties;
-      new maplibregl.Popup({ closeButton: false, offset: 10 })
-        .setLngLat(e.lngLat)
-        .setHTML(`<b>${p.label}</b>${p.synthetic == 1 ? ' <span style="color:#6039c4;font-size:11px">SCENARIO</span>' : ""}`)
-        .addTo(m);
+      if (p.label) {
+        new maplibregl.Popup({ closeButton: false, offset: 10 })
+          .setLngLat(e.lngLat)
+          .setHTML(`<b>${p.label}</b>${p.synthetic == 1 ? ' <span style="color:#6039c4;font-size:11px">SCENARIO</span>' : ""}`)
+          .addTo(m);
+      }
       if (p.vessel_id) onSelect(p.vessel_id);
     });
     m.on("mouseenter", id, () => (m.getCanvas().style.cursor = "pointer"));
     m.on("mouseleave", id, () => (m.getCanvas().style.cursor = ""));
+  }
+  if (m.getLayer(id)) m.setLayoutProperty(id, "visibility", on ? "visible" : "none");
+}
+
+function upsertLineLayer(m, id, feats, color, on) {
+  const fc = { type: "FeatureCollection", features: feats };
+  const src = m.getSource(id);
+  if (src) src.setData(fc);
+  else {
+    m.addSource(id, { type: "geojson", data: fc });
+    m.addLayer({
+      id, type: "line", source: id,
+      paint: {
+        "line-color": ["case", ["==", ["get", "synthetic"], 1], "#b9a6e6", color],
+        "line-width": 1, "line-opacity": 0.5,
+      },
+    });
   }
   if (m.getLayer(id)) m.setLayoutProperty(id, "visibility", on ? "visible" : "none");
 }
@@ -309,27 +361,19 @@ function upsertPolyLayer(m, id, feats, color, on) {
   if (src) src.setData(fc);
   else {
     m.addSource(id, { type: "geojson", data: fc });
-    m.addLayer({
-      id: id + "-fill", type: "fill", source: id,
-      paint: { "fill-color": color, "fill-opacity": 0.06 },
-    });
-    m.addLayer({
-      id: id + "-line", type: "line", source: id,
-      paint: { "line-color": color, "line-width": 0.8, "line-opacity": 0.5 },
-    });
+    m.addLayer({ id: id + "-fill", type: "fill", source: id, paint: { "fill-color": color, "fill-opacity": 0.06 } });
+    m.addLayer({ id: id + "-line", type: "line", source: id, paint: { "line-color": color, "line-width": 0.8, "line-opacity": 0.5 } });
   }
   for (const suff of ["-fill", "-line"]) {
     if (m.getLayer(id + suff)) m.setLayoutProperty(id + suff, "visibility", on ? "visible" : "none");
   }
 }
 
-// Parse a POLYGON WKT into a GeoJSON polygon feature (best-effort; footprints
-// are simple polygons in EPSG:4326).
 function wktToFeature(wkt) {
   if (!wkt || !wkt.toUpperCase().includes("POLYGON")) return null;
-  const m = wkt.match(/\(\(([^)]+)\)\)/);
-  if (!m) return null;
-  const coords = m[1]
+  const mm = wkt.match(/\(\(([^)]+)\)\)/);
+  if (!mm) return null;
+  const coords = mm[1]
     .split(",")
     .map((pair) => pair.trim().split(/\s+/).map(Number))
     .filter((c) => c.length === 2 && c.every((n) => !Number.isNaN(n)));

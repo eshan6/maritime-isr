@@ -157,6 +157,15 @@ def create_app() -> FastAPI:
             "items": [models.Event(**e).model_dump() for e in res["items"]],
         }
 
+    @api.get("/tracks", dependencies=guard)
+    def tracks(max_vessels: int = Query(default=200, ge=1, le=2000),
+               max_points: int = Query(default=140, ge=10, le=2000)) -> dict:
+        # Decimated AIS tracks for the map's time animation. Returned as a plain
+        # dict (compact [lon,lat,epoch] arrays) rather than a per-point model —
+        # this can be tens of thousands of points and pydantic-validating each
+        # would cost more than it is worth for coordinates.
+        return service.list_tracks(max_vessels=max_vessels, max_points=max_points)
+
     @api.get("/scenes", dependencies=guard)
     def scenes(limit: int = Query(default=2000, ge=1, le=20000)) -> dict:
         res = service.list_scenes(limit=limit)

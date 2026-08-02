@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pandas as pd                                             # noqa: E402
 
-from maritime_isr.config import DATA_ROOT, GRAPH_DB_NAME        # noqa: E402
+from maritime_isr.config import GRAPH_DB_NAME, cfg             # noqa: E402
 from maritime_isr.graph import GraphStore                       # noqa: E402
 from maritime_isr.graph import from_landed                      # noqa: E402
 from maritime_isr.ingest.landing import (read_table,            # noqa: E402
@@ -83,7 +83,11 @@ def run_tracks(df: pd.DataFrame) -> dict:
 
 def populate_graph() -> tuple[GraphStore, dict]:
     """Phase 4 over the combined corpus — `from_landed.populate`, unmodified."""
-    store = GraphStore(DATA_ROOT / GRAPH_DB_NAME)
+    # cfg.data_root, not the hardcoded DATA_ROOT constant — so with
+    # MISR_DATA_ROOT set the graph lands in the same directory the conformed
+    # tables and the API read from. Writing to DATA_ROOT left the API's graph
+    # empty (0 alerts, neighbourhood 404) whenever the two diverged.
+    store = GraphStore(cfg.data_root / GRAPH_DB_NAME)
     t0 = time.time()
     counts = from_landed.populate(store, only_intentional_gaps=False)
     print(f"  populated in {time.time() - t0:.0f}s")
