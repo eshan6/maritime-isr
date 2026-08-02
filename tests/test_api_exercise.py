@@ -313,6 +313,24 @@ def test_events_split_by_kind_and_filter_by_bbox(client, H):
     assert tiny_n <= full
 
 
+def test_tracks_shape_for_animation(client, H):
+    r = client.get("/api/tracks", headers=H).json()
+    assert "items" in r
+    if not r["items"]:
+        pytest.skip("no AIS tracks in this corpus (real corpus has no free AIS)")
+    tr = r["items"][0]
+    assert tr["vessel_id"].startswith("vessel:")
+    assert "is_synthetic" in tr
+    assert len(tr["points"]) >= 2
+    # each point is [lon, lat, epoch_seconds] — what the map interpolates on
+    lon, lat, epoch = tr["points"][0]
+    assert 60 <= lon <= 78 and 5 <= lat <= 25  # inside the AOI
+    assert isinstance(epoch, int) and epoch > 0
+    # points are time-ordered so interpolation is monotonic
+    ts = [p[2] for p in tr["points"]]
+    assert ts == sorted(ts)
+
+
 def test_scenes_shape(client, H):
     sc = client.get("/api/scenes", headers=H).json()
     assert "items" in sc

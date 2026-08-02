@@ -375,6 +375,55 @@ def get_track(canonical: str, *, start: Optional[str] = None,
     }
 
 
+def list_tracks(*, max_vessels: int = 200, max_points: int = 140) -> dict:
+    """Decimated AIS tracks for every vessel that has positions, for the map's
+    time animation. Each track is [[lon, lat, epoch_seconds], ...] so the client
+    can interpolate a vessel's position at any clock time and animate it moving.
+
+    On the real corpus there is no free AIS, so ais_position is empty and this
+    returns an empty list with a note — the honest reason the real map shows no
+    moving vessels (ADR-005).
+    """
+    with open_reader() as reader:
+        if not reader.has("ais_position"):
+            return {"items": [], "note": "no AIS positions landed"}
+        syn_col = "is_synthetic" in reader.columns("ais_position")
+        vids = reader.rows(
+            "SELECT vessel_id, count(*) AS n FROM ais_position "
+            "WHERE lat IS NOT NULL GROUP BY vessel_id ORDER BY n DESC "
+            f"LIMIT {int(max_vessels)}")
+        items = []
+        for row in vids:
+            vid = row["vessel_id"]
+            cols = "ts, lat, lon" + (", is_synthetic" if syn_col else "")
+            pts = reader.rows(
+                f"SELECT {cols} FROM ais_position WHERE vessel_id = ? "
+                "AND lat IS NOT NULL ORDER BY ts", [vid])
+            if not pts:
+                continue
+            step = max(1, len(pts) // max_points)
+            dec = pts[::step]
+            # always include the last point so the track ends where it truly ends
+            if dec[-1] is not pts[-1]:
+                dec.append(pts[-1])
+            coords = []
+            for p in dec:
+                ts = p["ts"]
+                epoch = int(ts.timestamp()) if hasattr(ts, "timestamp") else None
+                if epoch is None or p["lon"] is None or p["lat"] is None:
+                    continue
+                coords.append([round(p["lon"], 4), round(p["lat"], 4), epoch])
+            if len(coords) < 2:
+                continue
+            items.append({
+                "vessel_id": canonical_id(vid),
+                "is_synthetic": bool(pts[0].get("is_synthetic")) if syn_col else False,
+                "points": coords,
+            })
+    note = None if items else "no AIS positions (the real corpus has no free AIS)"
+    return {"items": items, "note": note}
+
+
 # --------------------------------------------------------------------------
 # events (map + timeline)
 # --------------------------------------------------------------------------

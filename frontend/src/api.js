@@ -57,6 +57,7 @@ export const api = {
       disposition,
     }),
   events: (params) => get("/events", params),
+  tracks: (params) => get("/tracks", params),
   scenes: () => get("/scenes"),
   ports: () => get("/ports"),
 };
