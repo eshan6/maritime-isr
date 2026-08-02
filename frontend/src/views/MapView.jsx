@@ -75,25 +75,24 @@ export function MapView() {
   }, []);
 
   // ---- load data ----
+  // Each layer loads independently (allSettled): on the real corpus one slow or
+  // failing endpoint must not blank the whole map. Events are capped — the real
+  // corpus has 24k+ loitering events and neither the wire nor the canvas wants
+  // them all; a few thousand is plenty for the picture.
   useEffect(() => {
-    Promise.all([
-      api.events({ limit: 20000 }),
-      api.ports(),
-      api.scenes(),
-      api.alerts(),
-      api.stats(),
-    ]).then(([ev, ports, scenes, alerts, stats]) => {
-      setData({
-        events: ev.items,
-        ports: ports.items,
-        scenes: scenes.items,
-        alerts: alerts.items,
-      });
-      const w = stats.corpus_window;
-      if (w.start && w.end) {
+    let live = true;
+    const set = (patch) => live && setData((d) => ({ ...d, ...patch }));
+    api.events({ limit: 4000 }).then((r) => set({ events: r.items })).catch(() => {});
+    api.ports().then((r) => set({ ports: r.items })).catch(() => {});
+    api.scenes().then((r) => set({ scenes: r.items })).catch(() => {});
+    api.alerts().then((r) => set({ alerts: r.items })).catch(() => {});
+    api.stats().then((s) => {
+      const w = s.corpus_window || {};
+      if (live && w.start && w.end) {
         setWindow({ start: +new Date(w.start), end: +new Date(w.end) });
       }
-    });
+    }).catch(() => {});
+    return () => { live = false; };
   }, []);
 
   const clock = useMemo(() => {
