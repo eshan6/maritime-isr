@@ -162,12 +162,26 @@ def _node_label(props: dict, node_id: str) -> str:
     return node_id.rsplit(":", 1)[-1]
 
 
+#: Node types worth expanding THROUGH. A flag or a port is shared by hundreds of
+#: unrelated vessels, so pulling in everything that touches it drowns the signal
+#: (STATE.md: real vessel-to-vessel paths run through shared flags and carry no
+#: meaning). Vessels and companies are the hubs whose links are worth following;
+#: flags, ports, identities, gaps and authorities are shown as leaves — the
+#: seed's connection to them is context, their OTHER vessels are noise.
+_EXPANDABLE_TYPES = {"vessel", "organization", "person"}
+
+
 def neighbourhood(vessel_id: str, hops: int = 1) -> dict | None:
     """Seed-and-expand BFS from a vessel, cycle-protected and budget-bounded.
 
     Returns None if the seed is not in the graph. `hops` is clamped to 1-2: the
     view opens on one hop and expands a hop at a time, and going deeper than two
     turns even the synthetic neighbourhoods into a hairball.
+
+    The traversal only continues THROUGH vessels and companies (see
+    `_EXPANDABLE_TYPES`); flags, ports, identities and gaps are terminal, so the
+    view shows a vessel's ownership cluster rather than every hull that happens
+    to share its flag.
     """
     hops = max(1, min(2, hops))
     with open_graph() as g:
@@ -223,9 +237,15 @@ def neighbourhood(vessel_id: str, hops: int = 1) -> dict | None:
                         "t_start": _iso(e.t_start), "t_end": _iso(e.t_end),
                         "is_synthetic": bool(e.is_synthetic),
                     }
+                # Only keep expanding through hubs (vessels, companies). A leaf
+                # type is added and shown, but we do not pull in its other
+                # vessels — that is the flag/port fan-out that made the graph
+                # unreadable.
                 if other not in visited:
                     visited.add(other)
-                    frontier.append((other, depth + 1))
+                    onode = seen_nodes.get(other)
+                    if onode and onode["node_type"] in _EXPANDABLE_TYPES:
+                        frontier.append((other, depth + 1))
 
     return {
         "seed": vessel_id,
