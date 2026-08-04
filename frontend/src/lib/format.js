@@ -91,15 +91,38 @@ export function nodeTypeColor(t) {
   return (
     {
       vessel: "#1a5fb4",
-      identity: "#7a8794",
+      identity: "#9aa6b2",
       flag_state: "#1f7a4d",
       port: "#9a6300",
-      organization: "#6039c4",
+      organization: "#0d7a6f", // teal — a hub type, distinct from vessel-blue
+      person: "#0d7a6f",
       sanctions_authority: "#b0221b",
-      ais_gap: "#b0221b",
+      ais_gap: "#c2554d",
       zone: "#9a6300",
     }[t] || "#8996a3"
   );
+}
+
+// Node display radius by type — hubs (vessels, orgs) read larger than leaves.
+export function nodeTypeSize(t) {
+  return { vessel: 15, organization: 17, person: 15, sanctions_authority: 12,
+    flag_state: 9, port: 9, ais_gap: 9, identity: 6 }[t] || 8;
+}
+
+// Edge category → colour, so ownership structure reads without labels.
+const OWNERSHIP_EDGES = new Set(["owned-by", "operated-by"]);
+const SANCTION_EDGES = new Set(["sanctioned-under"]);
+export function edgeCategoryColor(t) {
+  if (OWNERSHIP_EDGES.has(t)) return "#5a4bbd"; // ownership — indigo
+  if (SANCTION_EDGES.has(t)) return "#b0221b"; // sanctions — red
+  if (t === "met-with") return "#c2554d"; // vessel-to-vessel encounter
+  return "#c7cfd8"; // structural (flag, port, identity) — quiet grey
+}
+
+// A hub type always shows its label; leaves label on hover/selection only.
+export function isHubType(t) {
+  return t === "vessel" || t === "organization" || t === "person" ||
+    t === "sanctions_authority";
 }
 
 // short id -> the last, human-ish segment (vessel:gfw:spine -> spine)

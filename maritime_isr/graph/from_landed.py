@@ -580,6 +580,130 @@ def add_sanctions(store, known: set[str]) -> tuple[int, int]:
 
 
 # --------------------------------------------------------------------------
+# organizations + ownership (the paid-feed stand-in, ADR-016)
+# --------------------------------------------------------------------------
+
+ORG_TABLE = "scenario_organizations"
+OWNERSHIP_TABLE = "scenario_ownership"
+
+
+def _table_present(table: str) -> bool:
+    from ..ingest.landing import table_day_partitions
+    return bool(table_day_partitions(table))
+
+
+def _org_node_id(ref: str) -> str:
+    """An organization ref (`org:pearl-crest-shipping`) is already namespaced;
+    keep it as the node id. Only vessel refs go through `vessel_node_id`."""
+    return str(ref).strip()
+
+
+def _ownership_endpoint(ref: str, store, *, is_syn: bool) -> str | None:
+    """Resolve an ownership src/dst to a graph node id, creating a stub node if
+    the endpoint is not otherwise known. A `vessel:` ref is a hull; anything else
+    is treated as an organization."""
+    ref = str(ref).strip()
+    if not ref:
+        return None
+    if ref.startswith("vessel:"):
+        nid = vessel_node_id(ref)
+        if store.node(nid) is None:
+            store.upsert_node(nid, "vessel",
+                              dict(from_ownership_only=True), is_synthetic=is_syn)
+        return nid
+    nid = _org_node_id(ref)
+    if store.node(nid) is None:
+        store.upsert_node(nid, "organization",
+                          dict(name=ref.split(":", 1)[-1].replace("-", " ").title()),
+                          is_synthetic=is_syn)
+    return nid
+
+
+def add_organizations(store) -> int:
+    """Organization nodes from the scenario org table, plus a `sanctioned-under`
+    edge for each designated (sanctioned) company.
+
+    **Guarded and scenario-only by construction.** Real corpora have no such
+    table and skip entirely — GFW ownership is 0.66% and OFAC's owner field is
+    free text (ADR-016), so there is no real ownership graph to build. This is
+    the synthetic stand-in for a paid ownership feed, flagged `is_synthetic`, and
+    its designations point at the fictional SCENARIO-SDN authority, never OFAC.
+    """
+    if not _table_present(ORG_TABLE):
+        return 0
+    ensure_authorities(store)
+    n = 0
+    for r in read_table(ORG_TABLE):
+        oid = r.get("org_id")
+        if not oid:
+            continue
+        syn = _syn(r)
+        designated = bool(r.get("designated"))
+        store.upsert_node(
+            _org_node_id(oid), "organization",
+            dict(name=r.get("name"), jurisdiction=r.get("jurisdiction"),
+                 role=r.get("role"), designated=designated,
+                 registered_agent=(r.get("registered_agent_name")
+                                   or r.get("registered_agent"))),
+            is_synthetic=syn)
+        n += 1
+        if designated:
+            t0 = (_epoch(r.get("incorporated")) or _epoch(r.get("acquired_at"))
+                  or time.time())
+            store.add_edge(
+                "sanctioned-under", _org_node_id(oid),
+                AUTHORITY_SCENARIO if syn else AUTHORITY_OFAC,
+                t_start=t0, t_end=None,
+                confidence=float(r.get("confidence") or 0.9), observed_at=t0,
+                source=_src(r, "scenario-ownership"),
+                source_ref=str(r.get("source_ref") or oid),
+                props=dict(designated_entity=True,
+                           listed_by=("scenario-sdn-fictional" if syn
+                                      else "us-treasury-ofac")),
+                is_synthetic=syn)
+    return n
+
+
+def add_ownership(store) -> int:
+    """owned-by / operated-by edges from the scenario ownership table.
+
+    This is what turns a lonely star into an ownership network: vessels connect
+    to their operator, operators to their parent shell, and two hulls with no
+    direct link converge on a shared ultimate owner — the identity-laundering
+    signature the product exists to surface. Guarded on table presence like
+    `add_organizations`.
+    """
+    if not _table_present(OWNERSHIP_TABLE):
+        return 0
+    n = 0
+    for r in read_table(OWNERSHIP_TABLE):
+        syn = _syn(r)
+        src = _ownership_endpoint(r.get("src"), store, is_syn=syn)
+        dst = _ownership_endpoint(r.get("dst"), store, is_syn=syn)
+        if not src or not dst:
+            continue
+        kind = r.get("edge_kind") or "owned-by"
+        if kind not in ("owned-by", "operated-by"):
+            kind = "owned-by"
+        t0 = (_epoch(r.get("valid_from")) or _epoch(r.get("acquired_at"))
+              or time.time())
+        try:
+            store.add_edge(
+                kind, src, dst, t_start=t0, t_end=_epoch(r.get("valid_to")),
+                confidence=float(r.get("confidence") or 0.8), observed_at=t0,
+                source=_src(r, "scenario-ownership"),
+                source_ref=str(r.get("source_ref") or f"{src}->{dst}"),
+                props=dict(edge_kind=kind, share=r.get("share")),
+                is_synthetic=syn)
+            n += 1
+        except ValueError:
+            # an endpoint type the edge spec forbids (e.g. org operated-by):
+            # skip rather than crash the whole populate.
+            continue
+    return n
+
+
+# --------------------------------------------------------------------------
 # the whole thing
 # --------------------------------------------------------------------------
 
@@ -608,6 +732,11 @@ def populate(store, *, only_intentional_gaps: bool = True) -> dict[str, int]:
         store, known, only_intentional=only_intentional_gaps)
     counts["sanctioned_findings"], counts["sanctioned_candidates"] = add_sanctions(
         store, known)
+    # Ownership graph — no-op on a real-only corpus (tables absent), the paid-
+    # feed stand-in on a scenario corpus (ADR-016). This is what gives the graph
+    # view real structure to draw: shell chains and shared-owner clusters.
+    counts["organizations"] = add_organizations(store)
+    counts["ownership_edges"] = add_ownership(store)
     counts["vessel_nodes_total"] = store.n_nodes("vessel")
     counts["edges_total"] = store.n_edges()
     return counts
