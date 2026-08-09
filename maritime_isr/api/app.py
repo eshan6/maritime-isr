@@ -209,17 +209,28 @@ def _mount_frontend(app: FastAPI) -> None:
     if assets.is_dir():
         app.mount("/assets", StaticFiles(directory=str(assets)), name="assets")
 
-    index_html = (DIST_DIR / "index.html").read_text(encoding="utf-8")
-    # Hand the browser the configured token, so a non-default MISR_API_TOKEN
-    # still works when the UI is served from here rather than proxied by Vite.
-    # On localhost the token is a convenience, not a boundary (ADR-013).
-    injected = index_html.replace(
-        "</head>",
-        f'<script>window.__MISR_TOKEN__="{settings.token}";</script></head>')
+    def index_html() -> str:
+        """Read index.html per request, not once at startup.
+
+        Vite writes content-hashed bundle names, so a rebuild changes the script
+        tag inside index.html. Caching the old copy leaves the page pointing at a
+        filename that no longer exists — the browser 404s on the bundle and
+        renders a blank white screen, with the server reporting nothing wrong.
+        The file is a few hundred bytes, so re-reading it costs nothing and means
+        a rebuild is picked up without restarting the API.
+
+        The token is injected here so a non-default MISR_API_TOKEN still works
+        when the UI is served from this process rather than proxied by Vite. On
+        localhost the token is a convenience, not a boundary (ADR-013).
+        """
+        raw = (DIST_DIR / "index.html").read_text(encoding="utf-8")
+        return raw.replace(
+            "</head>",
+            f'<script>window.__MISR_TOKEN__="{settings.token}";</script></head>')
 
     @app.get("/", response_class=HTMLResponse)
     def _index() -> HTMLResponse:
-        return HTMLResponse(injected)
+        return HTMLResponse(index_html())
 
     @app.get("/{full_path:path}", response_class=HTMLResponse)
     def _spa(full_path: str):
@@ -228,7 +239,7 @@ def _mount_frontend(app: FastAPI) -> None:
         candidate = DIST_DIR / full_path
         if full_path and candidate.is_file():
             return FileResponse(str(candidate))
-        return HTMLResponse(injected)
+        return HTMLResponse(index_html())
 
 
 def _parse_bbox(bbox: Optional[str]) -> Optional[tuple]:
