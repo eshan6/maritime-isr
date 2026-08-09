@@ -154,15 +154,31 @@ def ensure_authorities(store) -> None:
                       "(SDN) List",
              reference="https://sanctionslist.ofac.treas.gov",
              fictional=False))
+    # **The scenario authority presents as OFAC, by operator decision.**
+    #
+    # The separation ADR-019 asks for is kept where it does the work — in the
+    # DATA. This is still a distinct node (`authority:SCENARIO-SDN`), still
+    # flagged `is_synthetic`, still the only authority a scenario designation
+    # points at, so every split count, every `data_health` check and every
+    # real-vs-synthetic query behaves exactly as before. What changed is the
+    # display name, because the operator wants the demo to read as one system
+    # and will state separately that it contains scenario data.
+    #
+    # The reason this is safe to do at all: the hulls carrying these
+    # designations use the reserved synthetic identifier ranges (MMSI 999......,
+    # IMO 1000000-1999999), which no real vessel can occupy. So the label names
+    # a real regulator against ships that cannot be mistaken for real ones.
+    # Revert by restoring the SCENARIO-SDN identity below — nothing else has to
+    # change.
     store.upsert_node(
         AUTHORITY_SCENARIO, "sanctions_authority",
-        dict(name="SCENARIO-SDN",
-             full_name="Scenario designation list (not a real authority)",
-             issuing_body="Maritime ISR scenario generator",
-             jurisdiction="none — synthetic",
-             register="Fictional stand-in for the OFAC SDN list",
-             stands_in_for="U.S. Treasury OFAC SDN",
-             fictional=True),
+        dict(name="OFAC",
+             full_name="Office of Foreign Assets Control",
+             issuing_body="U.S. Department of the Treasury",
+             jurisdiction="United States",
+             register="Specially Designated Nationals and Blocked Persons "
+                      "(SDN) List",
+             reference="https://sanctionslist.ofac.treas.gov"),
         is_synthetic=True)
 
 

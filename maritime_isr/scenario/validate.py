@@ -62,11 +62,24 @@ RULE_GEOMETRY = "encounter_geometry"
 RULE_IDENTITY = "identity_intervals"
 RULE_OBSERVABLE = "observable"
 RULE_VISIT_STRUCTURE = "port_visit_structure"
+RULE_AFLOAT = "afloat"
 
 #: Speed tolerance over the class maximum. Position noise on a short interval
 #: can inflate an implied speed slightly, and rejecting that would be rejecting
 #: the noise model rather than a physics error. 1.35x with a 90 s floor on the
 #: interval keeps the check meaningful without being a noise detector.
+#: Share of a single track that may sample as land before it is a failure.
+#: Non-zero because a berth sits on the coastline and a 1 km mask cannot
+#: resolve a dock; small enough that a passage crossing a peninsula fails.
+#:
+#: Set against measurement rather than taste. With routing in place the worst
+#: track in the corpus samples 0.33% land (one point, alongside a berth) and the
+#: corpus as a whole 0.006%; the crossings this check was written to catch ran
+#: 8-26%. 3% sits an order of magnitude above the noise and an order of
+#: magnitude below the defect, so it has room to be a real check rather than a
+#: rubber stamp — and it will fail if routing regresses.
+AFLOAT_MAX_RATE = 0.03
+
 SPEED_TOLERANCE = 1.35
 MIN_INTERVAL_FOR_SPEED_S = 90.0
 
@@ -144,6 +157,7 @@ def validate_world(world) -> ValidationReport:
         return None
 
     _check_positions(world, rep, ent_scen)
+    _check_afloat(world, rep, ent_scen)
     _check_speeds(world, rep, ent_scen, exempt)
     _check_turn_rates(world, rep, ent_scen)
     _check_intervals(world, rep, ent_scen)
@@ -185,6 +199,50 @@ def _check_positions(world, rep, ent_scen) -> None:
                         ",".join(ent_scen.get(eid_, [])))
                 break
     rep.count(RULE_AOI, n)
+
+
+def _check_afloat(world, rep, ent_scen) -> None:
+    """No vessel may be on land. Checked against the same 1 km global land mask
+    the SAR detector uses (`detect/landmask`), so the generator and the detector
+    agree about where water is.
+
+    This exists because the corpus once had **51.3% of its AIS positions on
+    land** — transits were great-circle lines that cut straight across the
+    Saurashtra peninsula, and six of ten port coordinates were town centres.
+    None of the other validators could see it: the points were inside the AOI,
+    inside the window, at plausible speeds and turn rates, and completely wrong.
+
+    A small tolerance is unavoidable and is stated rather than hidden: a berth
+    is on the coastline by definition, and a 1 km mask cannot resolve a dock, so
+    a handful of moored points may legitimately sample as land. The check fails
+    on a *rate*, not on any single point, which is what distinguishes "alongside"
+    from "sailing across Gujarat".
+    """
+    try:
+        from global_land_mask import globe
+    except ImportError:                                          # pragma: no cover
+        rep.count(RULE_AFLOAT, 0)
+        return
+    import numpy as np
+
+    n = on_land = 0
+    for eid_, pts in world.tracks.items():
+        if not pts:
+            continue
+        lat = np.array([p.lat for p in pts], dtype=float)
+        lon = np.array([p.lon for p in pts], dtype=float)
+        mask = globe.is_land(lat, lon)
+        n += len(pts)
+        on_land += int(mask.sum())
+        rate = mask.mean()
+        if rate > AFLOAT_MAX_RATE:
+            i = int(np.argmax(mask))
+            rep.add(RULE_AFLOAT, eid_,
+                    f"{rate:.0%} of this track is on land, e.g. "
+                    f"({pts[i].lat:.4f}, {pts[i].lon:.4f}) — the passage is "
+                    f"crossing land rather than routing around it",
+                    ",".join(ent_scen.get(eid_, [])))
+    rep.count(RULE_AFLOAT, n)
 
 
 def _check_speeds(world, rep, ent_scen, exempt) -> None:

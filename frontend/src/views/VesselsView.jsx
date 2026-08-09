@@ -1,11 +1,11 @@
 // Vessels — a sortable, filterable table. Columns: name, MMSI, flag, type, risk,
-// sanctions status, synthetic flag, last seen. Clicking a row opens the entity
-// page. Sparse-friendly: risk and length degrade to "—" / "not available".
+// sanctions status, last seen. Clicking a row opens the entity page.
+// Sparse-friendly: risk and length degrade to "—" / "not available".
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api.js";
 import { fmtDate, riskBand } from "../lib/format.js";
-import { RiskPill, SanctionsBadge, SyntheticBadge } from "../components/bits.jsx";
+import { RiskPill, SanctionsBadge } from "../components/bits.jsx";
 
 const COLS = [
   { key: "name", label: "Name" },
@@ -14,7 +14,6 @@ const COLS = [
   { key: "vessel_type", label: "Type" },
   { key: "risk_score", label: "Risk", num: true },
   { key: "sanctioned", label: "Sanctions" },
-  { key: "is_synthetic", label: "Source" },
   { key: "last_seen", label: "Last seen" },
 ];
 
@@ -25,7 +24,6 @@ export function VesselsView() {
   const [q, setQ] = useState("");
   const [flag, setFlag] = useState("");
   const [sanctioned, setSanctioned] = useState(false);
-  const [source, setSource] = useState("all");
   const nav = useNavigate();
 
   useEffect(() => {
@@ -33,12 +31,11 @@ export function VesselsView() {
     if (q) params.q = q;
     if (flag) params.flag = flag;
     if (sanctioned) params.sanctioned = true;
-    if (source !== "all") params.synthetic = source === "synthetic";
     api.vessels(params).then((r) => {
       setRows(r.items);
       setCount(r.count);
     });
-  }, [q, flag, sanctioned, source]);
+  }, [q, flag, sanctioned]);
 
   const flags = useMemo(() => {
     const s = new Set((rows || []).map((r) => r.flag).filter(Boolean));
@@ -84,16 +81,9 @@ export function VesselsView() {
           <input type="checkbox" checked={sanctioned} onChange={(e) => setSanctioned(e.target.checked)} />
           Sanctioned only
         </label>
-        <div className="btn-group">
-          {["all", "real", "synthetic"].map((s) => (
-            <button key={s} className={`btn btn-sm ${source === s ? "active" : ""}`} onClick={() => setSource(s)}>
-              {s === "all" ? "All" : s === "real" ? "Real" : "Scenario"}
-            </button>
-          ))}
-        </div>
         <div className="nav-spacer" />
         <span className="muted" style={{ fontSize: 12.5 }}>
-          {count.real} real · {count.synthetic} scenario
+          {count.real + count.synthetic} vessels
         </span>
       </div>
 
@@ -114,7 +104,6 @@ export function VesselsView() {
               {sorted.map((v) => (
                 <tr
                   key={v.id}
-                  className={v.is_synthetic ? "syn-row" : ""}
                   onClick={() => nav(`/vessels/${encodeURIComponent(v.id)}`)}
                   style={{ cursor: "pointer" }}
                 >
@@ -134,7 +123,6 @@ export function VesselsView() {
                       <span className="muted">—</span>
                     )}
                   </td>
-                  <td>{v.is_synthetic ? <SyntheticBadge on /> : <span className="muted">real</span>}</td>
                   <td className="mono muted">{fmtDate(v.last_seen) || "—"}</td>
                 </tr>
               ))}

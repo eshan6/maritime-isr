@@ -6,8 +6,6 @@
  *   amber  = elevated risk
  *   red    = confirmed sanctions finding (rare, used sparingly)
  *   grey   = inactive / decayed / unknown
- *   violet = SYNTHETIC (scenario) data — a hue deliberately outside the risk
- *            palette so "simulated" can never be misread as "risky".
  */
 
 :root {
@@ -116,15 +114,6 @@ h1, h2, h3, h4 { margin: 0; font-weight: 600; letter-spacing: -0.01em; }
 
 .nav-spacer { flex: 1; }
 
-.scenario-flag {
-  display: inline-flex; align-items: center; gap: 7px;
-  font-size: 11.5px; color: var(--violet); background: var(--violet-weak);
-  border: 1px solid var(--violet-border);
-  padding: 4px 9px; border-radius: 100px; font-weight: 600;
-}
-.scenario-flag .dot { width: 7px; height: 7px; border-radius: 50%;
-  background: var(--violet); }
-
 .main { flex: 1 1 auto; min-height: 0; position: relative; overflow: hidden; }
 
 /* ---- generic surfaces ---- */
@@ -149,8 +138,6 @@ h1, h2, h3, h4 { margin: 0; font-weight: 600; letter-spacing: -0.01em; }
   padding: 2px 7px; border-radius: 4px; white-space: nowrap;
   border: 1px solid transparent; line-height: 1.5;
 }
-.badge-scenario { color: var(--violet); background: var(--violet-weak);
-  border-color: var(--violet-border); }
 .badge-finding { color: var(--red); background: var(--red-weak);
   border-color: #f2c9c5; }
 .badge-candidate { color: var(--amber); background: var(--amber-weak);
@@ -172,8 +159,6 @@ h1, h2, h3, h4 { margin: 0; font-weight: 600; letter-spacing: -0.01em; }
 .risk-low { color: var(--green); }
 .risk-none { color: var(--ink-3); }
 
-/* rows flagged synthetic carry a left marker + tint everywhere */
-.syn-row { box-shadow: inset 3px 0 0 var(--violet); background: #fbfaff; }
 
 /* ---- buttons ---- */
 .btn {
