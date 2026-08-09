@@ -12,13 +12,15 @@ choreography, then decoys and misses.
 """
 from __future__ import annotations
 
-from . import background, decoys, group_a, group_b, group_c, group_d, group_e
+from . import background, commercial_traffic, decoys, group_a, group_b
+from . import group_c, group_d, group_e
 from . import misses
 
 #: Execution order. Background first, then the spine's early identity events,
 #: then everything else roughly in time order.
 ALL = (
     *background.SCENARIOS,
+    *commercial_traffic.SCENARIOS,   # the ordinary fleet the scenarios hide in
     *group_b.SCENARIOS,      # B3 cascade opens in week 1
     *group_a.SCENARIOS,
     *group_c.SCENARIOS,
