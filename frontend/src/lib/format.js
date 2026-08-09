@@ -125,6 +125,22 @@ export function isHubType(t) {
     t === "sanctions_authority";
 }
 
+// A props key rendered as a reader-facing label: snake_case -> "Sentence case",
+// with the identifier acronyms kept upper. Detail panels read as prose this way
+// rather than as a dump of database column names.
+const KEY_ACRONYMS = { imo: "IMO", mmsi: "MMSI", gfw: "GFW", ofac: "OFAC",
+  sdn: "SDN", id: "ID", ais: "AIS", n: "No." };
+export function humanKey(k) {
+  const words = String(k).split(/[_\s]+/).filter(Boolean);
+  return words
+    .map((w, i) => {
+      const a = KEY_ACRONYMS[w.toLowerCase()];
+      if (a) return a;
+      return i === 0 ? w.charAt(0).toUpperCase() + w.slice(1) : w;
+    })
+    .join(" ");
+}
+
 // short id -> the last, human-ish segment (vessel:gfw:spine -> spine)
 export function shortId(id) {
   if (!id) return "";

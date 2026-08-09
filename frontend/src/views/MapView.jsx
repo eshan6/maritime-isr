@@ -19,6 +19,11 @@ import { VesselPanel } from "../components/VesselPanel.jsx";
 // AOI v1 — Arabian Sea / Indian west coast (config.py AOI_V1).
 const AOI = { lonMin: 60, latMin: 5, lonMax: 78, latMax: 25 };
 
+//: Wall-clock seconds the animation spends on one day of corpus time. Slow
+//: enough to follow a vessel's movement across a day rather than watch it
+//: flicker past.
+const SECONDS_PER_DAY = 7;
+
 const BASEMAP = {
   version: 8,
   sources: {
@@ -121,13 +126,19 @@ export function MapView() {
   }, [ready, tracks, clockSec, visible.positions]);
 
   // ---- play/pause ----
+  // Playback runs at a fixed SECONDS_PER_DAY, derived from the window's real
+  // span, so an 8-week corpus and a 6-month one advance at the same readable
+  // pace. Tying the step to a raw fraction instead made a long window blur past.
   useEffect(() => {
-    if (!playing) return;
+    if (!playing || !window_) return;
+    const totalDays = Math.max(1, (window_.end - window_.start) / 86400000);
+    const tickMs = 100;
+    const dt = tickMs / (SECONDS_PER_DAY * 1000 * totalDays); // fraction per tick
     const h = setInterval(() => {
-      setT((x) => (x >= 1 ? 0 : Math.min(1, x + 0.004)));
-    }, 55);
+      setT((x) => (x >= 1 ? 0 : Math.min(1, x + dt)));
+    }, tickMs);
     return () => clearInterval(h);
-  }, [playing]);
+  }, [playing, window_]);
 
   const movingCount = tracks.length;
 

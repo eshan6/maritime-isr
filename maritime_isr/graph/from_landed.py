@@ -130,12 +130,38 @@ def ensure_ontology(store) -> None:
 
 
 def ensure_authorities(store) -> None:
-    store.upsert_node(AUTHORITY_OFAC, "sanctions_authority",
-                      dict(name="OFAC", full_name="US Treasury OFAC SDN list"))
+    """The two designating bodies, with enough detail to render an entity card.
+
+    A node whose entire content is a short code renders as an empty panel in the
+    UI, which is useless to an analyst asking "who says this ship is
+    sanctioned?". Both authorities therefore carry the issuing body, its
+    jurisdiction, the register the designation sits on, and the citation an
+    analyst would follow.
+
+    **The scenario authority is never relabelled as OFAC** (ADR-019). It names
+    the body it stands in for, so the panel answers the question honestly —
+    "a stand-in for the OFAC SDN list; this designation is scenario data" —
+    rather than putting a fabricated finding under a real regulator's name in
+    the same graph as our genuine matches.
+    """
+    store.upsert_node(
+        AUTHORITY_OFAC, "sanctions_authority",
+        dict(name="OFAC",
+             full_name="Office of Foreign Assets Control",
+             issuing_body="U.S. Department of the Treasury",
+             jurisdiction="United States",
+             register="Specially Designated Nationals and Blocked Persons "
+                      "(SDN) List",
+             reference="https://sanctionslist.ofac.treas.gov",
+             fictional=False))
     store.upsert_node(
         AUTHORITY_SCENARIO, "sanctions_authority",
         dict(name="SCENARIO-SDN",
-             full_name="Fictional scenario sanctions list — not a real list",
+             full_name="Scenario designation list (not a real authority)",
+             issuing_body="Maritime ISR scenario generator",
+             jurisdiction="none — synthetic",
+             register="Fictional stand-in for the OFAC SDN list",
+             stands_in_for="U.S. Treasury OFAC SDN",
              fictional=True),
         is_synthetic=True)
 

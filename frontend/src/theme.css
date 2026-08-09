@@ -339,3 +339,38 @@ h1, h2, h3, h4 { margin: 0; font-weight: 600; letter-spacing: -0.01em; }
 /* graph container */
 .graph-canvas { position: absolute; inset: 0; }
 .graph-help { position: absolute; top: 12px; left: 12px; z-index: 4; }
+
+/* zoom controls — explicit, so the view is never lost to a stray wheel gesture */
+.graph-zoom {
+  position: absolute; top: 12px; right: 12px; z-index: 6;
+  display: flex; flex-direction: column; gap: 1px;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); box-shadow: var(--shadow); overflow: hidden;
+}
+.graph-zoom .iconbtn {
+  width: 30px; height: 30px; border-radius: 0; font-size: 15px;
+  display: flex; align-items: center; justify-content: center; color: var(--ink-2);
+}
+.graph-zoom .iconbtn + .iconbtn { border-top: 1px solid var(--border); }
+
+/* entity detail card — one type scale, generous label column */
+.graph-detail {
+  position: absolute; top: 12px; right: 54px; width: 306px; z-index: 5;
+  padding: 14px 16px; max-height: calc(100% - 24px); overflow-y: auto;
+}
+.graph-detail-head {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 8px;
+}
+.graph-detail-head h3 {
+  font-size: 15px; line-height: 1.3; margin-top: 3px; letter-spacing: -0.01em;
+}
+.graph-detail-badges { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.graph-detail-badges:empty { display: none; }
+.kv-detail {
+  grid-template-columns: 104px 1fr; gap: 7px 12px; margin-top: 12px;
+  font-size: 12.5px;
+}
+.kv-detail dt { color: var(--ink-3); font-weight: 500; }
+.kv-detail dd {
+  color: var(--ink); overflow-wrap: anywhere; font-variant-numeric: tabular-nums;
+}
