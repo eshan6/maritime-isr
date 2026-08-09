@@ -1180,3 +1180,70 @@ Recorded, not fixed. It is a design question, not a bug.
 - **Three separate port gazetteers**: `tracks/features.AOI_PORTS` (8 ports, no
   Sikka or Vadinar — where most scenario tanker traffic goes),
   `anomaly/library.HIGH_RISK_PORTS` (2), and `scenario/geography.PORTS` (11).
+
+---
+
+## The corpus was drawn on land — 51.3% of it (2026-08-09)
+
+**Found by looking at the map**, which is the point of Phase 6: vessels sitting
+in the middle of Gujarat, and routes from sea to port that flew straight over the
+Saurashtra peninsula. Every other validator was green — the points were inside
+the AOI, inside the corpus window, at plausible speeds and plausible turn rates.
+
+**Measured:** 51.3% of landed synthetic AIS positions on land at the start;
+**0.039% now** (83 of 211,562), and those are moored hulls alongside the Mumbai
+and JNPT quays, where a berthed ship legitimately is. Worst single track went
+from 26% to 0.33% (one point). Status: **built + verified in sandbox** — this is
+the synthetic corpus on this machine, not a claim about real feeds.
+
+### Four distinct defects, not one
+
+1. **No routing at all.** Every transit was a great-circle line. Fixed with
+   `scenario/searoute.py`: a 17-waypoint coastal corridor, port approach
+   fairways, and a local `_repair` pass that fixes any leg the corridor cannot
+   describe — which is how enclosed water like the Gulf of Kutch is handled
+   without enumerating it.
+2. **Destinations on land.** Routing solves passages between two sea positions;
+   it cannot rescue a target *in* Kachchh. Rendezvous approach starts and
+   departure targets were computed as a bearing and a distance and never checked.
+   Fixed with `nearest_water()` (snap, preferring water the origin can reach) and
+   `seaward_point()` (steam out on a heading as far as there is sea).
+3. **A departure bearing measured from the berth and applied from the
+   anchorage** — two different origins, so the 80 nm ray was a line nothing had
+   checked. It pointed north out of the Gulf of Kutch and sent a fifth of the
+   commercial fleet 150 km into the Rann of Kutch for a day and back.
+4. **`crosses_land` under-sampled.** At 0.5 km spacing against a ~1 km mask, a
+   600 km Mumbai-to-Okha leg clipped the Gujarat coast and was reported clear.
+   Now 0.25 km. **Caught only because the test samples finer than the code does**
+   — a test that asks the module its own question can only confirm the module is
+   self-consistent.
+
+### Six ports were town centres
+
+Sikka, Vadinar, Mundra, Kandla, JNPT and Mumbai reference points were on land.
+Moved into the water beside the terminal. JNPT genuinely sits 0.5 km from land
+inside Mumbai harbour and was **not** moved further — that is where the port is,
+and the 1 km mask cannot resolve a harbour channel.
+
+### One thing deliberately not done
+
+The plan's **origin is never snapped**. Snapping it was the obvious symmetry and
+it was wrong: scenarios continue a vessel from where her last segment ended, at
+the same instant, so a start that jumped even 500 m made her cover it in zero
+time — `add_track` correctly rejected it as a hull doing 29.8 kn. She gets an
+extraction leg to the nearest water instead, preserving both her real position
+and her continuity.
+
+### New permanent checks
+
+- `afloat` validator — per-track land rate, tolerance **3%** (measured: worst
+  track 0.33%, corpus 0.006%, the defect it catches ran 8-26%).
+- `test_every_port_pair_routes_clear_of_land` — all 1,260 ordered pairs of ports,
+  anchorages and corridor waypoints, sampled at 0.2 km. This is the check that
+  would have caught the original defect on day one.
+- Tests for `nearest_water`, `seaward_point`, and the `afloat` rule itself
+  (driven with a known-bad and a known-good track, not asserted on its constant).
+
+**Unchanged by this work:** the `loitering_sensitive` false-positive defect
+(29 alerts on ordinary commercial vessels at Kandla anchorage) is still open and
+still waiting on a decision. Re-measured after the fix: identical.

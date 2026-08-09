@@ -30,7 +30,7 @@ turn-rate limit on small fast craft.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 
 from ..geography import (angular_diff_deg, destination, haversine_m,
@@ -139,6 +139,14 @@ def generate_track(vessel, plan: VoyagePlan, rng, *,
     makes a spoof scenario (C2, A3) a genuine contradiction rather than two
     unrelated fabrications.
     """
+    # **Route transit legs around land, here rather than at every call site.**
+    # Forty scenario functions build legs by hand, and any of them can name a
+    # target whose straight line crosses a coast; doing this in the integrator
+    # means none of them has to remember. A leg whose direct path is already
+    # clear is untouched, so open-water geometry — rendezvous positions, spoofed
+    # tracks, the deliberate misses — is exactly as the scenario wrote it.
+    plan = _route_legs_around_land(plan)
+
     st = _State(plan.start[0], plan.start[1],
                 plan.initial_course_deg if plan.initial_course_deg is not None
                 else 0.0,
@@ -458,3 +466,49 @@ def circle_track(vessel, centre: tuple[float, float], radius_m: float,
         out.append(TrackPoint(t0 + timedelta(seconds=i * STEP_S), la, lo,
                               speed_kn, cog, NAV_UNDERWAY_ENGINE))
     return out
+
+
+def _route_legs_around_land(plan: "VoyagePlan") -> "VoyagePlan":
+    """Expand each transit leg into a sequence that stays at sea.
+
+    Walks the plan keeping track of where the vessel actually is, because a
+    leg's start is the previous leg's end, not the plan's origin. Only transit
+    legs are expanded; a station, moored or fishing leg holds position and has
+    no path to clear.
+
+    Two corrections happen here, in order, and both are needed. Every leg target
+    is first **snapped to water** — a target computed as a bearing and a distance
+    from somewhere else can land inland, and no route reaches a point on land —
+    and only then is the passage between two sea positions **routed around the
+    coast**. Doing this here rather than in the scenarios means the ~40 scenario
+    functions get both for free and cannot individually forget.
+
+    **The plan's origin is never moved.** Snapping it too was the obvious
+    symmetry and it was wrong: several scenarios continue a vessel from where her
+    previous segment ended, at the same instant, and a start that quietly jumped
+    even 500 m made her cover it in zero time — which `ScenarioWorld.add_track`
+    correctly rejected as a hull doing 29.8 knots. A berth is against the land by
+    definition and the 1 km mask cannot resolve a harbour, so an origin on land
+    is usually a real vessel alongside a real quay. She steams off it instead:
+    an extraction leg to the nearest water preserves both the position she was
+    actually in and the continuity of her track.
+    """
+    from ..searoute import nearest_water, sea_route
+
+    start = pos = plan.start
+    legs: list[Leg] = []
+    water = nearest_water(start)
+    if water != start:
+        legs.append(Leg("transit", target=water))
+        pos = water
+    for leg in plan.legs:
+        if leg.target is None:
+            legs.append(leg)
+            continue
+        target = nearest_water(leg.target, reachable_from=pos)
+        if leg.kind == "transit":
+            for wp in sea_route(pos, target):
+                legs.append(Leg("transit", target=wp, speed_kn=leg.speed_kn))
+        legs.append(replace(leg, target=target))
+        pos = target
+    return replace(plan, start=start, legs=legs)

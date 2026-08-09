@@ -34,36 +34,37 @@ M_PER_NM = 1852.0
 # --------------------------------------------------------------------------
 
 #: Ports and terminals, (lat, lon). Real coordinates for real facilities.
+#: Berth/terminal reference for each port, placed **in water**.
+#:
+#: These were previously the city or terminal centroid, which put six of ten on
+#: land and drew vessels sitting in the middle of Gujarat. A berth genuinely is
+#: on the coastline, so a 1 km land mask calls it land; for a system whose whole
+#: output is a map, the reference point has to be the water a ship actually
+#: floats in. Every coordinate below is checked against `global_land_mask` by
+#: `test_geography_is_at_sea`, with a margin, so this cannot regress.
 PORTS: dict[str, tuple[float, float]] = {
     # Gujarat crude/product cluster — the destination for most of the tanker
-    # traffic these scenarios model.
-    "Sikka":     (22.43, 69.84),
-    "Vadinar":   (22.28, 69.73),
-    "Mundra":    (22.74, 69.70),
-    "Kandla":    (22.99, 70.22),
+    # traffic these scenarios model. All inside the Gulf of Kutch.
+    "Sikka":     (22.510, 69.840),
+    "Vadinar":   (22.500, 69.730),
+    "Mundra":    (22.709, 69.728),
+    "Kandla":    (22.911, 70.235),
     # Pakistan
-    "Karachi":   (24.81, 66.97),
+    "Karachi":   (24.766, 66.996),
     # Gwadar's berths sit at ~25.12N, which is **north of AOI v1's 25N edge**.
     # The coordinate here is the seaward approach anchorage, which is inside the
     # box and is where a vessel calling at Gwadar is actually observable to us.
-    # Using the berth put track points at 25.0005N and failed the AOI check —
-    # correctly, because a position outside the AOI is outside everything this
-    # system is scoped to. Moving the reference to the approach is the honest
-    # fix; pretending the berth is in-AOI would not be.
-    "Gwadar":    (24.88, 62.32),
+    "Gwadar":    (24.880, 62.320),
     # Indian west coast
-    "JNPT":      (18.95, 72.95),
-    "Mumbai":    (18.92, 72.83),
-    "Mangalore": (12.92, 74.80),
-    "Kochi":     (9.97, 76.26),
+    "JNPT":      (18.950, 72.950),
+    "Mumbai":    (18.941, 72.890),
+    "Mangalore": (12.894, 74.769),
+    "Kochi":     (9.909, 76.208),
 }
 
-#: Anchorage waiting areas, offset from the berth. A vessel waiting for a berth
-#: sits here, not alongside — the distinction is what makes E5 (floating storage)
-#: and the Mundra berth-congestion decoy geometrically honest.
 ANCHORAGES: dict[str, tuple[float, float]] = {
-    "Sikka":     (22.30, 69.65),
-    "Vadinar":   (22.18, 69.55),
+    "Sikka":     (22.560, 69.700),
+    "Vadinar":   (22.560, 69.600),
     "Mundra":    (22.60, 69.50),
     "Kandla":    (22.80, 70.05),
     "Karachi":   (24.65, 66.80),
