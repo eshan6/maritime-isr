@@ -28,10 +28,24 @@ RESAMPLE_S = 300
 ENC_RES = 7  # ~5 km² cells; 500 m radius always inside cell ∪ 1-ring
 
 # Minimal AOI port layer (WPI fold-in replaces this on the deploy host).
+#: Ports whose approaches suppress a loitering signal — a vessel waiting for a
+#: berth is queueing, not loitering (PORT_RADIUS_KM).
+#:
+#: **Sikka, Vadinar and Gwadar were missing, and the omission was load-bearing.**
+#: Sikka and Vadinar are the Gulf of Kutch crude terminals and take a large share
+#: of this AOI's tanker traffic — and they sit inside the "Kandla pipeline
+#: corridor" sensitive zone in `anomaly/library.py`. With no entry here, every
+#: vessel waiting at either anchorage produced an unsuppressed loiter episode
+#: inside a sensitive geofence, which is an alert. Measured on a corpus with
+#: realistic anchorage traffic: 30 alerts on ordinary merchant vessels, against
+#: 4 on the whole scenario cast. The gap was recorded in STATE.md ("three
+#: separate port gazetteers ... no Sikka or Vadinar, where most scenario tanker
+#: traffic goes") before it had anything to bite on.
 AOI_PORTS = {
     "Mumbai": (18.95, 72.84), "JNPT": (18.95, 72.95), "Kandla": (23.02, 70.22),
     "Mundra": (22.74, 69.70), "Porbandar": (21.63, 69.60),
     "Karachi": (24.79, 66.98), "Kochi": (9.97, 76.24), "Mangalore": (12.92, 74.80),
+    "Sikka": (22.43, 69.84), "Vadinar": (22.28, 69.73), "Gwadar": (24.88, 62.32),
 }
 
 

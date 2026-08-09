@@ -30,6 +30,7 @@ from datetime import timedelta
 
 from .identifiers import mint_sanctions_ref
 from .primitives.org import Organization
+from . import commercial
 from .primitives.vessel import make_vessel, vessel_name
 from .world import T0, ScenarioWorld, week
 
@@ -118,8 +119,8 @@ def build_organizations(world: ScenarioWorld) -> None:
         notes="re-registered successor, same agent and address — D2"))
 
     # Sanctions listings on the FICTIONAL list. Never a real OFAC entry number.
-    for i, oid in enumerate((ORG_DESIGNATED_A, ORG_DESIGNATED_B,
-                             ORG_PHOENIX_OLD)):
+    named_designations = (ORG_DESIGNATED_A, ORG_DESIGNATED_B, ORG_PHOENIX_OLD)
+    for i, oid in enumerate(named_designations):
         org = c.orgs[oid]
         world.add_sanction(dict(
             entry_id=mint_sanctions_ref(i + 1),
@@ -132,6 +133,13 @@ def build_organizations(world: ScenarioWorld) -> None:
             as_of=designation_day,
             target_entity_id=oid,
         ))
+
+    # The commercial fleet's operators, including the designated minority.
+    # Added after the named ones so their sanctions serials never renumber.
+    commercial.build_commercial_orgs(world, designation_day=designation_day)
+    commercial.commercial_sanction_entries(
+        world, designation_day=designation_day,
+        first_serial=len(named_designations) + 1)
 
 
 # --------------------------------------------------------------------------
@@ -300,6 +308,10 @@ def build_vessels(world: ScenarioWorld) -> None:
             notes="fishing-fleet aggregation decoy")
         world.add_vessel(v)
 
+    # The commercial fleet is minted LAST, so growing it never renumbers the
+    # named cast — same seed, same hulls, for every scenario that references one.
+    commercial.build_commercial_vessels(world, used_names)
+
 
 def build_ownership(world: ScenarioWorld) -> None:
     """Wire vessels to companies, and companies to each other.
@@ -366,6 +378,8 @@ def build_ownership(world: ScenarioWorld) -> None:
             notes="D4 — shared agent, no vessel-to-vessel contact")
     for vkey in ("chain_a", "chain_b", "chain_c", "chain_d"):
         own(vkey, ORG_OPAQUE_AE, conf=0.55, notes="A2 chain, common charterer")
+
+    commercial.build_commercial_ownership(world)
 
 
 def build_cast(world: ScenarioWorld) -> None:
