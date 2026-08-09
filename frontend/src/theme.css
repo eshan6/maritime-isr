@@ -51,7 +51,15 @@
 
 * { box-sizing: border-box; }
 
-html, body, #root { height: 100%; margin: 0; }
+/* The shell is a fixed-viewport dashboard: it must never produce DOCUMENT
+ * scrollbars. Without this clip, any child overflowing by even a subpixel —
+ * a canvas rounded up under Windows display scaling, an absolutely positioned
+ * panel a hair past the edge — makes a scrollbar appear, which shrinks the
+ * viewport, which reflows the canvas, which removes the scrollbar, which grows
+ * the viewport… a feedback loop that reads as the whole page flickering.
+ * Scrolling belongs to the inner regions (.scroll-y, .drawer-body, the detail
+ * cards), each of which manages its own. */
+html, body, #root { height: 100%; margin: 0; overflow: hidden; }
 
 body {
   font-family: var(--font);
@@ -86,6 +94,7 @@ h1, h2, h3, h4 { margin: 0; font-weight: 600; letter-spacing: -0.01em; }
   border-bottom: 1px solid var(--border);
   background: var(--panel);
   z-index: 20;
+  overflow: hidden;   /* a narrow window trims the nav rather than widening the page */
 }
 .brand {
   display: flex; align-items: baseline; gap: 9px;
@@ -116,7 +125,7 @@ h1, h2, h3, h4 { margin: 0; font-weight: 600; letter-spacing: -0.01em; }
 .scenario-flag .dot { width: 7px; height: 7px; border-radius: 50%;
   background: var(--violet); }
 
-.main { flex: 1 1 auto; min-height: 0; position: relative; }
+.main { flex: 1 1 auto; min-height: 0; position: relative; overflow: hidden; }
 
 /* ---- generic surfaces ---- */
 .card {

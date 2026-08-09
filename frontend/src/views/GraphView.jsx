@@ -45,12 +45,27 @@ export function GraphView() {
   // Hold label type at a constant on-screen size. Cytoscape font sizes are in
   // model units, so without this the labels grow with the zoom and the view
   // reads as though it uses a dozen different type sizes.
+  //
+  // **Applied as per-element bypasses, and at most once per animation frame.**
+  // The obvious implementation — `cy.style().selector(...).style(...).update()`
+  // — APPENDS a rule to the stylesheet on every call and then forces a full
+  // restyle and redraw of every element. A wheel gesture emits zoom events far
+  // faster than a frame, so that version rebuilt the stylesheet dozens of times
+  // a second and grew it without bound (measured: 16 rules -> 18 after eight
+  // zoom clicks). That is what made the view judder during any interaction.
+  // Bypass styles overwrite in place and never accumulate.
+  const rafRef = useRef(0);
   const syncLabelScale = useCallback((cy) => {
-    const px = LABEL_PX / cy.zoom();
-    cy.style()
-      .selector("node").style({ "font-size": px })
-      .selector("edge").style({ "font-size": px * 0.85 })
-      .update();
+    if (rafRef.current) return;
+    rafRef.current = requestAnimationFrame(() => {
+      rafRef.current = 0;
+      if (cy.destroyed()) return;
+      const px = LABEL_PX / cy.zoom();
+      cy.batch(() => {
+        cy.nodes().style("font-size", px);
+        cy.edges().style("font-size", px * 0.85);
+      });
+    });
   }, []);
 
   useEffect(() => {
@@ -134,7 +149,11 @@ export function GraphView() {
     cy.on("zoom", () => syncLabelScale(cy));
 
     cyRef.current = cy;
-    return () => cy.destroy();
+    return () => {
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      rafRef.current = 0;
+      cy.destroy();
+    };
   }, [syncLabelScale]);
 
   useEffect(() => {
