@@ -206,6 +206,48 @@ def test_loitering_and_port_calls():
     assert fb["n_loiter_episodes"] == 0    # in-port stillness is a berth
 
 
+def test_queueing_at_an_anchorage_is_not_loitering():
+    """A vessel waiting at a designated anchorage is queueing, not loitering.
+
+    The port layer alone did not cover this and the gap was expensive: a berth
+    radius describes the berth, and a ship waiting for that berth is 15-30 km
+    further out at the anchorage. Kandla's is 30 km from the Kandla berth
+    coordinate, so `PORT_RADIUS_KM` at 8 km could never reach it however many
+    ports were listed. Measured before the anchorage layer existed: 29 of 33
+    `loitering_sensitive` alerts were ordinary merchants queueing at Kandla —
+    about 12% precision against ADR-004's 70% floor.
+    """
+    mins = list(range(0, 200, 6))
+    a = _pos(1210, mins, [22.80] * len(mins), [70.05] * len(mins), sog=0.3)
+    fa = extract_features(build_tracks(a)[0][0])
+    assert fa["n_loiter_episodes"] == 0, (
+        "a vessel stopped at the Kandla anchorage was called a loiterer")
+
+
+def test_the_loitering_rule_still_fires_away_from_a_waiting_area():
+    """Suppression is targeted, not a blanket kill.
+
+    This is the other half of the check above, and it is the one that matters:
+    silencing a rule everywhere would also show as "no false positives". A
+    stopped vessel in the middle of the Mumbai High field — 130 km from the
+    nearest anchorage, inside a sensitive geofence — must still be an episode.
+    """
+    from maritime_isr.tracks.features import AOI_ANCHORAGES, AOI_PORTS, _hav_m
+
+    mins = list(range(0, 200, 6))
+    lat, lon = 19.30, 71.30                       # Mumbai High oil field
+    nearest = min(_hav_m(lat, lon, pla, plo)
+                  for pla, plo in [*AOI_PORTS.values(), *AOI_ANCHORAGES.values()])
+    assert nearest > 50_000, (
+        "fixture is meant to be well clear of every port and anchorage")
+
+    a = _pos(1211, mins, [lat] * len(mins), [lon] * len(mins), sog=0.3)
+    fa = extract_features(build_tracks(a)[0][0])
+    assert fa["n_loiter_episodes"] >= 1, (
+        "the anchorage suppression silenced loitering everywhere, not just "
+        "in the waiting areas")
+
+
 # ---------------- publish & eval ----------------
 
 def test_run_track_engine_publishes_with_provenance(tmp_path, monkeypatch):

@@ -18,9 +18,9 @@ from collections import defaultdict
 import numpy as np
 import pandas as pd
 
-from ..config import (ENCOUNTER_MAX_SOG_KN, ENCOUNTER_MIN_MINUTES,
-                      ENCOUNTER_RADIUS_M, LOITER_MAX_SOG_KN, LOITER_MIN_HOURS,
-                      PORT_RADIUS_KM)
+from ..config import (ANCHORAGE_RADIUS_KM, ENCOUNTER_MAX_SOG_KN,
+                      ENCOUNTER_MIN_MINUTES, ENCOUNTER_RADIUS_M,
+                      LOITER_MAX_SOG_KN, LOITER_MIN_HOURS, PORT_RADIUS_KM)
 from .. import h3util as tiling
 from .kalman import epoch_s
 
@@ -46,6 +46,34 @@ AOI_PORTS = {
     "Mundra": (22.74, 69.70), "Porbandar": (21.63, 69.60),
     "Karachi": (24.79, 66.98), "Kochi": (9.97, 76.24), "Mangalore": (12.92, 74.80),
     "Sikka": (22.43, 69.84), "Vadinar": (22.28, 69.73), "Gwadar": (24.88, 62.32),
+}
+
+#: Designated anchorages — the waiting areas offshore of the berths above.
+#:
+#: **Adding the missing ports did not fix the false positives, and this is why.**
+#: A radius drawn on a terminal describes the terminal. A ship waiting for that
+#: terminal is not at it: she is at the designated anchorage 15-30 km further
+#: out, which is the whole point of an anchorage. Kandla's is 30 km from the
+#: Kandla berth coordinate, so `PORT_RADIUS_KM` at 8 km could never have reached
+#: it however many ports were listed — the layer itself was missing, not an
+#: entry in it.
+#:
+#: Measured consequence before this existed: 29 of 33 `loitering_sensitive`
+#: alerts were ordinary merchant vessels queueing at Kandla, inside the "Kandla
+#: pipeline corridor" geofence. That is roughly 12% precision against ADR-004's
+#: stated 70% floor, and ADR-004 is explicit that precision wins even at the
+#: cost of recall.
+#:
+#: These are charted waiting areas, not positions read back from our own corpus.
+#: Deriving them from what the generator happened to produce would be fitting
+#: the detector to the test set; on the deploy host this layer comes from WPI
+#: alongside `AOI_PORTS`.
+AOI_ANCHORAGES = {
+    "Sikka": (22.560, 69.700), "Vadinar": (22.560, 69.600),
+    "Mundra": (22.600, 69.500), "Kandla": (22.800, 70.050),
+    "Karachi": (24.650, 66.800), "Gwadar": (24.780, 62.300),
+    "JNPT": (18.800, 72.750), "Mangalore": (12.800, 74.650),
+    "Kochi": (9.830, 76.100),
 }
 
 
@@ -156,12 +184,17 @@ def extract_features(track) -> dict:
                      np.abs((np.diff(cog) + 180) % 360 - 180)
                      / np.maximum(np.diff(t) / 60, 1e-6))) if len(t) > 1 else 0.0)
 
-    # loitering: sustained low speed outside port radius
+    # Loitering: sustained low speed that is not simply waiting for a berth.
+    # Both layers are needed — a berth radius does not reach the anchorage that
+    # serves it, which is where a queueing vessel actually stops.
     episodes, i = [], 0
-    near_port = np.array([min(_hav_m(la, lo, pla, plo)
-                              for pla, plo in AOI_PORTS.values()) < PORT_RADIUS_KM * 1000
-                          for la, lo in zip(pts.lat, pts.lon)])
-    slow = (sog < LOITER_MAX_SOG_KN) & ~near_port
+    waiting = np.array([
+        min(_hav_m(la, lo, pla, plo)
+            for pla, plo in AOI_PORTS.values()) < PORT_RADIUS_KM * 1000
+        or min(_hav_m(la, lo, ala, alo)
+               for ala, alo in AOI_ANCHORAGES.values()) < ANCHORAGE_RADIUS_KM * 1000
+        for la, lo in zip(pts.lat, pts.lon)])
+    slow = (sog < LOITER_MAX_SOG_KN) & ~waiting
     while i < len(slow):
         if slow[i]:
             j = i

@@ -1247,3 +1247,77 @@ and her continuity.
 **Unchanged by this work:** the `loitering_sensitive` false-positive defect
 (29 alerts on ordinary commercial vessels at Kandla anchorage) is still open and
 still waiting on a decision. Re-measured after the fix: identical.
+
+---
+
+## The loitering rule was a Kandla anchorage detector (2026-08-09)
+
+`loitering_sensitive` fired **33 times; 29 were ordinary merchant vessels**
+queueing at the Kandla anchorage, which sits inside the "Kandla pipeline
+corridor" geofence. About **12% precision** against ADR-004's stated 70% floor.
+
+**Fixed.** Background false positives: **29 → 0**. Status: built + verified in
+sandbox, on the synthetic corpus.
+
+### Why adding the missing ports did not fix it
+
+The previous session added Sikka, Vadinar and Gwadar to `AOI_PORTS` expecting
+that to suppress these, and it did nothing. The reason is a layer that did not
+exist rather than an entry that was missing: **`PORT_RADIUS_KM` is drawn around
+a terminal, and a ship waiting for that terminal is not at it.** She is at the
+designated anchorage 15-30 km further out — that is what an anchorage is for.
+Kandla's anchorage is 30 km from the Kandla berth coordinate, so an 8 km radius
+could never have reached it however many ports were listed.
+
+Added `AOI_ANCHORAGES` (9 charted waiting areas) and `ANCHORAGE_RADIUS_KM = 10`.
+The radius is the size of a designated anchorage area, **not** a number tuned
+until the alerts went away — sizing it on the observed false positives would be
+fitting the detector to this corpus.
+
+### The recall cost was illusory, and the earlier estimate was wrong
+
+Reported before this fix: *"recall 14%, and suppressing the anchorage drops it
+to ~5%."* The 14% was inflated and the trade never existed.
+
+The two detections it removes are **B4** and **D1**, both credited via
+`loitering_sensitive`. Neither scenario is about loitering:
+
+| scenario | what it is | `expected_anomaly_types` |
+|---|---|---|
+| B4 | zombie IMO — hull recorded demolished 2019-11 | `identity_then_anomaly` |
+| D1 | ownership convergence two hops up | `port_risk_propagation` |
+
+Both fired loitering because their vessels made an ordinary port call at Kandla
+and waited at the anchorage — **the same false positive as the other 29**. The
+harness was already saying so and it was not read carefully enough: *"of 3
+detections, 1 came from the rule the scenario expected."*
+
+**Genuine recall was 5% before and is 5% after.** One real detection, B5 via
+`ais_spoofing`, which is B5's declared type. What changed is that the number is
+now honest.
+
+### The rule now fires zero times, and that is the finding
+
+`loitering_sensitive` contributes nothing to this corpus. **No scenario in the
+catalogue loiters inside a sensitive geofence away from a waiting area**, so the
+rule had nothing to find and its 32 alerts were all anchorage queueing. It was
+not a detector that was mistuned; it was a detector pointed at the wrong thing.
+
+Two tests now pin both halves, because a rule silenced everywhere would also
+show as "no false positives":
+- `test_queueing_at_an_anchorage_is_not_loitering` — stopped at Kandla anchorage,
+  no episode.
+- `test_the_loitering_rule_still_fires_away_from_a_waiting_area` — stopped in the
+  Mumbai High field, 130 km from the nearest waiting area, still an episode.
+
+### Open, not fixed
+
+- **Scenario-level precision/recall still counts an alert of the wrong type as a
+  detection.** `ScenarioOutcome.type_match` exists and the summary prints the
+  count, but `outcome` and the family P/R table do not use it — which is how B4
+  and D1 read as true positives for four sessions. Fixing this changes published
+  numbers, so it is flagged rather than changed quietly.
+- **Nothing exercises the geofence layer.** `SENSITIVE_ZONES` is a four-entry
+  seed and no scenario is built against it. Either the catalogue needs a
+  sensitive-zone loitering scenario, or the rule is not earning its place in the
+  demo.
