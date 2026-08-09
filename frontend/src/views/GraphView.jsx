@@ -11,9 +11,7 @@
 //   * Colour follows semantic FAMILIES, not one hue per type: investigated
 //     entities (vessel, company, person) share a blue-to-navy family, context
 //     (flag, port, identity) recedes to warm grey, and red means risk and only
-//     risk. Scenario data is not marked on the canvas — the nav pill declares it
-//     globally and the detail panel badges it per entity — so the only ring on a
-//     node means "sanctioned".
+//     risk. The only ring on a node means "sanctioned".
 //   * Node and edge labels are on by DEFAULT. Hovering fades everything outside
 //     the hovered neighbourhood; it never reveals text that was hidden.
 //   * Zoom is bounded so the graph can never be lost off-scale, with explicit
@@ -260,7 +258,7 @@ export function GraphView() {
           <option value="">Choose a vessel…</option>
           {vessels.map((v) => (
             <option key={v.id} value={v.id}>
-              {v.name || shortId(v.id)}{v.is_synthetic ? " (scenario)" : ""}
+              {v.name || shortId(v.id)}
             </option>
           ))}
         </select>
@@ -334,7 +332,6 @@ function DetailCard({ info, onClose }) {
       <div className="graph-detail-badges">
         {d.sanctioned === 1 && isNode && d.kind !== "sanctions_authority" &&
           <span className="badge badge-finding">SANCTIONED</span>}
-        {d.synthetic === 1 && <span className="badge badge-scenario">SCENARIO</span>}
       </div>
       <dl className="kv kv-detail">
         {rows.slice(0, 10).map(([k, v]) => (

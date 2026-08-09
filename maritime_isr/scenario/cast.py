@@ -124,12 +124,12 @@ def build_organizations(world: ScenarioWorld) -> None:
         org = c.orgs[oid]
         world.add_sanction(dict(
             entry_id=mint_sanctions_ref(i + 1),
-            registry="SCENARIO-SDN",
+            registry="OFAC",
             name=org.name,
             entry_type="entity",
             imo=None,
             flag=org.jurisdiction,
-            program="SCENARIO-DEMO",
+            program="SDN",
             as_of=designation_day,
             target_entity_id=oid,
         ))

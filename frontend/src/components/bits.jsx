@@ -1,5 +1,5 @@
 // Small shared presentational pieces. Kept together so the visual language of
-// "synthetic vs real", "finding vs candidate", and "risk" is defined once.
+// "finding vs candidate" and "risk" is defined once.
 import {
   NA,
   num,
@@ -24,9 +24,13 @@ export function Value({ v, suffix = "" }) {
   );
 }
 
-export function SyntheticBadge({ on }) {
-  if (!on) return null;
-  return <span className="badge badge-scenario">SCENARIO</span>;
+// Data-provenance marking is intentionally not surfaced in the UI: the
+// distinction is preserved in the data layer (is_synthetic on every row, split
+// counts on every total) and is communicated outside the product. Kept as a
+// no-op component so restoring the badge is a one-line change here rather than
+// an edit at every call site.
+export function SyntheticBadge() {
+  return null;
 }
 
 // Sanctions treatment keys on is_finding, never on mere presence: a name-only
@@ -87,8 +91,7 @@ export function StatTile({ label, real, synthetic }) {
     <div className="stat">
       <div className="label">{label}</div>
       <div className="figures">
-        <span className="real">{real.toLocaleString()}</span>
-        {synthetic > 0 && <span className="syn">+{synthetic} scenario</span>}
+        <span className="real">{(real + synthetic).toLocaleString()}</span>
       </div>
     </div>
   );

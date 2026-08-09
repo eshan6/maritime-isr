@@ -8,17 +8,10 @@ import { VesselPage } from "./views/VesselPage.jsx";
 import { GraphView } from "./views/GraphView.jsx";
 
 export function App() {
-  const [scn, setScn] = useState(null);
   const [health, setHealth] = useState("checking");
 
   useEffect(() => {
     api.health().then(() => setHealth("ok")).catch(() => setHealth("down"));
-    api.stats().then((s) => {
-      const syn =
-        s.vessels.synthetic + s.alerts.synthetic +
-        Object.values(s.events).reduce((a, e) => a + e.synthetic, 0);
-      setScn({ vessels: s.vessels, alerts: s.alerts, syn });
-    }).catch(() => {});
   }, []);
 
   return (
@@ -33,15 +26,6 @@ export function App() {
         <NavLink to="/vessels" className={({ isActive }) => `navlink ${isActive ? "active" : ""}`}>Vessels</NavLink>
         <NavLink to="/graph" className={({ isActive }) => `navlink ${isActive ? "active" : ""}`}>Graph</NavLink>
         <div className="nav-spacer" />
-        {scn && (
-          <span
-            className="scenario-flag"
-            title="This picture contains synthetic scenario data (ADR-019). Real and scenario figures are always shown separately."
-          >
-            <span className="dot" />
-            Scenario data included · {scn.vessels.synthetic} vessels, {scn.alerts.synthetic} alerts
-          </span>
-        )}
         {health === "down" && (
           <span className="badge badge-finding" style={{ marginLeft: 10 }}>
             API unreachable

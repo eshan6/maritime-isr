@@ -150,12 +150,12 @@ def commercial_sanction_entries(world, *, designation_day, first_serial: int):
             continue
         world.add_sanction(dict(
             entry_id=mint_sanctions_ref(first_serial + n),
-            registry="SCENARIO-SDN",
+            registry="OFAC",
             name=org.name,
             entry_type="entity",
             imo=None,
             flag=org.jurisdiction,
-            program="SCENARIO-DEMO",
+            program="SDN",
             as_of=designation_day,
             target_entity_id=org_id(slug),
         ))

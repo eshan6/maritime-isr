@@ -1,29 +1,25 @@
-// Alerts — a short, high-signal list, NOT a busy queue. There are four alerts on
-// this corpus and that is by design; the depth lives in the evidence chains and
-// the entity pages. Each alert renders its evidence as a readable sequence of
+// Alerts — a short, high-signal list, NOT a busy queue. A near-empty queue is by
+// design; the depth lives in the evidence chains and the entity pages. Each alert renders its evidence as a readable sequence of
 // hops (edge type, confidence, time window) and carries disposition buttons
 // wired to persist — the analyst feedback loop.
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api.js";
 import { anomalyLabel, edgeTypeLabel, fmtDateTime, num, ANOMALY_META } from "../lib/format.js";
-import { SyntheticBadge } from "../components/bits.jsx";
 
 export function AlertsView() {
   const [alerts, setAlerts] = useState(null);
   const [count, setCount] = useState({ real: 0, synthetic: 0 });
-  const [filter, setFilter] = useState("all"); // all | real | synthetic
   const [busy, setBusy] = useState(null);
   const nav = useNavigate();
 
   function load() {
-    const params = filter === "all" ? {} : { synthetic: filter === "synthetic" };
-    api.alerts(params).then((r) => {
+    api.alerts({}).then((r) => {
       setAlerts(r.items);
       setCount(r.count);
     });
   }
-  useEffect(load, [filter]);
+  useEffect(load, []);
 
   async function dispose(id, label) {
     setBusy(id + label);
@@ -41,29 +37,18 @@ export function AlertsView() {
         <div>
           <div className="eyebrow">Alert queue</div>
           <div className="muted" style={{ fontSize: 12.5 }}>
-            {count.real} real · {count.synthetic} scenario. Deliberately short — high precision over volume.
+            {count.real + count.synthetic} open. Deliberately short — high precision over volume.
           </div>
         </div>
         <div className="nav-spacer" />
-        <div className="btn-group">
-          {["all", "real", "synthetic"].map((f) => (
-            <button
-              key={f}
-              className={`btn btn-sm ${filter === f ? "active" : ""}`}
-              onClick={() => setFilter(f)}
-            >
-              {f === "all" ? "All" : f === "real" ? "Real" : "Scenario"}
-            </button>
-          ))}
-        </div>
       </div>
 
       <div className="pad" style={{ maxWidth: 860 }}>
         {!alerts && <div className="empty">Loading…</div>}
         {alerts && alerts.length === 0 && (
           <div className="notebar">
-            No alerts for this filter. On the real corpus the queue is near-empty by
-            design — the value is in the entity pages, not the count.
+            No alerts. A near-empty queue is by design — the value is in the entity
+            pages, not the count.
           </div>
         )}
         {alerts?.map((a) => (
@@ -78,11 +63,10 @@ function AlertCard({ a, onDispose, busy, nav }) {
   const tone = ANOMALY_META[a.anomaly_type]?.tone || "neutral";
   const toneColor = { finding: "var(--red)", candidate: "var(--amber)", neutral: "var(--ink-2)" }[tone];
   return (
-    <div className={`card ${a.is_synthetic ? "syn-row" : ""}`} style={{ padding: 16, marginBottom: 12 }}>
+    <div className="card" style={{ padding: 16, marginBottom: 12 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
         <span style={{ width: 9, height: 9, borderRadius: "50%", background: toneColor }} />
         <h3 style={{ fontSize: 15 }}>{anomalyLabel(a.anomaly_type)}</h3>
-        <SyntheticBadge on={a.is_synthetic} />
         <span className="muted mono" style={{ fontSize: 12 }}>
           conf {num(a.confidence, 2)}
           {a.score != null ? ` · score ${num(a.score, 2)}` : ""}

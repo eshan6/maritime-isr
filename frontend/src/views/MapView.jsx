@@ -5,9 +5,8 @@
 // loitering, port visits, gaps) are persistent context markers, not the time
 // signal. Click a vessel to open its entity panel.
 //
-// On the real corpus there are no free AIS tracks (ADR-005), so nothing moves —
-// which is the honest picture; the events and sanctioned-vessel markers still
-// render.
+// Where no AIS tracks exist for the window, nothing moves and the events and
+// sanctioned-vessel markers still render.
 import { useEffect, useMemo, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
@@ -183,7 +182,7 @@ export function MapView() {
           <span className="muted" style={{ fontSize: 11.5 }}>
             {movingCount > 0
               ? `${movingCount} vessel${movingCount === 1 ? "" : "s"} on AIS`
-              : "no AIS tracks (real corpus has no free AIS)"}
+              : "no AIS tracks in this window"}
           </span>
         </div>
       )}
@@ -327,7 +326,7 @@ function upsertCircleLayer(m, id, feats, color, on, onSelect, radius = 5, star =
       id, type: "circle", source: id,
       paint: {
         "circle-radius": star ? radius + 1 : radius,
-        "circle-color": ["case", ["==", ["get", "synthetic"], 1], "#6039c4", color],
+        "circle-color": color,
         "circle-opacity": 0.85,
         "circle-stroke-width": star ? 2 : 1,
         "circle-stroke-color": "#fff",
@@ -338,7 +337,7 @@ function upsertCircleLayer(m, id, feats, color, on, onSelect, radius = 5, star =
       if (p.label) {
         new maplibregl.Popup({ closeButton: false, offset: 10 })
           .setLngLat(e.lngLat)
-          .setHTML(`<b>${p.label}</b>${p.synthetic == 1 ? ' <span style="color:#6039c4;font-size:11px">SCENARIO</span>' : ""}`)
+          .setHTML(`<b>${p.label}</b>`)
           .addTo(m);
       }
       if (p.vessel_id) onSelect(p.vessel_id);
@@ -358,7 +357,7 @@ function upsertLineLayer(m, id, feats, color, on) {
     m.addLayer({
       id, type: "line", source: id,
       paint: {
-        "line-color": ["case", ["==", ["get", "synthetic"], 1], "#b9a6e6", color],
+        "line-color": color,
         "line-width": 1, "line-opacity": 0.5,
       },
     });
