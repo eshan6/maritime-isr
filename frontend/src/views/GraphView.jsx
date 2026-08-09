@@ -8,9 +8,14 @@
 //   * Labels are held at a constant SCREEN size by dividing the model font size
 //     by the zoom level, so type does not balloon as you zoom in. One size, one
 //     weight, one colour — the hierarchy comes from node size, not type size.
-//   * No dashed outlines anywhere. Scenario nodes carry a solid violet ring and
-//     a SCENARIO badge in the detail panel; sanctioned entities a solid red ring
-//     (which wins, being the stronger claim).
+//   * Colour follows semantic FAMILIES, not one hue per type: investigated
+//     entities (vessel, company, person) share a blue-to-navy family, context
+//     (flag, port, identity) recedes to warm grey, and red means risk and only
+//     risk. Scenario data is not marked on the canvas — the nav pill declares it
+//     globally and the detail panel badges it per entity — so the only ring on a
+//     node means "sanctioned".
+//   * Node and edge labels are on by DEFAULT. Hovering fades everything outside
+//     the hovered neighbourhood; it never reveals text that was hidden.
 //   * Zoom is bounded so the graph can never be lost off-scale, with explicit
 //     zoom and fit controls rather than wheel-only.
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -18,14 +23,18 @@ import { useSearchParams } from "react-router-dom";
 import cytoscape from "cytoscape";
 import { api } from "../api.js";
 import {
-  edgeCategoryColor, edgeTypeLabel, fmtDate, humanKey, isHubType, nodeTypeColor,
+  edgeCategoryColor, edgeTypeLabel, fmtDate, humanKey, nodeTypeColor,
   nodeTypeSize, num, shortId,
 } from "../lib/format.js";
 
 //: Label size in CSS pixels, held constant across zoom levels.
 const LABEL_PX = 11;
-const MIN_ZOOM = 0.35;
-const MAX_ZOOM = 2.5;
+// Zoom: cytoscape's default wheelSensitivity is 1, and the earlier 0.45 made
+// every wheel notch and trackpad pinch feel like wading. Back to full speed,
+// with a wider range so one gesture covers useful ground — the fit control is
+// what recovers the view, so a bounded-but-generous range is safe.
+const MIN_ZOOM = 0.25;
+const MAX_ZOOM = 4;
 
 export function GraphView() {
   const elRef = useRef(null);
@@ -73,7 +82,7 @@ export function GraphView() {
       container: elRef.current,
       minZoom: MIN_ZOOM,
       maxZoom: MAX_ZOOM,
-      wheelSensitivity: 0.45,
+      wheelSensitivity: 1,
       style: [
         {
           selector: "node",
@@ -83,29 +92,37 @@ export function GraphView() {
             height: (n) => n.data("size") * 2,
             "border-width": 1.5,
             "border-color": "#ffffff",
-            label: (n) => (n.data("hub") ? n.data("label") : ""),
+            // Every node is labelled by default — the graph should be readable
+            // at rest, not only under the cursor. Hovering fades everything
+            // outside the hovered neighbourhood rather than revealing new text.
+            label: "data(label)",
             color: "#1f2a36",
             "font-size": LABEL_PX,
             "font-family": "Inter, system-ui, sans-serif",
             "font-weight": 500,
             "text-valign": "bottom",
             "text-margin-y": 4,
-            "text-wrap": "ellipsis",
-            "text-max-width": 130,
+            // Wrap rather than truncate: a company name is the thing an analyst
+            // is reading the graph FOR, and "Leadenhall Bulk Carri…" answers
+            // nothing. Two short lines beat one clipped one.
+            "text-wrap": "wrap",
+            "text-max-width": 128,
             "text-outline-color": "#ffffff",
             "text-outline-width": 2.5,
             "min-zoomed-font-size": 6,
           },
         },
-        // Solid rings only — a scenario marker, then sanctions, which wins.
-        { selector: "node[synthetic = 1]", style: { "border-color": "#6039c4", "border-width": 2.5 } },
+        // No scenario marking on the canvas: the nav pill already declares that
+        // the picture contains scenario data, and the detail panel carries a
+        // SCENARIO badge per entity, so the traceability ADR-019 asks for is
+        // kept without a second ring competing with the sanctions one.
         { selector: "node[sanctioned = 1]", style: { "border-color": "#b0221b", "border-width": 3 } },
         { selector: "node[kind = 'organization']", style: { shape: "round-rectangle" } },
         { selector: "node[kind = 'sanctions_authority']", style: { shape: "diamond" } },
         { selector: "node.seed", style: { "border-color": "#1a5fb4", "border-width": 3.5 } },
         { selector: "node:selected", style: { "border-color": "#1a5fb4", "border-width": 4 } },
-        { selector: "node.faded", style: { opacity: 0.15, "text-opacity": 0 } },
-        { selector: "node.hl", style: { label: "data(label)", "z-index": 20 } },
+        { selector: "node.faded", style: { opacity: 0.12, "text-opacity": 0 } },
+        { selector: "node.hl", style: { "z-index": 20 } },
         {
           selector: "edge",
           style: {
@@ -116,7 +133,9 @@ export function GraphView() {
             "arrow-scale": 0.7,
             "curve-style": "bezier",
             opacity: 0.65,
-            label: "",
+            // Edge relationships are labelled at rest too, so the ownership
+            // chain can be read without hovering every link.
+            label: "data(label)",
             "font-size": LABEL_PX * 0.85,
             "font-family": "Inter, system-ui, sans-serif",
             color: "#5a6b7b",
@@ -126,8 +145,8 @@ export function GraphView() {
             "text-background-padding": 2,
           },
         },
-        { selector: "edge.faded", style: { opacity: 0.05 } },
-        { selector: "edge.hl", style: { label: (e) => e.data("label"), width: 2.4, opacity: 1, "z-index": 19 } },
+        { selector: "edge.faded", style: { opacity: 0.05, "text-opacity": 0 } },
+        { selector: "edge.hl", style: { width: 2.4, opacity: 1, "z-index": 19 } },
       ],
     });
 
@@ -181,7 +200,6 @@ export function GraphView() {
           data: {
             id: n.id, label: n.label || shortId(n.id), kind: n.node_type,
             color: nodeTypeColor(n.node_type), size: nodeTypeSize(n.node_type),
-            hub: isHubType(n.node_type) ? 1 : 0,
             synthetic: n.is_synthetic ? 1 : 0,
             sanctioned: designated ? 1 : 0,
             props: n.props,
@@ -255,21 +273,32 @@ export function GraphView() {
           Click a vessel or company to expand; hover to isolate.
         </p>
         {status && <p className="muted" style={{ fontSize: 11.5, marginTop: 6 }}>{status}</p>}
+        {/* Legend grouped by family, so the colour system explains itself. */}
         <div style={{ marginTop: 10, borderTop: "1px solid var(--border)", paddingTop: 8 }}>
-          {[["vessel", "vessel"], ["organization", "company"], ["sanctions_authority", "sanctions authority"],
-            ["flag_state", "flag"], ["port", "port"], ["identity", "identity"], ["ais_gap", "AIS gap"]].map(([k, lbl]) => (
+          <div className="legend-group">Entities</div>
+          {[["vessel", "vessel"], ["organization", "company"]].map(([k, lbl]) => (
             <div className="legendline" key={k}>
               <span className="layer-swatch" style={{ background: nodeTypeColor(k), borderRadius: k === "organization" ? 2 : "50%" }} />
+              {lbl}
+            </div>
+          ))}
+          <div className="legend-group">Context</div>
+          {[["flag_state", "flag"], ["port", "port"], ["identity", "identity"]].map(([k, lbl]) => (
+            <div className="legendline" key={k}>
+              <span className="layer-swatch" style={{ background: nodeTypeColor(k), borderRadius: "50%" }} />
+              {lbl}
+            </div>
+          ))}
+          <div className="legend-group">Risk</div>
+          {[["sanctions_authority", "sanctions authority"], ["ais_gap", "AIS gap"]].map(([k, lbl]) => (
+            <div className="legendline" key={k}>
+              <span className="layer-swatch" style={{ background: nodeTypeColor(k), borderRadius: k === "sanctions_authority" ? 2 : "50%" }} />
               {lbl}
             </div>
           ))}
           <div className="legendline">
             <span className="layer-swatch" style={{ border: "2.5px solid #b0221b", borderRadius: "50%", background: "#fff" }} />
             sanctioned entity
-          </div>
-          <div className="legendline">
-            <span className="layer-swatch" style={{ border: "2.5px solid #6039c4", borderRadius: "50%", background: "#fff" }} />
-            scenario data
           </div>
         </div>
       </div>
@@ -350,12 +379,15 @@ function runLayout(cy) {
     name: "cose",
     animate: false,
     padding: 50,
-    nodeRepulsion: 16000,
-    idealEdgeLength: 100,
-    edgeElasticity: 120,
-    gravity: 0.5,
-    componentSpacing: 130,
-    nodeOverlap: 16,
+    // Lay out around the LABELS, not the dots. Every node is labelled at rest,
+    // so a layout that only avoids circle overlap still stacks text on text.
+    nodeDimensionsIncludeLabels: true,
+    nodeRepulsion: 26000,
+    idealEdgeLength: 150,
+    edgeElasticity: 100,
+    gravity: 0.35,
+    componentSpacing: 170,
+    nodeOverlap: 28,
     numIter: 1500,
     randomize: false,
     fit: false,

@@ -87,19 +87,32 @@ export function edgeTypeLabel(t) {
   return m[t] || (t || "").replace(/[-_]/g, " ");
 }
 
+// Node colour by SEMANTIC FAMILY, not by "one hue per type".
+//
+//   Investigated entities — vessel, company, person — share a blue-to-navy
+//   family at different depths, so an ownership chain reads as one connected
+//   thing rather than a row of unrelated colours.
+//   Context you read past — flag, port, identity — drops to warm grey and
+//   recedes, because it is shared by hundreds of unrelated hulls and carries
+//   no signal on its own.
+//   Risk — sanctions authority, AIS gap — is the only red on the canvas, so a
+//   red mark always means the same thing.
 export function nodeTypeColor(t) {
   return (
     {
+      // entity family (blue → navy, deepening with corporate distance)
       vessel: "#1a5fb4",
-      identity: "#9aa6b2",
-      flag_state: "#1f7a4d",
-      port: "#9a6300",
-      organization: "#0d7a6f", // teal — a hub type, distinct from vessel-blue
-      person: "#0d7a6f",
+      organization: "#123a6e", // navy — one step deeper than a hull
+      person: "#2c4f80",
+      // context family (warm grey, deliberately quiet)
+      flag_state: "#9aa3ad",
+      port: "#8b9099",
+      identity: "#b6bcc4",
+      zone: "#8b9099",
+      // risk family (the only reds)
       sanctions_authority: "#b0221b",
       ais_gap: "#c2554d",
-      zone: "#9a6300",
-    }[t] || "#8996a3"
+    }[t] || "#a8b0b8"
   );
 }
 
@@ -109,20 +122,17 @@ export function nodeTypeSize(t) {
     flag_state: 9, port: 9, ais_gap: 9, identity: 6 }[t] || 8;
 }
 
-// Edge category → colour, so ownership structure reads without labels.
+// Edge colour follows the same families: ownership is the entity-blue that
+// binds hulls to companies, sanctions is red, structural links are grey and
+// recede. Ownership is the only saturated line on a clean graph, so the chain
+// is what the eye follows.
 const OWNERSHIP_EDGES = new Set(["owned-by", "operated-by"]);
 const SANCTION_EDGES = new Set(["sanctioned-under"]);
 export function edgeCategoryColor(t) {
-  if (OWNERSHIP_EDGES.has(t)) return "#5a4bbd"; // ownership — indigo
+  if (OWNERSHIP_EDGES.has(t)) return "#1a5fb4"; // ownership — entity blue
   if (SANCTION_EDGES.has(t)) return "#b0221b"; // sanctions — red
   if (t === "met-with") return "#c2554d"; // vessel-to-vessel encounter
-  return "#c7cfd8"; // structural (flag, port, identity) — quiet grey
-}
-
-// A hub type always shows its label; leaves label on hover/selection only.
-export function isHubType(t) {
-  return t === "vessel" || t === "organization" || t === "person" ||
-    t === "sanctions_authority";
+  return "#cdd4dc"; // structural (flag, port, identity) — quiet grey
 }
 
 // A props key rendered as a reader-facing label: snake_case -> "Sentence case",
