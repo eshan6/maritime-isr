@@ -248,11 +248,21 @@ def test_decoys_and_true_positives_use_the_same_encounter_primitive(world):
     assert len(seps) >= 3
     vals = [v for v in seps.values() if v]
     assert min(vals) > 0
-    # All within one order of magnitude: no encounter is generated at a
-    # different scale from the others.
-    assert max(vals) / min(vals) < 10.0, (
-        f"encounter separations span {min(vals):.0f}-{max(vals):.0f} m; one "
-        f"family is being generated differently from another")
+    # The claim is that every encounter is a ship-to-ship rendezvous from the
+    # same primitive, so each separation has to be a plausible one: lashed
+    # alongside at the low end, a loose standoff at the high end. Stated as an
+    # absolute band rather than as a max/min ratio, because the ratio measures
+    # the luck of the draw — adding vessels elsewhere in the corpus shifts the
+    # RNG stream, and a spread of 19-202 m (ratio 10.7) tripped a 10x bound
+    # while every value in it was an ordinary rendezvous. An absolute band is
+    # what "same scale" actually means and it does not move when the stream does.
+    assert min(vals) >= 5.0 and max(vals) <= 1000.0, (
+        f"encounter separations span {min(vals):.0f}-{max(vals):.0f} m; that is "
+        f"outside the range of a ship-to-ship rendezvous, so one family is "
+        f"being generated differently from another")
+    # A family generated at, say, kilometre scale would still show up here.
+    assert max(vals) / min(vals) < 25.0, (
+        f"encounter separations span {min(vals):.0f}-{max(vals):.0f} m")
 
 
 # --------------------------------------------------------------------------
@@ -689,3 +699,205 @@ def test_measured_tails_are_truncated_with_a_stated_reason():
         "the tail was clamped without saying so — a silent cap is how a data "
         "artefact becomes an unexamined assumption")
     assert "MEASURED" in param.describe() and "truncated" in param.describe()
+
+
+# --------------------------------------------------------------------------
+# geography and routing must keep vessels in water
+# --------------------------------------------------------------------------
+
+def test_geography_is_at_sea():
+    """Every port and anchorage reference point floats.
+
+    Six of ten port coordinates were town centres, which drew vessels sitting in
+    the middle of Gujarat. A berth is on the coastline and a 1 km mask calls that
+    land, so the reference point has to be the water beside it.
+    """
+    globe = pytest.importorskip("global_land_mask").globe
+    from maritime_isr.scenario.geography import ANCHORAGES, PORTS
+
+    on_land = [(n, p) for n, p in {**PORTS, **ANCHORAGES}.items()
+               if globe.is_land(*p)]
+    assert not on_land, f"port/anchorage reference points on land: {on_land}"
+
+
+def test_searoute_is_clear_of_land():
+    """Every corridor waypoint, and every leg between neighbours, is at sea.
+
+    This is what makes the corridor trustworthy: a waypoint nudged onto a
+    sandbank, or a leg that clips a headland, fails here rather than silently
+    drawing ships across a peninsula again.
+    """
+    globe = pytest.importorskip("global_land_mask").globe
+    import numpy as np
+
+    from maritime_isr.scenario.searoute import CORRIDOR
+
+    for name, la, lo in CORRIDOR:
+        assert not globe.is_land(la, lo), f"corridor waypoint {name} is on land"
+
+    for (na, la1, lo1), (nb, la2, lo2) in zip(CORRIDOR, CORRIDOR[1:]):
+        lat = np.linspace(la1, la2, 200)
+        lon = np.linspace(lo1, lo2, 200)
+        hits = int(globe.is_land(lat, lon).sum())
+        assert hits == 0, f"corridor leg {na} -> {nb} crosses land at {hits} points"
+
+
+def _leg_land_hits(globe, p, q):
+    """Land samples on the straight line p->q, sampled densely and independently.
+
+    Deliberately does *not* call `searoute.crosses_land`: a test that asks the
+    module its own question can only ever confirm the module is self-consistent.
+    Sampling is proportional to length here for the same reason it is there, and
+    deliberately **finer** than the module's own: a test that samples no better
+    than the code it checks cannot catch under-sampling, which is the exact bug
+    that let a 600 km leg clip the Gujarat coast and be reported clear.
+    """
+    import numpy as np
+
+    km = ((p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2) ** 0.5 * 111.0
+    n = max(200, min(20000, int(km / 0.2) + 2))
+    return int(globe.is_land(np.linspace(p[0], q[0], n),
+                             np.linspace(p[1], q[1], n)).sum())
+
+
+def test_sea_route_between_ports_avoids_land():
+    """A Gulf of Kutch to west-coast passage routes around Saurashtra."""
+    globe = pytest.importorskip("global_land_mask").globe
+
+    from maritime_isr.scenario.geography import PORTS
+    from maritime_isr.scenario.searoute import sea_route
+
+    a, b = PORTS["Kandla"], PORTS["Mangalore"]
+    legs = [a, *sea_route(a, b), b]
+    assert len(legs) > 2, "a Kandla-Mangalore passage must be routed, not direct"
+    for p, q in zip(legs, legs[1:]):
+        assert _leg_land_hits(globe, p, q) == 0, (
+            f"routed leg {p} -> {q} still crosses land")
+
+
+def test_every_port_pair_routes_clear_of_land():
+    """**Every** ordered pair of named places routes entirely by sea.
+
+    The single-pair test above proves the machinery runs; this proves it covers
+    the map. Both are kept, because a failure here wants the specific pair
+    named and a failure there wants the mechanism blamed.
+
+    This is the check that would have caught the original defect on the day it
+    was written, and it is the one that keeps catching regressions: the
+    corridor's join legs were verified only waypoint-to-waypoint, so a berth
+    deep inside the Gulf of Kutch joined it on a line over the Kachchh shore and
+    every other test still passed.
+    """
+    globe = pytest.importorskip("global_land_mask").globe
+
+    from maritime_isr.scenario.geography import ANCHORAGES, PORTS
+    from maritime_isr.scenario.searoute import CORRIDOR, sea_route
+
+    places = {f"port:{n}": p for n, p in PORTS.items()}
+    places.update({f"anch:{n}": p for n, p in ANCHORAGES.items()})
+    places.update({f"wp:{n}": (la, lo) for n, la, lo in CORRIDOR})
+
+    blocked = []
+    for na, a in places.items():
+        for nb, b in places.items():
+            if na == nb:
+                continue
+            path = [a, *sea_route(a, b), b]
+            for p, q in zip(path, path[1:]):
+                if _leg_land_hits(globe, p, q):
+                    blocked.append(f"{na} -> {nb} (leg {p} -> {q})")
+                    break
+    assert not blocked, (
+        f"{len(blocked)} of {len(places) * (len(places) - 1)} passages cross "
+        f"land, e.g. {blocked[:5]}")
+
+
+def test_nearest_water_moves_an_inland_point_to_reachable_sea():
+    """A point in Kachchh snaps to sea the origin can actually get to.
+
+    Both halves matter. Without the snap, a departure target dead-reckoned
+    inland is a destination no routing can reach. Without `reachable_from`, the
+    nearest water to that same point is a pocket at the head of the Gulf of
+    Kutch, and the vessel steams over a headland to reach it — a worse picture
+    than before, arrived at by a correct-looking fix.
+    """
+    globe = pytest.importorskip("global_land_mask").globe
+
+    from maritime_isr.scenario.searoute import crosses_land, nearest_water
+
+    inland = (23.10, 69.70)                       # Kachchh, ~36 km inland
+    assert globe.is_land(*inland), "test fixture is meant to be on land"
+
+    origin = (22.60, 69.50)                       # Mundra anchorage
+    snapped = nearest_water(inland, reachable_from=origin)
+    assert not globe.is_land(*snapped), f"{snapped} is still on land"
+    assert not crosses_land(origin, snapped), (
+        f"{snapped} is at sea but the origin cannot reach it without "
+        f"crossing land")
+
+
+def test_seaward_point_stops_at_the_coast():
+    """Steaming out on a heading stops short of land instead of over it."""
+    globe = pytest.importorskip("global_land_mask").globe
+
+    from maritime_isr.scenario.geography import haversine_m
+    from maritime_isr.scenario.searoute import crosses_land, seaward_point
+
+    origin = (22.60, 69.50)                       # Mundra anchorage
+    # Due north from here is the Kachchh shore within ~18 km, so a 55 nm
+    # dead-reckoned departure lands inland; the walk must stop before it.
+    target = seaward_point(origin, 0.0, 55.0 * 1852.0)
+    assert not globe.is_land(*target)
+    assert not crosses_land(origin, target)
+    assert haversine_m(*origin, *target) < 55.0 * 1852.0, (
+        "a heading that runs into the coast should not yield the full distance")
+
+    # Due west is the axis of the gulf and its mouth, so the walk should get
+    # essentially the whole way — the helper must not be timid everywhere.
+    west = seaward_point(origin, 270.0, 55.0 * 1852.0)
+    assert haversine_m(*origin, *west) > 45.0 * 1852.0, (
+        "seaward_point stopped short on a heading that is open water")
+
+
+def test_afloat_validator_catches_a_passage_over_land():
+    """The `afloat` rule fails a track that crosses a peninsula, and passes one
+    that goes around it.
+
+    The validator exists because nothing else could see the defect: the on-land
+    points were inside the AOI, inside the window, at plausible speeds and
+    plausible turn rates, and every other check was green. A rule that never
+    fires is not a check, so this drives both a known-bad and a known-good track
+    through the real function rather than asserting on its threshold.
+    """
+    pytest.importorskip("global_land_mask")
+    import numpy as np
+    from types import SimpleNamespace
+
+    from maritime_isr.scenario.validate import (RULE_AFLOAT, ValidationReport,
+                                                _check_afloat)
+
+    def track(a, b, n=200):
+        return [SimpleNamespace(lat=float(la), lon=float(lo))
+                for la, lo in zip(np.linspace(a[0], b[0], n),
+                                  np.linspace(a[1], b[1], n))]
+
+    # Straight across the Saurashtra peninsula — the original defect, exactly.
+    over_land = track((22.60, 69.50), (21.30, 68.90))
+    # The same passage routed the way the corridor routes it: out of the gulf,
+    # round Okha and Dwarka, then south.
+    around = (track((22.60, 69.50), (22.55, 69.30))
+              + track((22.55, 69.30), (22.40, 68.60))
+              + track((22.40, 68.60), (22.10, 68.60))
+              + track((22.10, 68.60), (21.30, 68.90)))
+
+    world = SimpleNamespace(tracks={"vessel:bad": over_land,
+                                    "vessel:good": around})
+    rep = ValidationReport()
+    _check_afloat(world, rep, {})
+
+    flagged = {v.subject for v in rep.violations if v.rule == RULE_AFLOAT}
+    assert "vessel:bad" in flagged, (
+        "a track drawn straight across Saurashtra passed the afloat check")
+    assert "vessel:good" not in flagged, (
+        "the routed passage was flagged — the tolerance is too tight to "
+        "distinguish a berth from a peninsula")

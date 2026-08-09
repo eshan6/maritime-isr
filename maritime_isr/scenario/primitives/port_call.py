@@ -25,7 +25,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from ..geography import ANCHORAGES, PORTS, destination, initial_bearing_deg
+from ..geography import (ANCHORAGES, PORTS, haversine_m, initial_bearing_deg,
+                         interpolate)
 from .track import Leg, TrackPoint, VoyagePlan, generate_track
 
 
@@ -71,7 +72,13 @@ def build_port_call(vessel, port: str, *, arrive_from: tuple[float, float],
     berth = PORTS[port]
     anch = anchorage_of(port)
 
-    legs = [
+    # Route the approach around the coast rather than straight at the anchorage.
+    # A direct line from a previous call anywhere down the coast crosses the
+    # Saurashtra peninsula, which is how half the corpus ended up on land.
+    from ..searoute import sea_route
+    legs = [Leg("transit", target=w, speed_kn=vessel.service_kn)
+            for w in sea_route(arrive_from, anch)]
+    legs += [
         Leg("transit", target=anch, speed_kn=vessel.service_kn),
         Leg("station", duration_h=max(anchorage_hours, 0.2), radius_m=700.0),
     ]
@@ -82,15 +89,40 @@ def build_port_call(vessel, port: str, *, arrive_from: tuple[float, float],
             Leg("moored", duration_h=max(berth_hours, 0.5)),
         ]
 
-    out_target = depart_to or destination(*anch,
-                                          initial_bearing_deg(*berth, *arrive_from),
-                                          80.0 * 1852.0)
+    # Departure: head back out along the corridor. When the corridor is not
+    # needed the outbound leg still has to be a point *at sea*, and the earlier
+    # version dead-reckoned 80 nm along a bearing measured from the berth and
+    # then applied from the anchorage — two different origins, so the ray was
+    # not the line anything had checked. From the Gulf of Kutch it pointed north
+    # and put a fifth of the commercial fleet 150 km into the Rann of Kutch,
+    # steaming inland for a day and back. It was invisible to the routing fix
+    # because routing can only make a *passage* avoid land; it cannot rescue a
+    # destination that is on land.
+    #
+    # An empty `sea_route` means the direct anchorage-to-origin line has been
+    # verified clear, so a point on that line is at sea by construction. Take
+    # 80 nm along it, or the origin itself if that is nearer.
+    if depart_to is not None:
+        out_target = depart_to
+    else:
+        outbound = sea_route(anch, arrive_from)
+        if outbound:
+            out_target = outbound[0]
+        else:
+            d = haversine_m(*anch, *arrive_from)
+            out_target = interpolate(
+                *anch, *arrive_from,
+                min(1.0, 80.0 * 1852.0 / max(d, 1.0)))
     legs.append(Leg("transit", target=out_target, speed_kn=vessel.service_kn))
 
     plan = VoyagePlan(
         start=arrive_from, start_time=t_start,
+        # Aim at the FIRST leg, which is now a corridor waypoint when the
+        # approach is routed — aiming at the anchorage made the vessel open on a
+        # heading it then had to turn off.
         initial_course_deg=(initial_course_deg if initial_course_deg is not None
-                            else initial_bearing_deg(*arrive_from, *anch)),
+                            else initial_bearing_deg(
+                                *arrive_from, *(legs[0].target or anch))),
         initial_sog_kn=initial_sog_kn,
         legs=legs,
     )
@@ -142,12 +174,16 @@ def transit_between(vessel, a: tuple[float, float], b: tuple[float, float],
                     via: list[tuple[float, float]] | None = None
                     ) -> list[TrackPoint]:
     """A plain passage, optionally routed through waypoints."""
+    from ..searoute import sea_route
+    # An explicit `via` wins — a scenario that routes a vessel deliberately is
+    # making a point. Otherwise follow the coastal corridor.
+    waypoints = via if via is not None else sea_route(a, b)
     legs = [Leg("transit", target=w, speed_kn=speed_kn or vessel.service_kn)
-            for w in (via or [])]
+            for w in waypoints]
     legs.append(Leg("transit", target=b, speed_kn=speed_kn or vessel.service_kn))
     plan = VoyagePlan(start=a, start_time=t_start,
-                      initial_course_deg=initial_bearing_deg(*a, *(via[0] if via
-                                                                   else b)),
+                      initial_course_deg=initial_bearing_deg(
+                          *a, *(waypoints[0] if waypoints else b)),
                       legs=legs)
     return generate_track(vessel, plan, rng)
 

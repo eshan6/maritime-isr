@@ -18,21 +18,24 @@ from collections import defaultdict
 import numpy as np
 import pandas as pd
 
-from ..config import (ENCOUNTER_MAX_SOG_KN, ENCOUNTER_MIN_MINUTES,
-                      ENCOUNTER_RADIUS_M, LOITER_MAX_SOG_KN, LOITER_MIN_HOURS,
-                      PORT_RADIUS_KM)
+from ..config import (ANCHORAGE_RADIUS_KM, ENCOUNTER_MAX_SOG_KN,
+                      ENCOUNTER_MIN_MINUTES, ENCOUNTER_RADIUS_M,
+                      LOITER_MAX_SOG_KN, LOITER_MIN_HOURS, PORT_RADIUS_KM)
 from .. import h3util as tiling
 from .kalman import epoch_s
 
 RESAMPLE_S = 300
 ENC_RES = 7  # ~5 km² cells; 500 m radius always inside cell ∪ 1-ring
 
-# The one shared gazetteer (ADR-023). This list used to be local and held 8
-# ports with **no Sikka and no Vadinar** — the two Gujarat crude terminals most
-# tanker traffic in this AOI calls at — so a laden voyage into Vadinar produced
-# an empty `port_calls` and every port-based rule saw nothing.
-from ..ports import PORTS as AOI_PORTS      # noqa: E402  (kept as a re-export)
-from ..ports import port_at
+# The one shared gazetteer (ADR-023). These used to be local literals here,
+# duplicating `scenario.geography.PORTS` and disagreeing with it — 8 ports with
+# **no Sikka and no Vadinar**, the two Gujarat crude terminals most tanker
+# traffic in this AOI calls at, so a full laden voyage into Vadinar produced an
+# empty `port_calls` and every port-based rule saw nothing. Re-exported under
+# the old names because callers and tests import them from here.
+from ..ports import ANCHORAGES as AOI_ANCHORAGES   # noqa: E402
+from ..ports import PORTS as AOI_PORTS             # noqa: E402
+from ..ports import at_waiting_area, port_at       # noqa: E402
 
 
 def _hav_m(lat1, lon1, lat2, lon2):
@@ -142,12 +145,15 @@ def extract_features(track) -> dict:
                      np.abs((np.diff(cog) + 180) % 360 - 180)
                      / np.maximum(np.diff(t) / 60, 1e-6))) if len(t) > 1 else 0.0)
 
-    # loitering: sustained low speed outside port radius
+    # Loitering: sustained low speed that is not simply waiting for a berth.
+    # Both layers are needed — a berth radius does not reach the anchorage that
+    # serves it, which is where a queueing vessel actually stops.
     episodes, i = [], 0
-    near_port = np.array([min(_hav_m(la, lo, pla, plo)
-                              for pla, plo in AOI_PORTS.values()) < PORT_RADIUS_KM * 1000
-                          for la, lo in zip(pts.lat, pts.lon)])
-    slow = (sog < LOITER_MAX_SOG_KN) & ~near_port
+    waiting = np.array([
+        at_waiting_area(la, lo, port_radius_km=PORT_RADIUS_KM,
+                        anchorage_radius_km=ANCHORAGE_RADIUS_KM)
+        for la, lo in zip(pts.lat, pts.lon)])
+    slow = (sog < LOITER_MAX_SOG_KN) & ~waiting
     while i < len(slow):
         if slow[i]:
             j = i
@@ -166,9 +172,9 @@ def extract_features(track) -> dict:
     # port-call sequence
     calls, cur = [], None
     for k in range(len(pts)):
-        # Nearest port wins. This used to break on the first dictionary hit,
-        # so at Mumbai and JNPT — 11 km apart, both inside the radius — the
-        # answer depended on iteration order rather than distance.
+        # Nearest port wins. This used to break on the first dictionary hit, so
+        # at Mumbai and JNPT — 11 km apart, both inside the radius — the answer
+        # depended on iteration order rather than on distance.
         port = port_at(pts.lat.iloc[k], pts.lon.iloc[k],
                        radius_km=PORT_RADIUS_KM)
         if port != cur:

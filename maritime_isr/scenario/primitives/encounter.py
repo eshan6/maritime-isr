@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from ..geography import destination, haversine_m, initial_bearing_deg
+from ..searoute import seaward_point
 from .track import (NAV_UNDERWAY_ENGINE, STEP_S, Leg, TrackPoint, VoyagePlan,
                     generate_track, shift)
 
@@ -82,7 +83,8 @@ def build_rendezvous(vessel_a, vessel_b, *, meet_point: tuple[float, float],
               vessel_b.min_separation_m())
 
     # ---- A: approach, work, depart -------------------------------------
-    start_a = destination(*meet_point, approach_from_a, approach_nm * 1852.0)
+    start_a = seaward_point(meet_point, approach_from_a,
+                            approach_nm * 1852.0)
     transfer_speed = (rng.uniform(4.0, 5.5) if underway
                       else max(0.2, working_speed_kn))
 
@@ -121,9 +123,13 @@ def build_rendezvous(vessel_a, vessel_b, *, meet_point: tuple[float, float],
         dep_plan = VoyagePlan(
             start=(end.lat, end.lon), start_time=end.t,
             initial_course_deg=end.cog_deg, initial_sog_kn=end.sog_kn,
+            # Steam out on the departure heading as far as there is sea,
+            # rather than dead-reckoning the full distance onto whatever the
+            # bearing happens to point at — from an anchorage inside the Gulf of
+            # Kutch the reciprocal of the approach points at the Kachchh shore.
             legs=[Leg("transit",
-                      target=destination(end.lat, end.lon, depart_brg,
-                                         depart_nm * 1852.0),
+                      target=seaward_point((end.lat, end.lon), depart_brg,
+                                           depart_nm * 1852.0),
                       speed_kn=vessel_a.service_kn)],
         )
         pts_a += generate_track(vessel_a, dep_plan, rng)
@@ -140,7 +146,8 @@ def build_rendezvous(vessel_a, vessel_b, *, meet_point: tuple[float, float],
     first = work_a[0]
     b_start_pos = destination(first.lat, first.lon,
                               (first.cog_deg + side) % 360.0, sep)
-    start_b = destination(*b_start_pos, approach_from_b, approach_nm * 1852.0)
+    start_b = seaward_point(b_start_pos, approach_from_b,
+                            approach_nm * 1852.0)
     plan_b = VoyagePlan(
         start=start_b, start_time=t0 - timedelta(
             hours=approach_nm / max(vessel_b.service_kn, 1.0) * 1.35),
@@ -198,8 +205,8 @@ def build_rendezvous(vessel_a, vessel_b, *, meet_point: tuple[float, float],
             start=(end_b.lat, end_b.lon), start_time=end_b.t,
             initial_course_deg=end_b.cog_deg, initial_sog_kn=end_b.sog_kn,
             legs=[Leg("transit",
-                      target=destination(end_b.lat, end_b.lon, depart_brg_b,
-                                         depart_nm * 1852.0),
+                      target=seaward_point((end_b.lat, end_b.lon), depart_brg_b,
+                                           depart_nm * 1852.0),
                       speed_kn=vessel_b.service_kn)],
         )
         pts_b += generate_track(vessel_b, dep_plan_b, rng)

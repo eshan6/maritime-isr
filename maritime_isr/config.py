@@ -337,6 +337,22 @@ LOITER_MAX_SOG_KN = 2.0
 LOITER_MIN_HOURS = 2.0
 PORT_RADIUS_KM = 8.0          # inside this of a known port, loitering is a berth, not a signal
 
+#: Same idea as PORT_RADIUS_KM, one step out to sea: inside this of a
+#: **designated anchorage**, a stopped vessel is queueing for a berth.
+#:
+#: A separate constant because a berth and an anchorage are different sizes.
+#: PORT_RADIUS_KM is drawn around a terminal and 8 km covers its approaches;
+#: a designated waiting area sits 15-30 km offshore of the terminal it serves
+#: and vessels spread out across it, so a radius drawn on the berth never
+#: reaches it. That is not a hypothetical — Kandla's anchorage is 30 km from
+#: the Kandla berth coordinate, so every vessel waiting there produced an
+#: unsuppressed loiter episode inside the Kandla pipeline geofence.
+#:
+#: 10 km is the size of a designated anchorage area, not a number tuned until
+#: the false positives went away. Sizing it on the observed alerts would be
+#: fitting the detector to this corpus.
+ANCHORAGE_RADIUS_KM = 10.0
+
 # H3 resolution 6 ≈ 36 km² cells: coarse enough for cheap spatial joins in
 # Phase 3 gating, fine enough that a cell is smaller than a Sentinel-1
 # uncertainty cone after a few hours of AIS silence.

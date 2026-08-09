@@ -51,11 +51,11 @@ maritime_isr/
   graph/     object graph: ontology, edges, event engine, confidence decay
   rules/     anomaly library + risk scoring
   eval/      the permanent evaluation harness
-  api/       FastAPI serving layer
-  ui/        React + MapLibre frontend (Vercel-deployable)
+  api/       FastAPI serving layer (Phase 6 — see below)
   inspect/   throwaway inspection dashboards (ugly on purpose, pre-Phase 6)
   infra/     cron entries, VM setup scripts, R2 config
   schemas/   canonical schemas (versioned) + the shared H3 helper
+frontend/    React + MapLibre product surface (Phase 6) — Map · Alerts · Vessels · Graph
 ```
 
 ---
@@ -133,6 +133,80 @@ maritime-isr inspect v0
 
 Each command's exit test is defined in `maritime-isr-execution-spec.md`. A command
 "working in the sandbox" is not the same as its exit test passing on the VM.
+
+---
+
+## Phase 6 — the product surface (API + map UI)
+
+The first screen this project has: a local **FastAPI** backend plus a
+**React + MapLibre** frontend, both on `localhost`. Real and scenario data share
+every table and are **always shown separately, never blended** (ADR-019); the
+scenario rows carry a `SCENARIO` badge and a distinct violet treatment
+everywhere they appear.
+
+### Run the demo — Python only, no Node (the easy path)
+
+The backend serves the pre-built frontend itself, so the whole demo is **one
+process and needs only Python**. On Windows, if the `pip` shortcut is broken,
+run it through Python: `python -m pip ...`.
+
+```bash
+python -m pip install -e ".[api]"                    # FastAPI + uvicorn
+
+# one-time: land the scenario corpus and populate the graph so the alert queue
+# and graph views have content (a few minutes — runs the track engine):
+python -m maritime_isr.cli scenario generate --seed 7
+python tools/run_scenario_pipeline.py
+
+python -m maritime_isr.api                            # serves 127.0.0.1:8000
+```
+
+Then open **http://127.0.0.1:8000** in a browser. That's the whole demo — Map,
+Alerts, Vessels, Graph. Nav routes, hard refreshes and pasted deep links all
+work; the backend falls back to the app's `index.html` for any non-`/api` path.
+
+The API reads the conformed Parquet tables through DuckDB and the object graph
+through SQLite, and writes nothing except alert dispositions. Auth is a shared
+token (`X-API-Token`, default `maritime-isr-dev`, override with `MISR_API_TOKEN`
+— injected into the served page so you never type it). JSON lives under `/api`:
+`/api/vessels`, `/api/vessels/{id}` (+ `/track`, `/neighbourhood`), `/api/alerts`
+(+ detail, `/disposition`), `/api/events`, `/api/scenes`, `/api/ports`,
+`/api/stats`, and interactive docs at `/docs`. Every vessel/edge payload carries
+`is_synthetic` and the provenance envelope; every count returns `{real,
+synthetic}` separately.
+
+The four views: **Map** (AOI framed on the Arabian Sea, toggleable layers, an
+8-week time scrubber with play/pause, click a vessel for its entity panel),
+**Alerts** (a short, high-signal queue — each alert's evidence chain as labelled
+hops, with confirm/watch/dismiss that persist), **Vessels** (a sortable,
+filterable table), and **Graph** (seed-and-expand from one vessel, one hop per
+click, never a hairball).
+
+### Developing the frontend (needs Node)
+
+The committed `frontend/dist/` is what the backend serves. To change the UI,
+edit `frontend/src`, run the Vite dev server (hot reload, proxies `/api` to the
+backend), then rebuild and commit `dist/`:
+
+```bash
+cd frontend && npm install
+npm run dev            # localhost:5173, proxies /api to 127.0.0.1:8000
+npm run build          # rebuild dist/ — commit it so the Python-only path updates
+```
+
+### Verifying against real data
+
+The API is written in a sandbox with no real data, so schema assumptions are
+provisional until measured on the machine that holds the corpus. Run the
+profiler there and commit its output:
+
+```bash
+python tools/api_schema_profile.py     # -> data_profiles/api_schema_profile.json
+```
+
+The exercise tests (`tests/test_api_exercise.py`) hit every endpoint against the
+landed DuckDB/Parquet corpus and assert non-empty, correctly-shaped results (not
+existence checks); they skip cleanly when no corpus is landed.
 
 ---
 

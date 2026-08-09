@@ -19,7 +19,7 @@ here would be false precision.
 """
 from __future__ import annotations
 
-from ..ports import SCENARIO_PORTS
+from ..ports import SCENARIO_ANCHORAGES, SCENARIO_PORTS
 
 import math
 
@@ -41,25 +41,18 @@ M_PER_NM = 1852.0
 #: feature extractor cannot disagree about where a port is — they did, and a
 #: vessel could call somewhere the extractor had no name for.
 #:
-#: The coordinates are unchanged by the consolidation: the scenario's values
-#: were the authoritative ones, including Gwadar's approach anchorage, so
-#: generated tracks are byte-identical and the determinism test still holds.
+#: The coordinates live in `maritime_isr.ports` and are placed **in water**.
+#: They were terminal or city centroids, which put six of ten on land and drew
+#: vessels sitting in the middle of Gujarat. A berth genuinely is on the
+#: coastline and a 1 km land mask calls that land; for a system whose whole
+#: output is a map, the reference point has to be water a ship can float in.
+#: `test_geography_is_at_sea` checks every one, so this cannot regress.
 PORTS: dict[str, tuple[float, float]] = dict(SCENARIO_PORTS)
 
-#: Anchorage waiting areas, offset from the berth. A vessel waiting for a berth
-#: sits here, not alongside — the distinction is what makes E5 (floating storage)
-#: and the Mundra berth-congestion decoy geometrically honest.
-ANCHORAGES: dict[str, tuple[float, float]] = {
-    "Sikka":     (22.30, 69.65),
-    "Vadinar":   (22.18, 69.55),
-    "Mundra":    (22.60, 69.50),
-    "Kandla":    (22.80, 70.05),
-    "Karachi":   (24.65, 66.80),
-    "Gwadar":    (24.78, 62.30),
-    "JNPT":      (18.80, 72.75),
-    "Mangalore": (12.80, 74.65),
-    "Kochi":     (9.83, 76.10),
-}
+#: Waiting areas, from the same shared gazetteer. A ship queueing for a berth
+#: sits here, not at the terminal, which is why the loitering rule needs this
+#: layer as well as `PORTS` — see `ports.at_waiting_area`.
+ANCHORAGES: dict[str, tuple[float, float]] = dict(SCENARIO_ANCHORAGES)
 
 #: Deep-basin ship-to-ship transfer zones. The 16-19N / 62-66E block is open
 #: water well outside coastal AIS reception and outside the main lane traffic —

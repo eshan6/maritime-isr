@@ -267,15 +267,40 @@ def detect_port_risk(store, tracks: list, *, source_ref: str) -> list[str]:
             continue
         t = tr.points["ts"].max().timestamp()
         vid = resolve_mmsi(store, tr.mmsi, at=t)
-        # score is the max single-port risk, lightly boosted by repeat calls
+
+        # Score is the max single-port risk, lightly boosted by **breadth** —
+        # how many *different* high-risk ports the hull touched.
+        #
+        # It used to boost on `len(risky)`, which is the call *sequence* and so
+        # counts a repeat visit as a fresh risk event. That is not what a repeat
+        # visit is: a liner working a Kandla rotation calls there every circuit
+        # because that is its trade. Measured, once the gazetteer got good enough
+        # for Kandla calls to register at all: Kandla's weight is 0.4, three
+        # calls added 0.10, and 8 ordinary merchants landed on exactly the 0.50
+        # gate — 8 alerts, every one background traffic, none on the cast. The
+        # rule was firing on "is in the Kandla trade".
+        #
+        # Breadth is the thing that is actually unusual. One hull touching both
+        # Karachi and Kandla is a different pattern from one hull calling at
+        # Kandla three times, and only the first should escalate.
+        #
+        # Visit counts stay in the evidence, because "called here four times" is
+        # something an analyst wants to see even when it is not itself a reason
+        # to alert. Whether repeat *intensity* deserves its own signal is open:
+        # it needs a per-port baseline of normal call frequency, which we do not
+        # have and cannot get from this corpus.
+        counts: dict[str, int] = {}
+        for p, _ in risky:
+            counts[p] = counts.get(p, 0) + 1
         top = max(r for _, r in risky)
-        score = min(1.0, top + 0.05 * (len(risky) - 1))
+        score = min(1.0, top + 0.05 * (len(counts) - 1))
         ev = [dict(edge="docked-at", src=vid, dst=f"port:{p}",
-                   confidence=round(r, 3), source="track_engine",
-                   source_ref=source_ref, props=dict(port_risk=r))
-              for p, r in risky]
+                   confidence=round(HIGH_RISK_PORTS[p], 3),
+                   source="track_engine", source_ref=source_ref,
+                   props=dict(port_risk=HIGH_RISK_PORTS[p], calls=n))
+              for p, n in sorted(counts.items())]
         _emit(out, store, "port_risk_propagation", vid, t, score, ev,
-              props=dict(ports=[p for p, _ in risky]))
+              props=dict(ports=sorted(counts), calls=counts))
     return out
 
 

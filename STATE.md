@@ -1183,6 +1183,145 @@ Recorded, not fixed. It is a design question, not a bug.
 
 ---
 
+## The corpus was drawn on land — 51.3% of it (2026-08-09)
+
+**Found by looking at the map**, which is the point of Phase 6: vessels sitting
+in the middle of Gujarat, and routes from sea to port that flew straight over the
+Saurashtra peninsula. Every other validator was green — the points were inside
+the AOI, inside the corpus window, at plausible speeds and plausible turn rates.
+
+**Measured:** 51.3% of landed synthetic AIS positions on land at the start;
+**0.039% now** (83 of 211,562), and those are moored hulls alongside the Mumbai
+and JNPT quays, where a berthed ship legitimately is. Worst single track went
+from 26% to 0.33% (one point). Status: **built + verified in sandbox** — this is
+the synthetic corpus on this machine, not a claim about real feeds.
+
+### Four distinct defects, not one
+
+1. **No routing at all.** Every transit was a great-circle line. Fixed with
+   `scenario/searoute.py`: a 17-waypoint coastal corridor, port approach
+   fairways, and a local `_repair` pass that fixes any leg the corridor cannot
+   describe — which is how enclosed water like the Gulf of Kutch is handled
+   without enumerating it.
+2. **Destinations on land.** Routing solves passages between two sea positions;
+   it cannot rescue a target *in* Kachchh. Rendezvous approach starts and
+   departure targets were computed as a bearing and a distance and never checked.
+   Fixed with `nearest_water()` (snap, preferring water the origin can reach) and
+   `seaward_point()` (steam out on a heading as far as there is sea).
+3. **A departure bearing measured from the berth and applied from the
+   anchorage** — two different origins, so the 80 nm ray was a line nothing had
+   checked. It pointed north out of the Gulf of Kutch and sent a fifth of the
+   commercial fleet 150 km into the Rann of Kutch for a day and back.
+4. **`crosses_land` under-sampled.** At 0.5 km spacing against a ~1 km mask, a
+   600 km Mumbai-to-Okha leg clipped the Gujarat coast and was reported clear.
+   Now 0.25 km. **Caught only because the test samples finer than the code does**
+   — a test that asks the module its own question can only confirm the module is
+   self-consistent.
+
+### Six ports were town centres
+
+Sikka, Vadinar, Mundra, Kandla, JNPT and Mumbai reference points were on land.
+Moved into the water beside the terminal. JNPT genuinely sits 0.5 km from land
+inside Mumbai harbour and was **not** moved further — that is where the port is,
+and the 1 km mask cannot resolve a harbour channel.
+
+### One thing deliberately not done
+
+The plan's **origin is never snapped**. Snapping it was the obvious symmetry and
+it was wrong: scenarios continue a vessel from where her last segment ended, at
+the same instant, so a start that jumped even 500 m made her cover it in zero
+time — `add_track` correctly rejected it as a hull doing 29.8 kn. She gets an
+extraction leg to the nearest water instead, preserving both her real position
+and her continuity.
+
+### New permanent checks
+
+- `afloat` validator — per-track land rate, tolerance **3%** (measured: worst
+  track 0.33%, corpus 0.006%, the defect it catches ran 8-26%).
+- `test_every_port_pair_routes_clear_of_land` — all 1,260 ordered pairs of ports,
+  anchorages and corridor waypoints, sampled at 0.2 km. This is the check that
+  would have caught the original defect on day one.
+- Tests for `nearest_water`, `seaward_point`, and the `afloat` rule itself
+  (driven with a known-bad and a known-good track, not asserted on its constant).
+
+**Unchanged by this work:** the `loitering_sensitive` false-positive defect
+(29 alerts on ordinary commercial vessels at Kandla anchorage) is still open and
+still waiting on a decision. Re-measured after the fix: identical.
+
+---
+
+## The loitering rule was a Kandla anchorage detector (2026-08-09)
+
+`loitering_sensitive` fired **33 times; 29 were ordinary merchant vessels**
+queueing at the Kandla anchorage, which sits inside the "Kandla pipeline
+corridor" geofence. About **12% precision** against ADR-004's stated 70% floor.
+
+**Fixed.** Background false positives: **29 → 0**. Status: built + verified in
+sandbox, on the synthetic corpus.
+
+### Why adding the missing ports did not fix it
+
+The previous session added Sikka, Vadinar and Gwadar to `AOI_PORTS` expecting
+that to suppress these, and it did nothing. The reason is a layer that did not
+exist rather than an entry that was missing: **`PORT_RADIUS_KM` is drawn around
+a terminal, and a ship waiting for that terminal is not at it.** She is at the
+designated anchorage 15-30 km further out — that is what an anchorage is for.
+Kandla's anchorage is 30 km from the Kandla berth coordinate, so an 8 km radius
+could never have reached it however many ports were listed.
+
+Added `AOI_ANCHORAGES` (9 charted waiting areas) and `ANCHORAGE_RADIUS_KM = 10`.
+The radius is the size of a designated anchorage area, **not** a number tuned
+until the alerts went away — sizing it on the observed false positives would be
+fitting the detector to this corpus.
+
+### The recall cost was illusory, and the earlier estimate was wrong
+
+Reported before this fix: *"recall 14%, and suppressing the anchorage drops it
+to ~5%."* The 14% was inflated and the trade never existed.
+
+The two detections it removes are **B4** and **D1**, both credited via
+`loitering_sensitive`. Neither scenario is about loitering:
+
+| scenario | what it is | `expected_anomaly_types` |
+|---|---|---|
+| B4 | zombie IMO — hull recorded demolished 2019-11 | `identity_then_anomaly` |
+| D1 | ownership convergence two hops up | `port_risk_propagation` |
+
+Both fired loitering because their vessels made an ordinary port call at Kandla
+and waited at the anchorage — **the same false positive as the other 29**. The
+harness was already saying so and it was not read carefully enough: *"of 3
+detections, 1 came from the rule the scenario expected."*
+
+**Genuine recall was 5% before and is 5% after.** One real detection, B5 via
+`ais_spoofing`, which is B5's declared type. What changed is that the number is
+now honest.
+
+### The rule now fires zero times, and that is the finding
+
+`loitering_sensitive` contributes nothing to this corpus. **No scenario in the
+catalogue loiters inside a sensitive geofence away from a waiting area**, so the
+rule had nothing to find and its 32 alerts were all anchorage queueing. It was
+not a detector that was mistuned; it was a detector pointed at the wrong thing.
+
+Two tests now pin both halves, because a rule silenced everywhere would also
+show as "no false positives":
+- `test_queueing_at_an_anchorage_is_not_loitering` — stopped at Kandla anchorage,
+  no episode.
+- `test_the_loitering_rule_still_fires_away_from_a_waiting_area` — stopped in the
+  Mumbai High field, 130 km from the nearest waiting area, still an episode.
+
+### Open, not fixed
+
+- **Scenario-level precision/recall still counts an alert of the wrong type as a
+  detection.** `ScenarioOutcome.type_match` exists and the summary prints the
+  count, but `outcome` and the family P/R table do not use it — which is how B4
+  and D1 read as true positives for four sessions. Fixing this changes published
+  numbers, so it is flagged rather than changed quietly.
+- **Nothing exercises the geofence layer.** `SENSITIVE_ZONES` is a four-entry
+  seed and no scenario is built against it. Either the catalogue needs a
+  sensitive-zone loitering scenario, or the rule is not earning its place in the
+  demo.
+
 ## Demo scope-cut, 2026-08-01 — fusion wired, gazetteer consolidated
 
 Two plumbing fixes only. **No thresholds tuned. Coverage model, graph detector
@@ -1276,3 +1415,89 @@ track can reach.
   direct consequence of the fidelity work — not a regression.
 - **A1–A3 do not co-locate their SAR contact with their rendezvous.** 730 km
   apart. Fixing it means regenerating the corpus.
+
+---
+
+## Merging ADR-023 surfaced a second copy of the same defect (2026-08-09)
+
+The `claude/maritime-isr-synthetic-scenarios-lk95t3` branch (ADR-023 — run the
+fusion stage, one port gazetteer) had been sitting unmerged for eight days and
+was 12 commits behind. Merged now. Two things came out of it.
+
+### The gazetteers are one list, and it carries anchorages
+
+`maritime_isr/ports.py` is the single gazetteer. The merge resolved three ways
+at once and all three mattered:
+
+- **ADR-023's structure wins** — one list, nearest-port matching instead of
+  first-dict-hit (Mumbai and JNPT are 11 km apart and both inside the radius, so
+  the old answer depended on iteration order), plus five real-corpus ports on
+  GFW's own coordinates.
+- **The water-verified coordinates win** — ADR-023 predates the routing fix and
+  carried the old centroids, six of which are on land. Merging its values
+  verbatim would have put the fleet back in Gujarat.
+- **The anchorage layer moves into it** — `AOI_ANCHORAGES` was a second literal
+  in `tracks/features.py`, which is the same duplication ADR-023 exists to end.
+  `ports.at_waiting_area()` now answers "is a stopped vessel here just waiting
+  for a berth" from both layers, and is the only place that question is asked.
+
+`scenario.geography.PORTS` and `ANCHORAGES` are now views onto that list.
+Generation is unchanged — same coordinates, so the corpus is byte-identical.
+
+### `port_risk_propagation` was firing on "is in the Kandla trade"
+
+**This defect did not exist on either branch alone.** ADR-023 measured it firing
+zero and said so honestly; so did main. The merge made Kandla calls register
+properly for the first time — their wider gazetteer plus our water-corrected
+Kandla berth — and then it fired **8 alerts, every one background traffic, none
+on the cast.**
+
+The cause is one term. Score was `max_port_risk + 0.05 * (len(risky) - 1)`,
+where `risky` is the call *sequence*. Kandla's weight is 0.4, three calls added
+0.10, and eight ordinary merchants landed on exactly the 0.50 gate. But a liner
+working a Kandla rotation calls there every circuit **because that is its
+trade** — a repeat visit is not a fresh risk event.
+
+Fixed by boosting on **breadth** (distinct high-risk ports) rather than on visit
+count. One hull touching both Karachi and Kandla is genuinely unusual; one hull
+calling at Kandla three times is a schedule. Visit counts stay in the evidence,
+because "called here four times" is worth showing an analyst even when it is not
+a reason to alert.
+
+**Open:** whether repeat *intensity* deserves a signal of its own. It would need
+a per-port baseline of normal call frequency, which this corpus cannot provide.
+
+### Measured after the merge, on a rebuilt graph
+
+```
+alerts        ais_spoofing 1, everything else 0
+background    0 alerts on entities with no truth row  (was 8)
+scenarios     1 of 22 detected, 0 false positives across 16 decoys,
+              both deliberate misses silent
+              of 1 detections, 1 came from the rule the scenario expected
+fusion        4 scenes, 6 contacts, 6 associations (1 matched),
+              5 dark verdicts — all suppressed_coverage
+```
+
+Three sessions have now moved recall by zero. That remains the finding: the
+misses are upstream of the detectors — an unfunded satellite feed (ADR-005), an
+empty `events` table, and a scenario whose SAR contacts and encounters never
+co-locate.
+
+### ⚠ Stale alerts survive a re-run, and they corrupt the measurement
+
+Found while verifying the above. `run_scenario_pipeline.py` **never clears the
+alerts table**, and alert ids are deterministic, so a row emitted by an older
+build stays in `data/graph.sqlite` forever. After the fix above, re-running the
+pipeline still reported the 8 alerts a current build cannot emit — the number
+only went to 0 after deleting `data/graph.sqlite` by hand.
+
+This is the failure CLAUDE.md §8.2 exists to prevent: the harness reporting
+something the code no longer does. **Until it is fixed, delete
+`data/graph.sqlite` before re-running the pipeline after any detector change.**
+
+Not fixed here because the honest fix is not "clear the table" — the graph is
+deliberately append-only (§6, it cannot be backfilled). Alerts carry a
+`source_ref`; the measurement should filter on the current pipeline version
+rather than trusting the table. That is a harness design change and wants its
+own decision.

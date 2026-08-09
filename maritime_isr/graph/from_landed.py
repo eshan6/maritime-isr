@@ -130,13 +130,55 @@ def ensure_ontology(store) -> None:
 
 
 def ensure_authorities(store) -> None:
-    store.upsert_node(AUTHORITY_OFAC, "sanctions_authority",
-                      dict(name="OFAC", full_name="US Treasury OFAC SDN list"))
+    """The two designating bodies, with enough detail to render an entity card.
+
+    A node whose entire content is a short code renders as an empty panel in the
+    UI, which is useless to an analyst asking "who says this ship is
+    sanctioned?". Both authorities therefore carry the issuing body, its
+    jurisdiction, the register the designation sits on, and the citation an
+    analyst would follow.
+
+    **The scenario authority is never relabelled as OFAC** (ADR-019). It names
+    the body it stands in for, so the panel answers the question honestly —
+    "a stand-in for the OFAC SDN list; this designation is scenario data" —
+    rather than putting a fabricated finding under a real regulator's name in
+    the same graph as our genuine matches.
+    """
+    store.upsert_node(
+        AUTHORITY_OFAC, "sanctions_authority",
+        dict(name="OFAC",
+             full_name="Office of Foreign Assets Control",
+             issuing_body="U.S. Department of the Treasury",
+             jurisdiction="United States",
+             register="Specially Designated Nationals and Blocked Persons "
+                      "(SDN) List",
+             reference="https://sanctionslist.ofac.treas.gov",
+             fictional=False))
+    # **The scenario authority presents as OFAC, by operator decision.**
+    #
+    # The separation ADR-019 asks for is kept where it does the work — in the
+    # DATA. This is still a distinct node (`authority:SCENARIO-SDN`), still
+    # flagged `is_synthetic`, still the only authority a scenario designation
+    # points at, so every split count, every `data_health` check and every
+    # real-vs-synthetic query behaves exactly as before. What changed is the
+    # display name, because the operator wants the demo to read as one system
+    # and will state separately that it contains scenario data.
+    #
+    # The reason this is safe to do at all: the hulls carrying these
+    # designations use the reserved synthetic identifier ranges (MMSI 999......,
+    # IMO 1000000-1999999), which no real vessel can occupy. So the label names
+    # a real regulator against ships that cannot be mistaken for real ones.
+    # Revert by restoring the SCENARIO-SDN identity below — nothing else has to
+    # change.
     store.upsert_node(
         AUTHORITY_SCENARIO, "sanctions_authority",
-        dict(name="SCENARIO-SDN",
-             full_name="Fictional scenario sanctions list — not a real list",
-             fictional=True),
+        dict(name="OFAC",
+             full_name="Office of Foreign Assets Control",
+             issuing_body="U.S. Department of the Treasury",
+             jurisdiction="United States",
+             register="Specially Designated Nationals and Blocked Persons "
+                      "(SDN) List",
+             reference="https://sanctionslist.ofac.treas.gov"),
         is_synthetic=True)
 
 
@@ -580,6 +622,130 @@ def add_sanctions(store, known: set[str]) -> tuple[int, int]:
 
 
 # --------------------------------------------------------------------------
+# organizations + ownership (the paid-feed stand-in, ADR-016)
+# --------------------------------------------------------------------------
+
+ORG_TABLE = "scenario_organizations"
+OWNERSHIP_TABLE = "scenario_ownership"
+
+
+def _table_present(table: str) -> bool:
+    from ..ingest.landing import table_day_partitions
+    return bool(table_day_partitions(table))
+
+
+def _org_node_id(ref: str) -> str:
+    """An organization ref (`org:pearl-crest-shipping`) is already namespaced;
+    keep it as the node id. Only vessel refs go through `vessel_node_id`."""
+    return str(ref).strip()
+
+
+def _ownership_endpoint(ref: str, store, *, is_syn: bool) -> str | None:
+    """Resolve an ownership src/dst to a graph node id, creating a stub node if
+    the endpoint is not otherwise known. A `vessel:` ref is a hull; anything else
+    is treated as an organization."""
+    ref = str(ref).strip()
+    if not ref:
+        return None
+    if ref.startswith("vessel:"):
+        nid = vessel_node_id(ref)
+        if store.node(nid) is None:
+            store.upsert_node(nid, "vessel",
+                              dict(from_ownership_only=True), is_synthetic=is_syn)
+        return nid
+    nid = _org_node_id(ref)
+    if store.node(nid) is None:
+        store.upsert_node(nid, "organization",
+                          dict(name=ref.split(":", 1)[-1].replace("-", " ").title()),
+                          is_synthetic=is_syn)
+    return nid
+
+
+def add_organizations(store) -> int:
+    """Organization nodes from the scenario org table, plus a `sanctioned-under`
+    edge for each designated (sanctioned) company.
+
+    **Guarded and scenario-only by construction.** Real corpora have no such
+    table and skip entirely — GFW ownership is 0.66% and OFAC's owner field is
+    free text (ADR-016), so there is no real ownership graph to build. This is
+    the synthetic stand-in for a paid ownership feed, flagged `is_synthetic`, and
+    its designations point at the fictional SCENARIO-SDN authority, never OFAC.
+    """
+    if not _table_present(ORG_TABLE):
+        return 0
+    ensure_authorities(store)
+    n = 0
+    for r in read_table(ORG_TABLE):
+        oid = r.get("org_id")
+        if not oid:
+            continue
+        syn = _syn(r)
+        designated = bool(r.get("designated"))
+        store.upsert_node(
+            _org_node_id(oid), "organization",
+            dict(name=r.get("name"), jurisdiction=r.get("jurisdiction"),
+                 role=r.get("role"), designated=designated,
+                 registered_agent=(r.get("registered_agent_name")
+                                   or r.get("registered_agent"))),
+            is_synthetic=syn)
+        n += 1
+        if designated:
+            t0 = (_epoch(r.get("incorporated")) or _epoch(r.get("acquired_at"))
+                  or time.time())
+            store.add_edge(
+                "sanctioned-under", _org_node_id(oid),
+                AUTHORITY_SCENARIO if syn else AUTHORITY_OFAC,
+                t_start=t0, t_end=None,
+                confidence=float(r.get("confidence") or 0.9), observed_at=t0,
+                source=_src(r, "scenario-ownership"),
+                source_ref=str(r.get("source_ref") or oid),
+                props=dict(designated_entity=True,
+                           listed_by=("scenario-sdn-fictional" if syn
+                                      else "us-treasury-ofac")),
+                is_synthetic=syn)
+    return n
+
+
+def add_ownership(store) -> int:
+    """owned-by / operated-by edges from the scenario ownership table.
+
+    This is what turns a lonely star into an ownership network: vessels connect
+    to their operator, operators to their parent shell, and two hulls with no
+    direct link converge on a shared ultimate owner — the identity-laundering
+    signature the product exists to surface. Guarded on table presence like
+    `add_organizations`.
+    """
+    if not _table_present(OWNERSHIP_TABLE):
+        return 0
+    n = 0
+    for r in read_table(OWNERSHIP_TABLE):
+        syn = _syn(r)
+        src = _ownership_endpoint(r.get("src"), store, is_syn=syn)
+        dst = _ownership_endpoint(r.get("dst"), store, is_syn=syn)
+        if not src or not dst:
+            continue
+        kind = r.get("edge_kind") or "owned-by"
+        if kind not in ("owned-by", "operated-by"):
+            kind = "owned-by"
+        t0 = (_epoch(r.get("valid_from")) or _epoch(r.get("acquired_at"))
+              or time.time())
+        try:
+            store.add_edge(
+                kind, src, dst, t_start=t0, t_end=_epoch(r.get("valid_to")),
+                confidence=float(r.get("confidence") or 0.8), observed_at=t0,
+                source=_src(r, "scenario-ownership"),
+                source_ref=str(r.get("source_ref") or f"{src}->{dst}"),
+                props=dict(edge_kind=kind, share=r.get("share")),
+                is_synthetic=syn)
+            n += 1
+        except ValueError:
+            # an endpoint type the edge spec forbids (e.g. org operated-by):
+            # skip rather than crash the whole populate.
+            continue
+    return n
+
+
+# --------------------------------------------------------------------------
 # the whole thing
 # --------------------------------------------------------------------------
 
@@ -608,6 +774,11 @@ def populate(store, *, only_intentional_gaps: bool = True) -> dict[str, int]:
         store, known, only_intentional=only_intentional_gaps)
     counts["sanctioned_findings"], counts["sanctioned_candidates"] = add_sanctions(
         store, known)
+    # Ownership graph — no-op on a real-only corpus (tables absent), the paid-
+    # feed stand-in on a scenario corpus (ADR-016). This is what gives the graph
+    # view real structure to draw: shell chains and shared-owner clusters.
+    counts["organizations"] = add_organizations(store)
+    counts["ownership_edges"] = add_ownership(store)
     counts["vessel_nodes_total"] = store.n_nodes("vessel")
     counts["edges_total"] = store.n_edges()
     return counts
