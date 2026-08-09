@@ -19,6 +19,8 @@ here would be false precision.
 """
 from __future__ import annotations
 
+from ..ports import SCENARIO_ANCHORAGES, SCENARIO_PORTS
+
 import math
 
 from ..config import AOI_V1
@@ -34,45 +36,23 @@ M_PER_NM = 1852.0
 # --------------------------------------------------------------------------
 
 #: Ports and terminals, (lat, lon). Real coordinates for real facilities.
-#: Berth/terminal reference for each port, placed **in water**.
+#: The ports the scenario places vessels at. **Sourced from the one shared
+#: gazetteer** (ADR-023) rather than defined here, so the generator and the
+#: feature extractor cannot disagree about where a port is — they did, and a
+#: vessel could call somewhere the extractor had no name for.
 #:
-#: These were previously the city or terminal centroid, which put six of ten on
-#: land and drew vessels sitting in the middle of Gujarat. A berth genuinely is
-#: on the coastline, so a 1 km land mask calls it land; for a system whose whole
-#: output is a map, the reference point has to be the water a ship actually
-#: floats in. Every coordinate below is checked against `global_land_mask` by
-#: `test_geography_is_at_sea`, with a margin, so this cannot regress.
-PORTS: dict[str, tuple[float, float]] = {
-    # Gujarat crude/product cluster — the destination for most of the tanker
-    # traffic these scenarios model. All inside the Gulf of Kutch.
-    "Sikka":     (22.510, 69.840),
-    "Vadinar":   (22.500, 69.730),
-    "Mundra":    (22.709, 69.728),
-    "Kandla":    (22.911, 70.235),
-    # Pakistan
-    "Karachi":   (24.766, 66.996),
-    # Gwadar's berths sit at ~25.12N, which is **north of AOI v1's 25N edge**.
-    # The coordinate here is the seaward approach anchorage, which is inside the
-    # box and is where a vessel calling at Gwadar is actually observable to us.
-    "Gwadar":    (24.880, 62.320),
-    # Indian west coast
-    "JNPT":      (18.950, 72.950),
-    "Mumbai":    (18.941, 72.890),
-    "Mangalore": (12.894, 74.769),
-    "Kochi":     (9.909, 76.208),
-}
+#: The coordinates live in `maritime_isr.ports` and are placed **in water**.
+#: They were terminal or city centroids, which put six of ten on land and drew
+#: vessels sitting in the middle of Gujarat. A berth genuinely is on the
+#: coastline and a 1 km land mask calls that land; for a system whose whole
+#: output is a map, the reference point has to be water a ship can float in.
+#: `test_geography_is_at_sea` checks every one, so this cannot regress.
+PORTS: dict[str, tuple[float, float]] = dict(SCENARIO_PORTS)
 
-ANCHORAGES: dict[str, tuple[float, float]] = {
-    "Sikka":     (22.560, 69.700),
-    "Vadinar":   (22.560, 69.600),
-    "Mundra":    (22.60, 69.50),
-    "Kandla":    (22.80, 70.05),
-    "Karachi":   (24.65, 66.80),
-    "Gwadar":    (24.78, 62.30),
-    "JNPT":      (18.80, 72.75),
-    "Mangalore": (12.80, 74.65),
-    "Kochi":     (9.83, 76.10),
-}
+#: Waiting areas, from the same shared gazetteer. A ship queueing for a berth
+#: sits here, not at the terminal, which is why the loitering rule needs this
+#: layer as well as `PORTS` — see `ports.at_waiting_area`.
+ANCHORAGES: dict[str, tuple[float, float]] = dict(SCENARIO_ANCHORAGES)
 
 #: Deep-basin ship-to-ship transfer zones. The 16-19N / 62-66E block is open
 #: water well outside coastal AIS reception and outside the main lane traffic —

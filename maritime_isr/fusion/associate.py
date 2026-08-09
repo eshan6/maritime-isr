@@ -167,8 +167,20 @@ def associate_scene(scene: dict, tracks: list, registry: dict[int, float],
     for i, j in zip(rows, cols):
         c = contacts[i]
         aid = "asc_" + hashlib.sha1(c["detection_id"].encode()).hexdigest()[:12]
+        # **The contact's position travels with the association.** Without it a
+        # downstream consumer holding an association row cannot ask a spatial
+        # question about it, and one already needed to: `detect_dark_rendezvous`
+        # looks for an unmatched contact inside an encounter footprint and its
+        # own comment reads "associations don't carry lat/lon; use props if
+        # present". They never were, so that branch could not be taken and the
+        # rule was silent on 5,880 encounters for want of two columns.
+        #
+        # `h3_cell` was already here, but a cell is not a position — you cannot
+        # compute a 3 km separation from it without inverting the tiling, which
+        # is not what a cell is for.
         base = dict(association_id=aid, detection_id=c["detection_id"],
                     scene_id=scene["scene_id"], ts=pd.Timestamp(scene["ts"]),
+                    lat=float(c["lat"]), lon=float(c["lon"]),
                     h3_cell=tiling.cell(c["lat"], c["lon"]))
         alts = sorted(((sc, tid) for (ci, tid), (sc, *_ ) in scores.items()
                        if ci == i), reverse=True)

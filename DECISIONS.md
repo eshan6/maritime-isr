@@ -1050,3 +1050,56 @@ so, rather than picking a winner between two histories on a guess.
   became what it should always have been: a translation between the *author's*
   names in `scenario_truth` and the *system's* node ids. Ground truth must not be
   renamed because the populator renames something.
+
+---
+
+## ADR-023 — One port gazetteer *(Accepted)*
+**2026-08-01. Scope-cut demo session. Same family as ADR-015 and ADR-022.**
+
+**Context.** Three port lists existed with different contents:
+
+| List | Entries | Used for |
+|---|---|---|
+| `tracks.features.AOI_PORTS` | 8 | deriving `port_calls` from a track by proximity |
+| `anomaly.library.HIGH_RISK_PORTS` | 2 | risk weight per port |
+| `scenario.geography.PORTS` | 10 | placing the scenario fleet |
+
+The feature extractor's list held **no Sikka and no Vadinar** — the two Gujarat
+crude terminals most tanker traffic in this AOI calls at, and where the
+generator was placing ships. A vessel could run a full laden voyage into Vadinar
+and produce an **empty** `port_calls` list. Nothing errored; the call simply did
+not exist as far as detection was concerned.
+
+**Decision.** `maritime_isr/ports.py` holds one gazetteer. The scenario's
+coordinates are authoritative where the lists overlapped — they were chosen
+deliberately, including Gwadar's *approach anchorage* rather than its berth,
+because the berth sits north of AOI v1's 25N edge. Five ports observed in the
+real corpus were added using **GFW's own anchorage coordinates**, read verbatim
+from the landed raw payloads: Pipavav, Alang, Hazira, Magdalla, Ghogha. Alang is
+the world's largest shipbreaking yard and appears in the corpus as
+`ind-ind-76`, which is why a readable name matters (ADR-020).
+
+`HIGH_RISK_PORTS` **stays where it is**: a risk weight is a judgement about a
+place, not a fact about it, and the two have different owners. It now validates
+its keys against the gazetteer at import, because the previous arrangement made
+a misspelled or absent port name produce silence rather than an error.
+
+`SCENARIO_PORTS` is an explicit subset rather than "all of PORTS", so adding a
+port for the extractor's benefit cannot silently move the fleet and break
+determinism.
+
+**Also fixed:** port matching took the **first** dictionary hit inside the
+radius, so at Mumbai and JNPT — 11 km apart, both inside 15 km — the answer
+depended on iteration order. `ports.port_at` returns the nearest.
+
+**Consequences, measured.** Tracks producing at least one port call went from a
+list that could not name Sikka or Vadinar to **81 of 104 tracks**, with Vadinar
+(64) and Sikka (33) the two most-called ports — both previously invisible.
+**8 calls now land at Kandla, a high-risk port**, giving
+`port_risk_propagation` real input for the first time.
+
+It still fires zero alerts, and that is a **threshold**, not a gazetteer
+problem: Kandla's weight is 0.4 and the rule's threshold is 0.5, so a Kandla
+call alone can never clear it. Karachi (0.7) would, and no track calls there.
+**Not tuned — reported.** Scenario generation is byte-identical (determinism
+test green).

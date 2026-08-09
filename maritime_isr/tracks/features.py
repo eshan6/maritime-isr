@@ -27,54 +27,15 @@ from .kalman import epoch_s
 RESAMPLE_S = 300
 ENC_RES = 7  # ~5 km² cells; 500 m radius always inside cell ∪ 1-ring
 
-# Minimal AOI port layer (WPI fold-in replaces this on the deploy host).
-#: Ports whose approaches suppress a loitering signal — a vessel waiting for a
-#: berth is queueing, not loitering (PORT_RADIUS_KM).
-#:
-#: **Sikka, Vadinar and Gwadar were missing, and the omission was load-bearing.**
-#: Sikka and Vadinar are the Gulf of Kutch crude terminals and take a large share
-#: of this AOI's tanker traffic — and they sit inside the "Kandla pipeline
-#: corridor" sensitive zone in `anomaly/library.py`. With no entry here, every
-#: vessel waiting at either anchorage produced an unsuppressed loiter episode
-#: inside a sensitive geofence, which is an alert. Measured on a corpus with
-#: realistic anchorage traffic: 30 alerts on ordinary merchant vessels, against
-#: 4 on the whole scenario cast. The gap was recorded in STATE.md ("three
-#: separate port gazetteers ... no Sikka or Vadinar, where most scenario tanker
-#: traffic goes") before it had anything to bite on.
-AOI_PORTS = {
-    "Mumbai": (18.95, 72.84), "JNPT": (18.95, 72.95), "Kandla": (23.02, 70.22),
-    "Mundra": (22.74, 69.70), "Porbandar": (21.63, 69.60),
-    "Karachi": (24.79, 66.98), "Kochi": (9.97, 76.24), "Mangalore": (12.92, 74.80),
-    "Sikka": (22.43, 69.84), "Vadinar": (22.28, 69.73), "Gwadar": (24.88, 62.32),
-}
-
-#: Designated anchorages — the waiting areas offshore of the berths above.
-#:
-#: **Adding the missing ports did not fix the false positives, and this is why.**
-#: A radius drawn on a terminal describes the terminal. A ship waiting for that
-#: terminal is not at it: she is at the designated anchorage 15-30 km further
-#: out, which is the whole point of an anchorage. Kandla's is 30 km from the
-#: Kandla berth coordinate, so `PORT_RADIUS_KM` at 8 km could never have reached
-#: it however many ports were listed — the layer itself was missing, not an
-#: entry in it.
-#:
-#: Measured consequence before this existed: 29 of 33 `loitering_sensitive`
-#: alerts were ordinary merchant vessels queueing at Kandla, inside the "Kandla
-#: pipeline corridor" geofence. That is roughly 12% precision against ADR-004's
-#: stated 70% floor, and ADR-004 is explicit that precision wins even at the
-#: cost of recall.
-#:
-#: These are charted waiting areas, not positions read back from our own corpus.
-#: Deriving them from what the generator happened to produce would be fitting
-#: the detector to the test set; on the deploy host this layer comes from WPI
-#: alongside `AOI_PORTS`.
-AOI_ANCHORAGES = {
-    "Sikka": (22.560, 69.700), "Vadinar": (22.560, 69.600),
-    "Mundra": (22.600, 69.500), "Kandla": (22.800, 70.050),
-    "Karachi": (24.650, 66.800), "Gwadar": (24.780, 62.300),
-    "JNPT": (18.800, 72.750), "Mangalore": (12.800, 74.650),
-    "Kochi": (9.830, 76.100),
-}
+# The one shared gazetteer (ADR-023). These used to be local literals here,
+# duplicating `scenario.geography.PORTS` and disagreeing with it — 8 ports with
+# **no Sikka and no Vadinar**, the two Gujarat crude terminals most tanker
+# traffic in this AOI calls at, so a full laden voyage into Vadinar produced an
+# empty `port_calls` and every port-based rule saw nothing. Re-exported under
+# the old names because callers and tests import them from here.
+from ..ports import ANCHORAGES as AOI_ANCHORAGES   # noqa: E402
+from ..ports import PORTS as AOI_PORTS             # noqa: E402
+from ..ports import at_waiting_area, port_at       # noqa: E402
 
 
 def _hav_m(lat1, lon1, lat2, lon2):
@@ -189,10 +150,8 @@ def extract_features(track) -> dict:
     # serves it, which is where a queueing vessel actually stops.
     episodes, i = [], 0
     waiting = np.array([
-        min(_hav_m(la, lo, pla, plo)
-            for pla, plo in AOI_PORTS.values()) < PORT_RADIUS_KM * 1000
-        or min(_hav_m(la, lo, ala, alo)
-               for ala, alo in AOI_ANCHORAGES.values()) < ANCHORAGE_RADIUS_KM * 1000
+        at_waiting_area(la, lo, port_radius_km=PORT_RADIUS_KM,
+                        anchorage_radius_km=ANCHORAGE_RADIUS_KM)
         for la, lo in zip(pts.lat, pts.lon)])
     slow = (sog < LOITER_MAX_SOG_KN) & ~waiting
     while i < len(slow):
@@ -213,11 +172,11 @@ def extract_features(track) -> dict:
     # port-call sequence
     calls, cur = [], None
     for k in range(len(pts)):
-        port = None
-        for name, (pla, plo) in AOI_PORTS.items():
-            if _hav_m(pts.lat.iloc[k], pts.lon.iloc[k], pla, plo) < PORT_RADIUS_KM * 1000:
-                port = name
-                break
+        # Nearest port wins. This used to break on the first dictionary hit, so
+        # at Mumbai and JNPT — 11 km apart, both inside the radius — the answer
+        # depended on iteration order rather than on distance.
+        port = port_at(pts.lat.iloc[k], pts.lon.iloc[k],
+                       radius_km=PORT_RADIUS_KM)
         if port != cur:
             if port:
                 calls.append(port)

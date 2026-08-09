@@ -30,6 +30,7 @@ import pandas as pd
 
 from ..config import ANOMALY_THRESHOLDS, GEOFENCE_LOITER_MIN_HOURS
 from ..graph.identity import resolve_mmsi
+from ..ports import PORTS as _PORTS
 
 # --- sensitive geometry (geofence layer, roadmap 5.2 #4) ------------------
 # Cables, pipelines, exercise areas, port approaches. Minimal AOI seed; the
@@ -40,7 +41,24 @@ SENSITIVE_ZONES = [
     dict(name="Naval exercise area W", lat=17.00, lon=69.50, radius_km=50),
     dict(name="Kandla pipeline corridor", lat=22.90, lon=69.90, radius_km=25),
 ]
+#: Risk weight per port. **A judgement about a place, not a fact about it**, so
+#: it stays here rather than in the shared gazetteer (ADR-023) — `ports.PORTS`
+#: says where a port is, this says what we think of it, and the two have
+#: different owners and different review standards.
+#:
+#: Every key must name a port the gazetteer knows, or the rule silently never
+#: fires for it. That is checked at import rather than trusted: the previous
+#: arrangement had three port lists and a name in one that was absent from
+#: another produced no error, only silence.
 HIGH_RISK_PORTS = {"Karachi": 0.7, "Kandla": 0.4}   # seed risk weights
+
+_unknown_ports = set(HIGH_RISK_PORTS) - set(_PORTS)
+if _unknown_ports:
+    raise ValueError(
+        f"HIGH_RISK_PORTS names {sorted(_unknown_ports)}, which the shared "
+        f"gazetteer does not contain. A track can never be reported as calling "
+        f"there, so the risk weight would be dead configuration. Add the port "
+        f"to maritime_isr/ports.py or correct the spelling.")
 
 
 def _hav_km(lat1, lon1, lat2, lon2):
@@ -129,12 +147,17 @@ def detect_dark_rendezvous(store, encounters: list[dict],
                 if abs(a["ts"].timestamp() - t) < 12 * 3600]
         footprint = None
         for a in near:
-            # associations don't carry lat/lon; use props if present
-            la = a.get("props", {}).get("lat") if isinstance(a.get("props"), dict) else None
-            if la is None:
+            # Associations carry the contact's position directly now. They did
+            # not, and this loop read `a["props"]["lat"]` — a key that was never
+            # written — so `footprint` was always None and the rule could only
+            # fire through `gap_party`. `props` is still accepted so an older
+            # association row does not break the rule.
+            la, lo = a.get("lat"), a.get("lon")
+            if la is None and isinstance(a.get("props"), dict):
+                la, lo = a["props"].get("lat"), a["props"].get("lon")
+            if la is None or lo is None:
                 continue
-            if _hav_km(e["lat"], e["lon"], la,
-                       a["props"]["lon"]) < 3.0:
+            if _hav_km(e["lat"], e["lon"], la, lo) < 3.0:
                 footprint = a
                 break
         gap_party = any(a.get("in_ais_gap") for a in near)
@@ -244,15 +267,40 @@ def detect_port_risk(store, tracks: list, *, source_ref: str) -> list[str]:
             continue
         t = tr.points["ts"].max().timestamp()
         vid = resolve_mmsi(store, tr.mmsi, at=t)
-        # score is the max single-port risk, lightly boosted by repeat calls
+
+        # Score is the max single-port risk, lightly boosted by **breadth** —
+        # how many *different* high-risk ports the hull touched.
+        #
+        # It used to boost on `len(risky)`, which is the call *sequence* and so
+        # counts a repeat visit as a fresh risk event. That is not what a repeat
+        # visit is: a liner working a Kandla rotation calls there every circuit
+        # because that is its trade. Measured, once the gazetteer got good enough
+        # for Kandla calls to register at all: Kandla's weight is 0.4, three
+        # calls added 0.10, and 8 ordinary merchants landed on exactly the 0.50
+        # gate — 8 alerts, every one background traffic, none on the cast. The
+        # rule was firing on "is in the Kandla trade".
+        #
+        # Breadth is the thing that is actually unusual. One hull touching both
+        # Karachi and Kandla is a different pattern from one hull calling at
+        # Kandla three times, and only the first should escalate.
+        #
+        # Visit counts stay in the evidence, because "called here four times" is
+        # something an analyst wants to see even when it is not itself a reason
+        # to alert. Whether repeat *intensity* deserves its own signal is open:
+        # it needs a per-port baseline of normal call frequency, which we do not
+        # have and cannot get from this corpus.
+        counts: dict[str, int] = {}
+        for p, _ in risky:
+            counts[p] = counts.get(p, 0) + 1
         top = max(r for _, r in risky)
-        score = min(1.0, top + 0.05 * (len(risky) - 1))
+        score = min(1.0, top + 0.05 * (len(counts) - 1))
         ev = [dict(edge="docked-at", src=vid, dst=f"port:{p}",
-                   confidence=round(r, 3), source="track_engine",
-                   source_ref=source_ref, props=dict(port_risk=r))
-              for p, r in risky]
+                   confidence=round(HIGH_RISK_PORTS[p], 3),
+                   source="track_engine", source_ref=source_ref,
+                   props=dict(port_risk=HIGH_RISK_PORTS[p], calls=n))
+              for p, n in sorted(counts.items())]
         _emit(out, store, "port_risk_propagation", vid, t, score, ev,
-              props=dict(ports=[p for p, _ in risky]))
+              props=dict(ports=sorted(counts), calls=counts))
     return out
 
 

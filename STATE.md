@@ -1321,3 +1321,183 @@ show as "no false positives":
   seed and no scenario is built against it. Either the catalogue needs a
   sensitive-zone loitering scenario, or the rule is not earning its place in the
   demo.
+
+## Demo scope-cut, 2026-08-01 — fusion wired, gazetteer consolidated
+
+Two plumbing fixes only. **No thresholds tuned. Coverage model, graph detector
+and events table deliberately untouched.**
+
+### 1. The fusion stage now runs (Phase 3)
+
+`tools/run_scenario_pipeline.py` passed `associations=[]` and `verdicts=[]` as
+**literals**, so `detect_dark_vessel` iterated an empty list and
+`detect_dark_rendezvous` short-circuited on all 5,880 encounters. Two of six
+detectors had never been asked a question, and were being reported as silent.
+
+Now running, over the same corpus:
+
+```
+scenes           : 4 (6 contacts)
+registry entries : 9 MMSI -> length
+associations     : 6  (2 matched, 4 unmatched)
+dark verdicts    : 4  {'suppressed_coverage': 4}
+```
+
+**Also fixed:** association rows carried no `lat`/`lon`, and
+`detect_dark_rendezvous` read `a["props"]["lat"]` — a key nothing ever wrote.
+Its footprint branch could never be taken; the rule could only fire through
+`gap_party`. The contact's position now travels with the association.
+
+**Both dark rules still fire zero, for reasons that are not thresholds:**
+
+- `dark_vessel` — all 4 verdicts are `suppressed_coverage` with
+  **`hearable_conf = 0.0`**. The contacts sit in the deep basin, outside
+  terrestrial reception, and there is no satellite AIS. The cascade is
+  **correct** to suppress: asserting darkness where we cannot hear is a false
+  positive by construction (CLAUDE.md §6). This is ADR-005's unfunded feed, not
+  a detector fault.
+- `dark_rendezvous` — the nearest unmatched contact is **730 km** from any
+  encounter; the threshold is 3 km. The SAR contacts and the encounters are in
+  different parts of the AOI entirely. **Scenario-authoring gap**, flagged not
+  fixed: A1–A3 place a rendezvous and a SAR contact but never co-locate them.
+
+### 2. One port gazetteer (ADR-023)
+
+`tracks.features.AOI_PORTS` held 8 ports with **no Sikka and no Vadinar** — the
+two Gujarat crude terminals the generator places most tanker traffic at. A full
+laden voyage into Vadinar produced an **empty** `port_calls` list, silently.
+
+Consolidated into `maritime_isr/ports.py` (16 ports), plus five real-corpus
+ports using GFW's own anchorage coordinates (Pipavav, Alang, Hazira, Magdalla,
+Ghogha). Port matching now takes the **nearest** port rather than the first
+dictionary hit — Mumbai and JNPT are 11 km apart and both inside the radius, so
+the old answer depended on iteration order.
+
+**Measured:**
+
+```
+tracks with >=1 port call : 81 / 104
+ports called              : Vadinar 64, Mundra 48, Sikka 33, Mumbai 20,
+                            Mangalore 14, Kochi 11, JNPT 9, Kandla 8, Pipavav 1
+calls at a high-risk port : 8  (Kandla)
+```
+
+Vadinar and Sikka — the top two — were invisible before. Scenario generation is
+byte-identical; determinism test green.
+
+`port_risk_propagation` **still fires zero, and that one IS a threshold**:
+Kandla's weight is 0.4, the rule's threshold is 0.5, so a Kandla call alone can
+never clear it. Karachi (0.7) would, and no track calls there. **Not tuned —
+reported**, per the standing instruction.
+
+### Re-measured: unchanged
+
+```
+true anomalies    :  22   DETECTED 3   MISSED 19
+decoys            :  16   FALSE POSITIVE 0   correctly quiet 16
+deliberate misses :   2   correctly silent 2
+precision 100%    recall 14%
+```
+
+Three sessions have now moved recall by zero. That is itself the finding: the
+misses are **not** in the detectors' logic. They are upstream of it — an
+unfunded satellite feed, an empty events table, a scenario whose SAR contacts
+and encounters do not overlap, and one threshold set above the only weight any
+track can reach.
+
+446 tests green.
+
+### Flagged this session, no action taken
+
+- **Only 9 of 103 vessels have a length in the registry**, because `length_m` is
+  null-masked to match the real corpus (98.6% null). Association therefore
+  applies almost no length gate and is running on proximity alone. Real, and a
+  direct consequence of the fidelity work — not a regression.
+- **A1–A3 do not co-locate their SAR contact with their rendezvous.** 730 km
+  apart. Fixing it means regenerating the corpus.
+
+---
+
+## Merging ADR-023 surfaced a second copy of the same defect (2026-08-09)
+
+The `claude/maritime-isr-synthetic-scenarios-lk95t3` branch (ADR-023 — run the
+fusion stage, one port gazetteer) had been sitting unmerged for eight days and
+was 12 commits behind. Merged now. Two things came out of it.
+
+### The gazetteers are one list, and it carries anchorages
+
+`maritime_isr/ports.py` is the single gazetteer. The merge resolved three ways
+at once and all three mattered:
+
+- **ADR-023's structure wins** — one list, nearest-port matching instead of
+  first-dict-hit (Mumbai and JNPT are 11 km apart and both inside the radius, so
+  the old answer depended on iteration order), plus five real-corpus ports on
+  GFW's own coordinates.
+- **The water-verified coordinates win** — ADR-023 predates the routing fix and
+  carried the old centroids, six of which are on land. Merging its values
+  verbatim would have put the fleet back in Gujarat.
+- **The anchorage layer moves into it** — `AOI_ANCHORAGES` was a second literal
+  in `tracks/features.py`, which is the same duplication ADR-023 exists to end.
+  `ports.at_waiting_area()` now answers "is a stopped vessel here just waiting
+  for a berth" from both layers, and is the only place that question is asked.
+
+`scenario.geography.PORTS` and `ANCHORAGES` are now views onto that list.
+Generation is unchanged — same coordinates, so the corpus is byte-identical.
+
+### `port_risk_propagation` was firing on "is in the Kandla trade"
+
+**This defect did not exist on either branch alone.** ADR-023 measured it firing
+zero and said so honestly; so did main. The merge made Kandla calls register
+properly for the first time — their wider gazetteer plus our water-corrected
+Kandla berth — and then it fired **8 alerts, every one background traffic, none
+on the cast.**
+
+The cause is one term. Score was `max_port_risk + 0.05 * (len(risky) - 1)`,
+where `risky` is the call *sequence*. Kandla's weight is 0.4, three calls added
+0.10, and eight ordinary merchants landed on exactly the 0.50 gate. But a liner
+working a Kandla rotation calls there every circuit **because that is its
+trade** — a repeat visit is not a fresh risk event.
+
+Fixed by boosting on **breadth** (distinct high-risk ports) rather than on visit
+count. One hull touching both Karachi and Kandla is genuinely unusual; one hull
+calling at Kandla three times is a schedule. Visit counts stay in the evidence,
+because "called here four times" is worth showing an analyst even when it is not
+a reason to alert.
+
+**Open:** whether repeat *intensity* deserves a signal of its own. It would need
+a per-port baseline of normal call frequency, which this corpus cannot provide.
+
+### Measured after the merge, on a rebuilt graph
+
+```
+alerts        ais_spoofing 1, everything else 0
+background    0 alerts on entities with no truth row  (was 8)
+scenarios     1 of 22 detected, 0 false positives across 16 decoys,
+              both deliberate misses silent
+              of 1 detections, 1 came from the rule the scenario expected
+fusion        4 scenes, 6 contacts, 6 associations (1 matched),
+              5 dark verdicts — all suppressed_coverage
+```
+
+Three sessions have now moved recall by zero. That remains the finding: the
+misses are upstream of the detectors — an unfunded satellite feed (ADR-005), an
+empty `events` table, and a scenario whose SAR contacts and encounters never
+co-locate.
+
+### ⚠ Stale alerts survive a re-run, and they corrupt the measurement
+
+Found while verifying the above. `run_scenario_pipeline.py` **never clears the
+alerts table**, and alert ids are deterministic, so a row emitted by an older
+build stays in `data/graph.sqlite` forever. After the fix above, re-running the
+pipeline still reported the 8 alerts a current build cannot emit — the number
+only went to 0 after deleting `data/graph.sqlite` by hand.
+
+This is the failure CLAUDE.md §8.2 exists to prevent: the harness reporting
+something the code no longer does. **Until it is fixed, delete
+`data/graph.sqlite` before re-running the pipeline after any detector change.**
+
+Not fixed here because the honest fix is not "clear the table" — the graph is
+deliberately append-only (§6, it cannot be backfilled). Alerts carry a
+`source_ref`; the measurement should filter on the current pipeline version
+rather than trusting the table. That is a harness design change and wants its
+own decision.

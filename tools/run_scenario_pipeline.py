@@ -81,6 +81,83 @@ def run_tracks(df: pd.DataFrame) -> dict:
     return out
 
 
+def run_fusion_stage(df: pd.DataFrame, tracks_out: dict) -> dict:
+    """Phase 3 over the combined corpus — the real fusion core, unmodified.
+
+    **This stage was not being run at all.** `run_anomalies` passed
+    `associations=[]` and `verdicts=[]` as literals, so `detect_dark_vessel`
+    iterated an empty list and `detect_dark_rendezvous` short-circuited on every
+    one of 5,880 encounters. Six scenarios expected one of those two rules; none
+    could fire, for reasons that had nothing to do with thresholds. The rules
+    were being reported as "silent" when they had never been asked a question.
+
+    Scenes come from `scenario_detections`, grouped by `scene_id` — the shape
+    `associate_scene` expects. The registry is MMSI to length, read from landed
+    identity, which is what lets association apply a length gate rather than a
+    proximity gate alone.
+
+    Nothing is written: `write_outputs=False`, because this is a measurement run
+    over a corpus that already exists and publishing fusion outputs would put
+    derived rows in the conformed layer that the next run would then read back.
+    """
+    from maritime_isr import fusion
+    from maritime_isr.tracks.coverage import CoverageModel
+
+    dets = read_table("scenario_detections")
+    if not dets:
+        print("  no SAR contacts landed — dark_vessel and dark_rendezvous have "
+              "nothing to work from, and their silence says nothing about them")
+        return dict(associations=[], verdicts=[], statics=[])
+
+    by_scene: dict[str, list[dict]] = {}
+    for d in dets:
+        by_scene.setdefault(str(d.get("scene_id") or "unknown"), []).append(d)
+    scenes = [
+        dict(scene_id=sid,
+             ts=pd.Timestamp(rows[0]["ts"]),
+             detections=[dict(detection_id=r["detection_id"], lat=r["lat"],
+                              lon=r["lon"], length_m=r.get("length_m"),
+                              score=r.get("score", 0.9)) for r in rows])
+        for sid, rows in sorted(by_scene.items())]
+
+    # MMSI -> length. Association uses it to reject a contact whose radar
+    # length cannot belong to the candidate hull, which is the difference
+    # between a match and a coincidence of position.
+    registry: dict[int, float] = {}
+    for r in read_table("gfw_vessel_identity"):
+        mmsi, length = r.get("mmsi"), r.get("length_m")
+        if mmsi in (None, "") or length in (None, ""):
+            continue
+        try:
+            registry[int(float(mmsi))] = float(length)
+        except (TypeError, ValueError):
+            continue
+
+    model = CoverageModel(df["ts"].min().timestamp()).fit(df)
+    t0 = time.time()
+    out = fusion.run_fusion(
+        scenes, tracks_out["tracks"], model, registry,
+        source_ref="scenario-combined",
+        partition_day=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        aoi="arabian_sea_v1", gaps=tracks_out["gaps"],
+        spoof_events=tracks_out["spoof_events"], write_outputs=False)
+
+    assoc = out.get("associations", [])
+    verdicts = out.get("verdicts", [])
+    statics = out.get("statics", [])
+    matched = sum(1 for a in assoc if a["status"] != "unmatched")
+    print(f"  scenes           : {len(scenes):,} "
+          f"({sum(len(s['detections']) for s in scenes):,} contact(s))")
+    print(f"  registry entries : {len(registry):,} MMSI -> length")
+    print(f"  associations     : {len(assoc):,}  "
+          f"({matched:,} matched, {len(assoc) - matched:,} unmatched)")
+    print(f"  static objects   : {len(statics):,}")
+    print(f"  dark verdicts    : {len(verdicts):,}  "
+          f"{dict(Counter(v['status'] for v in verdicts))}")
+    print(f"  ({time.time() - t0:.0f}s)")
+    return dict(associations=assoc, verdicts=verdicts, statics=statics)
+
+
 def populate_graph() -> tuple[GraphStore, dict]:
     """Phase 4 over the combined corpus — `from_landed.populate`, unmodified."""
     # cfg.data_root, not the hardcoded DATA_ROOT constant — so with
@@ -157,8 +234,13 @@ def connectivity(store: GraphStore) -> None:
               f"{with_3} with >=3")
 
 
-def run_anomalies(store: GraphStore, tracks_out: dict) -> dict:
-    """Phase 5 over the combined corpus — the real anomaly library."""
+def run_anomalies(store: GraphStore, tracks_out: dict,
+                  fusion_out: dict) -> dict:
+    """Phase 5 over the combined corpus — the real anomaly library.
+
+    `associations` and `verdicts` now come from the fusion stage rather than
+    being passed as empty literals. Two of the six detectors read nothing else.
+    """
     from maritime_isr.anomaly.library import run_anomaly_library
     t0 = time.time()
     fired = run_anomaly_library(
@@ -166,8 +248,8 @@ def run_anomalies(store: GraphStore, tracks_out: dict) -> dict:
         tracks=tracks_out["tracks"],
         encounters=tracks_out["encounters"],
         spoof_events=tracks_out["spoof_events"],
-        associations=[],
-        verdicts=[],
+        associations=fusion_out["associations"],
+        verdicts=fusion_out["verdicts"],
         source_ref="scenario-combined")
     print(f"  ran in {time.time() - t0:.0f}s")
     for atype, ids in sorted(fired.items()):
@@ -182,27 +264,30 @@ def main() -> int:
     _hdr("2. Phase 2 — track engine over the combined corpus")
     tracks_out = run_tracks(df)
 
-    _hdr("3. Phase 4 — graph populated from the landed tables")
+    _hdr("3. Phase 3 — fusion core over the combined corpus")
+    fusion_out = run_fusion_stage(df, tracks_out)
+
+    _hdr("4. Phase 4 — graph populated from the landed tables")
     store, _ = populate_graph()
 
-    _hdr("4. graph, split real vs synthetic")
+    _hdr("5. graph, split real vs synthetic")
     report_graph_split(store)
 
-    _hdr("5. connectivity of the sanctions-matched population")
+    _hdr("6. connectivity of the sanctions-matched population")
     print("  Real data alone gave 0 of 98 with any encounter edge (2026-07-30).")
     connectivity(store)
 
-    _hdr("6. Phase 5 — anomaly library")
-    run_anomalies(store, tracks_out)
+    _hdr("7. Phase 5 — anomaly library")
+    run_anomalies(store, tracks_out, fusion_out)
 
-    _hdr("7. decay over the combined graph")
+    _hdr("8. decay over the combined graph")
     dec = from_landed.decay_summary(store)
     print(f"  {'edge type':<24}{'n':>8}{'below usable':>14}{'mean conf':>12}")
     for etype, d in sorted(dec.items()):
         print(f"  {etype:<24}{d['n']:>8,}{d['below_usable']:>14,}"
               f"{d['mean_confidence']:>12.3f}")
 
-    _hdr("8. risk scoring")
+    _hdr("9. risk scoring")
     from maritime_isr.anomaly import rank_vessels
     ranked = rank_vessels(store, top=12)
     for r in ranked:
