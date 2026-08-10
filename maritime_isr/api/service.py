@@ -22,6 +22,7 @@ from typing import Optional
 
 from ..schemas.keys import native_vessel_id, vessel_node_id
 from . import graph_service as gsvc
+from . import report
 from .reader import Reader, as_iso, open_reader
 
 # Envelope columns present on every conformed row (CLAUDE.md §4.1).
@@ -817,6 +818,38 @@ def _findings_notes(items: list[dict]) -> list[str]:
             "No GFW intentional-disabling assessment in this corpus. The demo "
             "cannot show a real dark vessel from it.")
     return notes
+
+
+def build_incident_report(canonical: str) -> Optional[dict]:
+    """Everything the one-click incident report needs, for one vessel.
+
+    Returns None when the vessel is unknown, so the route can 404 rather than
+    render an empty dossier — a report about nothing is worse than no report.
+
+    A vessel with no finding still gets one. An analyst looking at a hull wants
+    to be able to hand over what is known about it, and refusing unless it is
+    already flagged would make the export useless in exactly the case where
+    someone is trying to establish whether it should be.
+    """
+    vessel = get_vessel(canonical)
+    if vessel is None:
+        return None
+    # The findings pass is corpus-wide; on the real corpus that is four grouped
+    # scans, the same cost as opening the findings page. Cheap enough for a
+    # click, and it keeps one definition of what a finding is rather than a
+    # second one that could drift from the screen it claims to mirror.
+    finding = next((f for f in list_findings(limit=100_000)["items"]
+                    if f["id"] == canonical), None)
+    alerts = [a for a in gsvc.list_alerts() if a.get("subject") == canonical]
+    return report.build_report(vessel=vessel, finding=finding, alerts=alerts,
+                               stats={"corpus_window": _corpus_window_only()})
+
+
+def _corpus_window_only() -> dict:
+    """Just the window. `get_stats()` walks the graph and is far too much work
+    for the one field the report needs from it."""
+    with open_reader() as reader:
+        return _corpus_window(reader)
 
 
 # --------------------------------------------------------------------------

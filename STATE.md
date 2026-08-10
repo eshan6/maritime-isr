@@ -8,7 +8,9 @@ session. `CLAUDE.md`, `ARCHITECTURE.md`, `DECISIONS.md` are stable contracts;
 > between status buckets, record what was verified vs assumed, log anything now
 > broken, and set "Next up." If you don't update it, the next session starts blind.
 
-**Last updated:** 2026-08-10 — demo data-coverage session (ADR-024): findings
+**Last updated:** 2026-08-10 — demo data-coverage session, two passes.
+ADR-025 (second): the one-click incident report, and the identity_changed
+events that were never written. ADR-024 (first): findings
 table, UN+EU sanctions matching, map density + truncation honesty, SAR contact
 layer. See "Demo data coverage" at the end of this file. Prior entry:
 2026-07-31 (second pass). The real corpus profile landed
@@ -1650,3 +1652,81 @@ survive the rebuild and `tools/rebuild_conformed.py` needs re-running.
 - **Real alerts remain structurally impossible** and no work here changes that.
 - **The 3,000-row port-visit page cap is still unpaginated**, so no count taken
   from that table describes the Arabian Sea.
+
+---
+
+## The export, and the events table (2026-08-10, second pass) — ADR-025
+
+### The M6 demo definition is now fully built
+
+`CLAUDE.md` §0's last clause — *"export a one-click incident report"* — did not
+exist anywhere: no endpoint, no button, no renderer. It does now.
+`GET /api/vessels/{id}/report` returns a self-contained HTML document (or the
+same payload as JSON), and there is an **Export report** button on every
+findings row and on the vessel panel.
+
+Verified end to end in a headless browser: clicking the button downloads
+`SCENARIO-incident-report-desert-zenith-2026-08-10.html`, 6,554 bytes, no page
+errors. The `SCENARIO-` prefix on the filename is not cosmetic — it is the
+label that survives the file being forwarded.
+
+The report is available for **any** vessel, not only flagged ones, because an
+analyst deciding whether a hull is worth flagging is exactly who needs to hand
+over what is known about it.
+
+### `identity_then_anomaly` was unfed, not mistuned — and it still misses
+
+This file recorded the blocker as *"the `events` table is empty (0 rows)"*.
+**The cause was a missing writer**: `identity_changed` had exactly one
+producer, `identity.fold_registry_snapshot`, which the scenario pipeline never
+calls — it goes through `from_landed.populate()`. `add_identities` was already
+computing genuine supersession for the rename analysis, so it now emits the
+event alongside, for name / flag / MMSI (not IMO — a permanent hull number
+changing is a different and stronger claim).
+
+```
+identity_changed events    12, across 5 hulls  (name 2, flag 7, mmsi 3)
+detectors firing            2 of 6   (was 1 of 6)
+identity_then_anomaly       1 alert  (was 0)
+
+true anomalies  22   DETECTED 1   MISSED 21     <- UNCHANGED
+decoys          16   FALSE POSITIVE 0           <- UNCHANGED
+precision 100%   recall 5%                      <- UNCHANGED
+```
+
+**The rule fires and recall does not move.** The alert lands on `clone_ghost`
+= B5, which `ais_spoofing` had already detected; B5 now carries two alerts.
+
+**Why B1, B2, B3, B6 and D2 still miss, and it is not their thresholds:**
+`identity_then_anomaly` is a **composite** rule — it needs an identity change
+*and* a `dark_vessel` / `dark_rendezvous` / `ais_spoofing` alert on the same
+hull inside 14 days. Those five hulls now have the identity change and no
+companion alert, because both dark rules are structurally silent (every verdict
+`suppressed_coverage`, `hearable_conf = 0.0`). **The rule is gated behind
+ADR-005's unfunded satellite feed**, one layer further back than this file
+previously recorded.
+
+The honest correction to make here: "the events table is empty" was a true
+observation and a misleading diagnosis. Fixing it moved the detector from
+*unfed* to *fed and gated*, which is progress worth having and is not recall.
+
+### Status
+
+**Built + verified in sandbox.** 525 tests green (31 more than the previous
+pass — 11 on the identity-change plumbing, 12 on the report, plus the ADR-024
+set). Frontend builds; the download was exercised through a real browser, not
+just the endpoint. **None of it has run against the real corpus.**
+
+### What to look for on the laptop
+
+The report is where the real corpus will differ most visibly: on your data the
+top findings carry **GFW-flagged intentional-disabling gaps**, so their reports
+gain the gap-assessment table and the GFW attribution paragraph that no sandbox
+report can show. If those sections are missing there too, the flag did not
+survive `rebuild_conformed.py`.
+
+`identity_changed` will also be far denser on real data — 9,184 vessels with
+identity history, against 5 hulls here — so it is worth printing the count and
+checking it is not implausibly large. A number near the fleet size would mean
+the supersession rule has regressed to counting interval closure, which is the
+100%-closed trap and the one failure mode this change had to avoid.

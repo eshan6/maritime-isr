@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import graph_service as gsvc
-from . import models, service
+from . import models, report, service
 from .settings import settings
 
 #: The built frontend, if present. `frontend/npm run build` writes it here; when
@@ -151,6 +151,29 @@ def create_app() -> FastAPI:
             "notes": res["notes"],
             "items": [models.Finding(**f).model_dump() for f in res["items"]],
         }
+
+    @api.get("/vessels/{vessel_id}/report", dependencies=guard)
+    def incident_report(vessel_id: str, format: str = Query(
+            default="html", pattern="^(html|json)$")):
+        """The one-click incident report (CLAUDE.md §0).
+
+        HTML is the default because it is what an operator forwards: it opens
+        anywhere, prints to PDF in one keystroke, and is fully self-contained.
+        JSON is the same payload for anything that needs to consume it.
+        """
+        rep = service.build_incident_report(vessel_id)
+        if rep is None:
+            raise HTTPException(404, f"no vessel {vessel_id!r}")
+        if format == "json":
+            return rep
+        return HTMLResponse(
+            report.render_html(rep),
+            headers={
+                # `attachment` makes the button a download rather than a
+                # navigation, and names the file something findable later.
+                "Content-Disposition":
+                    f'attachment; filename="{report.filename_for(rep)}"',
+            })
 
     # ---- events / scenes / ports ----------------------------------------
     @api.get("/events", dependencies=guard)
