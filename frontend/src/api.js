@@ -56,7 +56,13 @@ export const api = {
       alert_id: id,
       disposition,
     }),
+  findings: (params) => get("/findings", params),
   events: (params) => get("/events", params),
+  // Per-H3-cell counts over the WHOLE corpus, not a page. The map uses this
+  // instead of plotting every event, which on the real corpus both truncated
+  // silently and rendered 27,000 dots as a smear.
+  eventDensity: (params) => get("/events/density", params),
+  detections: (params) => get("/detections", params),
   tracks: (params) => get("/tracks", params),
   scenes: () => get("/scenes"),
   ports: () => get("/ports"),

@@ -122,6 +122,7 @@ def _match_model(r: dict) -> dict:
         "vessel_flag": r.get("vessel_flag"),
         "vessel_imo": r.get("vessel_imo"),
         "registry": r.get("registry"),
+        "listed_entity_type": r.get("listed_entity_type"),
         "sanctions_as_of": as_iso(r.get("sanctions_as_of")),
         "is_synthetic": _is_syn(r),
     }
@@ -439,9 +440,20 @@ _EVENT_TABLES = {
 def list_events(*, kinds: Optional[list[str]] = None, start: Optional[str] = None,
                 end: Optional[str] = None, bbox: Optional[tuple] = None,
                 synthetic: Optional[bool] = None, limit: int = 2000) -> dict:
-    """Events across all four kinds, filterable by time and bbox."""
+    """Events across all four kinds, filterable by time and bbox.
+
+    **Truncation is reported, never silent.** `limit` applies per kind, and on
+    the real corpus a kind can hold far more than any sane page — 24,153
+    loitering events. Returning the first N ordered by `start_time` without
+    saying so meant the map drew a chronological prefix of the corpus and
+    stopped, which reads as "there were no events after mid-July" rather than
+    "you asked for 4,000 of 24,153". `truncated` names every kind that hit the
+    cap, with its true total, so the caller can say so or switch to
+    :func:`event_density`.
+    """
     kinds = kinds or list(_EVENT_TABLES)
     out: list[dict] = []
+    truncated: dict[str, dict] = {}
     with open_reader() as reader:
         for kind in kinds:
             table = _EVENT_TABLES.get(kind)
@@ -462,9 +474,13 @@ def list_events(*, kinds: Optional[list[str]] = None, start: Optional[str] = Non
                 clauses.append("is_synthetic = ?")
                 params.append(synthetic)
             where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+            matching = int(reader.scalar(
+                f"SELECT count(*) FROM {table}{where}", list(params)) or 0)
             rows = reader.rows(
                 f"SELECT * FROM {table}{where} "
                 f"ORDER BY start_time NULLS LAST LIMIT {int(limit)}", params)
+            if matching > len(rows):
+                truncated[kind] = {"returned": len(rows), "matching": matching}
             out += [_event_model(r, kind) for r in rows]
 
     count = {"real": sum(1 for e in out if not e["is_synthetic"]),
@@ -473,7 +489,455 @@ def list_events(*, kinds: Optional[list[str]] = None, start: Optional[str] = Non
     for e in out:
         c = by_kind.setdefault(e["kind"], {"real": 0, "synthetic": 0})
         c["synthetic" if e["is_synthetic"] else "real"] += 1
-    return {"items": out, "count": count, "by_kind": by_kind}
+    note = None
+    if truncated:
+        detail = ", ".join(f"{k} {v['returned']:,} of {v['matching']:,}"
+                           for k, v in sorted(truncated.items()))
+        note = (f"TRUNCATED — showing {detail}. These are the earliest by start "
+                "time, not a sample of the window. Use /api/events/density for "
+                "counts over the whole corpus.")
+    return {"items": out, "count": count, "by_kind": by_kind,
+            "truncated": truncated, "note": note}
+
+
+# --------------------------------------------------------------------------
+# findings — the ranked table the landed data actually supports
+# --------------------------------------------------------------------------
+#
+# `graph_report.py` settled what this screen should be: on the real corpus the
+# encounter graph is star-shaped (14 encounters across 9,184 vessels, 0 of 126
+# sanctions-matched hulls with an encounter neighbour), so a network view has
+# nothing to draw and **a ranked table is the product the data supports**.
+#
+# Two populations feed it, and they are not the same kind of claim:
+#
+#   * **GFW-assessed AIS disabling.** Global Fishing Watch flagged the gap as
+#     intentional. We did not compute it, we have no receiver-coverage model at
+#     those positions, and asserting intentional silence outside demonstrated
+#     coverage is a false positive by construction (CLAUDE.md §6). The honest
+#     sentence is "GFW assessed this gap as intentional disabling" — never "we
+#     detected a dark vessel", and `attribution` carries that to the UI.
+#   * **Sanctions identity matches.** OFAC/UN/EU decided who is designated and
+#     GFW observed the vessel; **our** contribution is the identity match
+#     between the two (ADR-018).
+#
+# There is deliberately **no blended risk number** here. Ranking is an explicit
+# ordered tuple of stated facts, and every fact that moved a row up is returned
+# in `basis` so an analyst reads the reason rather than trusting a float.
+
+#: Rank weights, highest first. Not a score — an ordering, printed with the row.
+_RANK = (
+    ("gfw_intentional_disabling", 1000,
+     "GFW assessed an AIS gap on this hull as intentional disabling"),
+    ("multi_registry", 400,
+     "designated by more than one sanctions registry — independent lists agree"),
+    ("imo_match", 200,
+     "matched on IMO, a permanent hull number that survives renaming"),
+    ("name_disagreement", 100,
+     "sails under a different name than the sanctions listing — the "
+     "identity-laundering signature an IMO match exists to catch"),
+    ("flag_disagreement", 50,
+     "flagged to a different state than the sanctions listing"),
+)
+
+
+def _event_counts_by_vessel(reader: Reader) -> dict[str, dict[str, int]]:
+    """{conformed_vessel_id: {kind: n}} across all four event tables.
+
+    One GROUP BY per table rather than a query per vessel — on the real corpus
+    that is four scans instead of ~9,000 round trips.
+    """
+    out: dict[str, dict[str, int]] = {}
+    for kind, table in _EVENT_TABLES.items():
+        if not reader.has(table):
+            continue
+        for r in reader.rows(
+                f"SELECT vessel_id, count(*) AS n FROM {table} "
+                "WHERE vessel_id IS NOT NULL GROUP BY vessel_id"):
+            out.setdefault(r["vessel_id"], {})[kind] = int(r["n"])
+    return out
+
+
+def _ports_by_vessel(reader: Reader) -> dict[str, list[str]]:
+    """{conformed_vessel_id: [readable port name, ...]}, most recent first."""
+    if not reader.has("gfw_port_visits"):
+        return {}
+    cols = reader.columns("gfw_port_visits")
+    names = [c for c in ("port_name", "visit_port_name", "anchorage_name",
+                         "anchorage_top_destination") if c in cols]
+    if not names:
+        return {}
+    expr = "coalesce(" + ", ".join(names) + ")"
+    out: dict[str, list[str]] = {}
+    for r in reader.rows(
+            f"SELECT vessel_id, {expr} AS place, max(start_time) AS last_at "
+            "FROM gfw_port_visits WHERE vessel_id IS NOT NULL "
+            f"AND {expr} IS NOT NULL GROUP BY vessel_id, place "
+            "ORDER BY last_at DESC NULLS LAST"):
+        out.setdefault(r["vessel_id"], []).append(r["place"])
+    return out
+
+
+def _identity_by_vessel(reader: Reader) -> dict[str, dict]:
+    if not reader.has("gfw_vessel_identity"):
+        return {}
+    return {r["vessel_id"]: r for r in reader.rows(_CURRENT_IDENTITY_SQL)}
+
+
+def _flagged_gaps(reader: Reader) -> list[dict]:
+    """AIS gaps GFW flagged as intentional disabling.
+
+    `gfw_intentional_disabling` lands as an INTEGER on the real corpus and a
+    BOOLEAN on the scenario one, so the filter is written to accept both rather
+    than assuming either.
+    """
+    if not reader.has("gfw_ais_gaps"):
+        return []
+    if "gfw_intentional_disabling" not in reader.columns("gfw_ais_gaps"):
+        return []
+    return reader.rows(
+        "SELECT * FROM gfw_ais_gaps "
+        "WHERE gfw_intentional_disabling IS NOT NULL "
+        "AND CAST(gfw_intentional_disabling AS INTEGER) = 1 "
+        "ORDER BY start_time DESC NULLS LAST")
+
+
+def _name_key(v) -> Optional[str]:
+    if not v:
+        return None
+    return " ".join(str(v).upper().split())
+
+
+def list_findings(*, synthetic: Optional[bool] = None,
+                  limit: int = 500) -> dict:
+    """The ranked findings table. Returns {items, count, basis_legend, notes}."""
+    with open_reader() as reader:
+        identity = _identity_by_vessel(reader)
+        gaps = _flagged_gaps(reader)
+        counts = _event_counts_by_vessel(reader)
+        ports = _ports_by_vessel(reader)
+        matches: list[dict] = []
+        if reader.has("sanctioned_vessel_matches"):
+            matches = reader.rows("SELECT * FROM sanctioned_vessel_matches")
+
+    # ---- assemble one entry per vessel, from both populations --------------
+    entries: dict[str, dict] = {}
+
+    def entry_for(conformed_vid: str, row: dict) -> dict:
+        cid = canonical_id(conformed_vid)
+        ident = identity.get(conformed_vid, {})
+        e = entries.get(cid)
+        if e is None:
+            c = counts.get(conformed_vid, {})
+            e = entries[cid] = {
+                "id": cid,
+                "name": ident.get("ship_name") or row.get("ship_name")
+                        or row.get("vessel_name"),
+                "mmsi": _s(ident.get("mmsi") or row.get("mmsi")),
+                "imo": _s(ident.get("imo") or row.get("vessel_imo")),
+                "flag": ident.get("flag") or row.get("flag")
+                        or row.get("vessel_flag"),
+                "vessel_type": ident.get("vessel_class") or ident.get("vessel_type"),
+                "event_counts": {k: c.get(k, 0) for k in _EVENT_TABLES},
+                "ports": ports.get(conformed_vid, [])[:5],
+                "dark_gaps": [],
+                "sanctions": [],
+                "registries": [],
+                "basis": [],
+                "_signals": set(),
+                "is_synthetic": _is_syn(ident) or _is_syn(row),
+                "prov": _prov(ident or row),
+            }
+        return e
+
+    # 1. GFW-assessed intentional AIS disabling
+    for g in gaps:
+        vid = g.get("vessel_id")
+        if not vid:
+            continue
+        e = entry_for(vid, g)
+        e["dark_gaps"].append({
+            "start_time": as_iso(g.get("start_time")),
+            "end_time": as_iso(g.get("end_time")),
+            "duration_hours": g.get("gap_duration_hours") or g.get("duration_hours"),
+            "off_lat": g.get("gap_off_lat"), "off_lon": g.get("gap_off_lon"),
+            "on_lat": g.get("gap_on_lat"), "on_lon": g.get("gap_on_lon"),
+            "distance_km": g.get("gap_distance_km"),
+            "distance_from_shore_km": g.get("start_distance_from_shore_km"),
+            # The one sentence that must travel with this row everywhere.
+            "attribution": "Global Fishing Watch assessed this gap as "
+                           "intentional AIS disabling",
+            "is_synthetic": _is_syn(g),
+            "prov": _prov(g),
+        })
+        e["_signals"].add("gfw_intentional_disabling")
+
+    # 2. sanctions findings (candidates are carried but never rank a row up)
+    for m in matches:
+        vid = m.get("vessel_id")
+        if not vid:
+            continue
+        e = entry_for(vid, m)
+        e["sanctions"].append(_match_model(m))
+        reg = m.get("registry") or "OFAC"
+        if reg not in e["registries"]:
+            e["registries"].append(reg)
+        if not m.get("is_finding"):
+            continue
+        if m.get("match_tier") == "imo":
+            e["_signals"].add("imo_match")
+        # Name and flag disagreement only mean anything when the sanctions list
+        # designated a SHIP. A scenario match reached through ownership carries
+        # a company in `ofac_name`, and a hull name never equals a company name
+        # — scoring that as identity laundering would fire the signal on every
+        # such row. Rows landed before the column existed are treated as vessel
+        # designations, which is what the real matcher has always produced.
+        if (m.get("listed_entity_type") or "vessel") != "vessel":
+            continue
+        listed_name = _name_key(m.get("ofac_name"))
+        our_name = _name_key(e["name"])
+        if listed_name and our_name and listed_name != our_name:
+            e["_signals"].add("name_disagreement")
+        listed_flag = _name_key(m.get("ofac_flag"))
+        our_flag = _name_key(e["flag"])
+        if listed_flag and our_flag and listed_flag != our_flag:
+            e["_signals"].add("flag_disagreement")
+
+    # ---- rank, and say why -------------------------------------------------
+    items = []
+    for e in entries.values():
+        findings = [s for s in e["sanctions"] if s.get("is_finding")]
+        if len({s.get("registry") or "OFAC" for s in findings}) > 1:
+            e["_signals"].add("multi_registry")
+
+        # A row earns its place only through a finding-grade signal. A
+        # name-only sanctions candidate is a lead for the vessels table, not a
+        # finding — putting it here would be the alert-fatigue failure ADR-004
+        # names outright.
+        if not e["_signals"]:
+            continue
+
+        priority = 0
+        basis = []
+        for key, weight, sentence in _RANK:
+            if key in e["_signals"]:
+                priority += weight
+                basis.append({"signal": key, "weight": weight,
+                              "explanation": sentence})
+        e["priority"] = priority
+        e["basis"] = basis
+        e["has_dark_gap"] = bool(e["dark_gaps"])
+        e["sanctions_is_finding"] = bool(findings)
+        e["attribution"] = ("Global Fishing Watch (gap assessment) + "
+                            "OFAC/UN/EU (designation); the identity match "
+                            "between them is ours")
+        e["headline"] = _finding_headline(e)
+        e.pop("_signals", None)
+        items.append(e)
+
+    if synthetic is not None:
+        items = [i for i in items if i["is_synthetic"] == synthetic]
+
+    # Ties broken by observed activity, so two hulls with identical evidence
+    # order by how much of them we actually saw rather than arbitrarily.
+    items.sort(key=lambda i: (i["priority"], sum(i["event_counts"].values())),
+               reverse=True)
+    count = {"real": sum(1 for i in items if not i["is_synthetic"]),
+             "synthetic": sum(1 for i in items if i["is_synthetic"])}
+    return {
+        "items": items[:limit],
+        "count": count,
+        "total_matched": len(items),
+        "basis_legend": [{"signal": k, "weight": w, "explanation": s}
+                         for k, w, s in _RANK],
+        "notes": _findings_notes(items),
+    }
+
+
+def _finding_headline(e: dict) -> str:
+    """One plain-English sentence — what a non-engineer reads first.
+
+    Written to be true rather than dramatic: it names who asserted what. The
+    demo definition (CLAUDE.md §0) is that a non-engineer can click a vessel and
+    read the reason it was flagged, so this sentence is the product.
+    """
+    name = e["name"] or e["id"]
+    # Every clause is a verb phrase with the vessel as its subject, so they
+    # compose into one readable sentence rather than a list of fragments.
+    bits = []
+    if e["dark_gaps"]:
+        n = len(e["dark_gaps"])
+        bits.append(f"had {n} AIS gap{'' if n == 1 else 's'} that Global "
+                    f"Fishing Watch assessed as intentional disabling — the "
+                    f"transponder went quiet and GFW judged it deliberate")
+    findings = [s for s in e["sanctions"] if s.get("is_finding")]
+    if findings:
+        regs = " and ".join(sorted({s.get("registry") or "OFAC"
+                                    for s in findings}))
+        tier = "IMO" if any(s.get("match_tier") == "imo" for s in findings) \
+            else "call sign and name"
+        if all((s.get("listed_entity_type") or "vessel") != "vessel"
+               for s in findings):
+            # The designation names a company, not this hull. Saying "matches a
+            # sanctions listing" would imply the ship itself is listed.
+            owner = next((s.get("ofac_name") for s in findings
+                          if s.get("ofac_name")), "a designated entity")
+            bits.append(f"is owned or operated by {owner}, designated under "
+                        f"{regs} — the hull itself is not listed")
+        else:
+            bits.append(f"matches a sanctions listing on {regs}, on {tier}")
+    if any(b["signal"] == "name_disagreement" for b in e["basis"]):
+        listed = next((s.get("ofac_name") for s in findings if s.get("ofac_name")),
+                      None)
+        if listed:
+            bits.append(f"sails as {name} while listed as {listed}")
+    if not bits:
+        return f"{name} carries no stated basis."
+    return f"{name} " + "; ".join(bits) + "."
+
+
+def _findings_notes(items: list[dict]) -> list[str]:
+    notes = []
+    real = [i for i in items if not i["is_synthetic"]]
+    syn = [i for i in items if i["is_synthetic"]]
+    notes.append(
+        f"{len(real)} finding(s) from the real corpus, {len(syn)} from the "
+        "scenario corpus. Scenario rows are generated and prove the machinery "
+        "runs; they are not evidence about real vessels (CLAUDE.md §4.6).")
+    dark = [i for i in items if i["has_dark_gap"]]
+    if dark:
+        notes.append(
+            f"{len(dark)} hull(s) carry a GFW intentional-disabling assessment. "
+            "That is GFW's finding, carried through with attribution — we did "
+            "not detect it. Our own dark-vessel detection needs SAR contacts "
+            "matched against AIS tracks and has not produced a result on real "
+            "data (CLAUDE.md §5).")
+    else:
+        notes.append(
+            "No GFW intentional-disabling assessment in this corpus. The demo "
+            "cannot show a real dark vessel from it.")
+    return notes
+
+
+# --------------------------------------------------------------------------
+# SAR detections (radar contacts)
+# --------------------------------------------------------------------------
+
+def list_detections(*, limit: int = 5000) -> dict:
+    """Radar contacts from processed SAR scenes.
+
+    **Everything this returns today is synthetic.** `scenario_detections` is
+    written by the scenario generator; no real SAR imagery has been processed
+    (Phase 1 is deferred under ADR-017, and GFW's SAR datasets have been offline
+    upstream since 2026-07-03). The endpoint exists so the fusion story is
+    visible on the map — a radar contact with no AIS beside it is the shape of
+    a dark-vessel detection — and so it needs no new wiring when real contacts
+    arrive. The note says so rather than letting an empty real split imply the
+    pipeline ran and found nothing.
+    """
+    with open_reader() as reader:
+        if not reader.has("scenario_detections"):
+            return {"items": [], "count": {"real": 0, "synthetic": 0},
+                    "note": "no detection table landed — no SAR scene has been "
+                            "processed (Phase 1 deferred, ADR-017)"}
+        rows = reader.rows(
+            f"SELECT * FROM scenario_detections ORDER BY ts NULLS LAST "
+            f"LIMIT {int(limit)}")
+    items = [{
+        "id": _s(r.get("detection_id")),
+        "scene_id": r.get("scene_id"),
+        "lat": r.get("lat"),
+        "lon": r.get("lon"),
+        "ts": as_iso(r.get("ts")),
+        "length_m": r.get("length_m"),
+        "score": r.get("score"),
+        # Null means no AIS track was associated with this contact. That is the
+        # dark-vessel shape — but only inside demonstrated receiver coverage,
+        # which is why the UI must not label it "dark" on its own (ADR-005).
+        "matched_mmsi": _s(r.get("matched_mmsi")),
+        "is_synthetic": _is_syn(r),
+        "prov": _prov(r),
+    } for r in rows]
+    count = {"real": sum(1 for d in items if not d["is_synthetic"]),
+             "synthetic": sum(1 for d in items if d["is_synthetic"])}
+    note = None
+    if count["real"] == 0 and count["synthetic"]:
+        note = ("all contacts are synthetic — no real SAR scene has been "
+                "processed. An unmatched contact is not by itself a dark "
+                "vessel: that requires demonstrated AIS reception at the "
+                "position (ADR-005).")
+    return {"items": items, "count": count, "note": note}
+
+
+# --------------------------------------------------------------------------
+# event density — H3 aggregation for the map
+# --------------------------------------------------------------------------
+
+#: H3 resolutions the density endpoint will aggregate at. Res 4 hexes are
+#: ~22 km across and res 6 ~3.2 km — coarse enough that 24,153 loitering events
+#: become a few hundred cells instead of 24,153 overlapping dots.
+DENSITY_RES = {4: "h3_r4", 6: "h3_r6", 7: "h3_r7"}
+
+
+def event_density(*, res: int = 4, kinds: Optional[list[str]] = None,
+                  synthetic: Optional[bool] = None) -> dict:
+    """Per-H3-cell event counts, so the map can show the WHOLE corpus.
+
+    The map used to request the first N events and draw them as individual
+    dots. On the real corpus that silently truncated: 24,153 loitering events
+    ordered by `start_time` against a 4,000-row request meant roughly the last
+    five weeks of the window were simply not on screen, with nothing saying so.
+
+    Aggregating server-side fixes both halves of that — the count is over every
+    row, not a page, and a few hundred graduated hexagons read as a density
+    surface where 24,000 identical dots read as a smear.
+    """
+    col = DENSITY_RES.get(res)
+    if col is None:
+        raise ValueError(f"unsupported resolution {res}; "
+                         f"choose one of {sorted(DENSITY_RES)}")
+    kinds = kinds or list(_EVENT_TABLES)
+    cells: dict[str, dict] = {}
+    missing_h3: list[str] = []
+    with open_reader() as reader:
+        for kind in kinds:
+            table = _EVENT_TABLES.get(kind)
+            if not table or not reader.has(table):
+                continue
+            if col not in reader.columns(table):
+                # ADR-015: rows landed before the five-resolution fix carry only
+                # r7 and r9. Say which table, do not silently drop it.
+                missing_h3.append(table)
+                continue
+            clauses = [f"{col} IS NOT NULL"]
+            params: list = []
+            if synthetic is not None and "is_synthetic" in reader.columns(table):
+                clauses.append("is_synthetic = ?")
+                params.append(synthetic)
+            where = " WHERE " + " AND ".join(clauses)
+            for r in reader.rows(
+                    f"SELECT {col} AS cell, "
+                    "COALESCE(is_synthetic, FALSE) AS syn, "
+                    "count(*) AS n, avg(lat) AS lat, avg(lon) AS lon "
+                    f"FROM {table}{where} GROUP BY 1, 2", params):
+                c = cells.setdefault(r["cell"], {
+                    "cell": r["cell"], "lat": r["lat"], "lon": r["lon"],
+                    "real": 0, "synthetic": 0, "by_kind": {}})
+                n = int(r["n"])
+                c["synthetic" if r["syn"] else "real"] += n
+                c["by_kind"][kind] = c["by_kind"].get(kind, 0) + n
+
+    items = sorted(cells.values(), key=lambda c: c["real"] + c["synthetic"],
+                   reverse=True)
+    count = {"real": sum(c["real"] for c in items),
+             "synthetic": sum(c["synthetic"] for c in items)}
+    note = None
+    if missing_h3:
+        note = (f"{', '.join(sorted(set(missing_h3)))} carry no {col} — those "
+                "rows were landed before ADR-015 and are NOT counted here. "
+                "Run `python tools/restamp_h3.py` to recompute the missing "
+                "resolutions from lat/lon.")
+    return {"items": items, "count": count, "res": res, "note": note}
 
 
 # --------------------------------------------------------------------------

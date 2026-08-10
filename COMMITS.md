@@ -145,3 +145,47 @@ keyspace defect governed what an alert *connected to*, not whether it was
 raised, and reporting that plainly was the point of the session. What changed:
 MMSI-to-hull resolution went from **0 of 103** to **102 of 103**, and an alert
 now reaches a hull with a median of 4 edges instead of a provisional stub with 1.
+
+---
+
+## demo: show the data we already have — findings table, UN+EU, density, SAR contacts (ADR-024)
+
+One logical unit: stop discarding landed data at the serving layer.
+
+```
+git add maritime_isr/api/{app,models,service}.py \
+        maritime_isr/ingest/sanctions_match.py maritime_isr/cli.py \
+        maritime_isr/scenario/land.py maritime_isr/scenario/scenarios/common.py \
+        frontend/src/views/FindingsView.jsx frontend/src/views/MapView.jsx \
+        frontend/src/App.jsx frontend/src/api.js frontend/dist \
+        tests/test_sanctions_match.py tests/test_api_exercise.py \
+        DECISIONS.md STATE.md COMMITS.md
+git commit -m "demo: a ranked findings table, three sanctions registries, and the whole corpus on the map"
+```
+
+Verification, in this order:
+
+```
+python -m pytest tests/test_sanctions_match.py -q    # 47 green (16 new)
+python -m pytest tests/test_api_exercise.py -q       # 28 green (15 new)
+python -m pytest tests/ -q                           # 480 green
+cd frontend && npm run build                         # dist/ rebuilt
+python -m maritime_isr.api                           # open /findings and /
+```
+
+**On the laptop, additionally — the matcher must be re-run.**
+`sanctioned_vessel_matches` gains `registry`, `listed_entity_type` and the
+`vessel_*` fields, and `registry` joins the natural key:
+
+```
+python -m maritime_isr.cli ingest registries          # refresh UN + EU
+python -m maritime_isr.cli ingest sanctions-match     # all three registries
+```
+
+*The number to look for:* how many findings UN and EU add beyond OFAC's 126.
+**Zero is a reportable result** — those lists name far fewer vessels than OFAC.
+`--registries OFAC` reproduces the pre-ADR-024 behaviour for comparison.
+
+Scenario generation is unchanged in geometry — the only new column on a
+scenario row is `listed_entity_type`, so the corpus is otherwise byte-identical
+and the determinism test stays green.

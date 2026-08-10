@@ -67,6 +67,11 @@ class SanctionsMatch(BaseModel):
     vessel_flag: Optional[str] = None
     vessel_imo: Optional[str] = None
     registry: Optional[str] = None
+    #: What the sanctions list designated — "vessel" (the hull itself is
+    #: listed) or "organisation" (the hull is reached through its owner). It
+    #: decides what `ofac_name` holds, and therefore whether a name difference
+    #: is the identity-laundering signal or just a ship not being a company.
+    listed_entity_type: Optional[str] = None
     sanctions_as_of: Optional[str] = None
     is_synthetic: bool = False
 
@@ -258,6 +263,104 @@ class Event(BaseModel):
     distance_from_shore_km: Optional[float] = None
     classification: Optional[str] = None
     attribution: Optional[str] = None
+    is_synthetic: bool = False
+    prov: Provenance
+
+
+class DensityCell(BaseModel):
+    """Events aggregated into one H3 cell, so the map can show the whole corpus.
+
+    Counts are over every matching row, not a page — that is the point of this
+    shape. `lat`/`lon` are the mean event position inside the cell, which is
+    good enough to place a graduated marker and avoids shipping hex geometry.
+    """
+    cell: str
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+    real: int = 0
+    synthetic: int = 0
+    by_kind: dict[str, int] = {}
+
+
+class Detection(BaseModel):
+    """A radar contact from a processed SAR scene.
+
+    `matched_mmsi` null means no AIS track was associated. That is the *shape*
+    of a dark vessel, not a dark vessel: asserting intentional silence requires
+    demonstrated receiver coverage at the position (ADR-005, CLAUDE.md §6), so
+    the UI must not label an unmatched contact dark on its own.
+    """
+    id: Optional[str] = None
+    scene_id: Optional[str] = None
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+    ts: Optional[str] = None
+    length_m: Optional[float] = None
+    score: Optional[float] = None
+    matched_mmsi: Optional[str] = None
+    is_synthetic: bool = False
+    prov: Provenance
+
+
+class FindingBasis(BaseModel):
+    """One stated reason a finding ranks where it does.
+
+    Ranking is an ordered list of facts, not a blended score, and every fact
+    that moved a row up is returned with it. An analyst reads the reason rather
+    than trusting a float (CLAUDE.md §4.1 — a flag you cannot trace is worse
+    than no flag).
+    """
+    signal: str
+    weight: int
+    explanation: str
+
+
+class FindingGap(BaseModel):
+    """An AIS gap GFW assessed as intentional disabling.
+
+    `attribution` is required reading: this is **GFW's** assessment carried
+    through, not our detection. We did not compute it and have no coverage
+    model at these positions (CLAUDE.md §6).
+    """
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
+    duration_hours: Optional[float] = None
+    off_lat: Optional[float] = None
+    off_lon: Optional[float] = None
+    on_lat: Optional[float] = None
+    on_lon: Optional[float] = None
+    distance_km: Optional[float] = None
+    distance_from_shore_km: Optional[float] = None
+    attribution: str
+    is_synthetic: bool = False
+    prov: Provenance
+
+
+class Finding(BaseModel):
+    """One row of the ranked findings table — the M6 demo's primary product.
+
+    This is the screen `graph_report.py` concluded the landed data supports: on
+    the real corpus the encounter graph is star-shaped, so a network view has
+    nothing to draw and a ranked list does. `headline` is the plain-English
+    sentence a non-engineer reads first, and it names who asserted what.
+    """
+    id: str
+    name: Optional[str] = None
+    mmsi: Optional[str] = None
+    imo: Optional[str] = None
+    flag: Optional[str] = None
+    vessel_type: Optional[str] = None
+    priority: int
+    headline: str
+    attribution: str
+    basis: list[FindingBasis]
+    has_dark_gap: bool = False
+    sanctions_is_finding: bool = False
+    registries: list[str] = []
+    dark_gaps: list[FindingGap] = []
+    sanctions: list[SanctionsMatch] = []
+    event_counts: dict[str, int] = {}
+    ports: list[str] = []
     is_synthetic: bool = False
     prov: Provenance
 

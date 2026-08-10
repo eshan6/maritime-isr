@@ -437,8 +437,10 @@ def cmd_live_ingest(args):
         from .ingest.gfw_vessels import run
         return run(limit=args.limit)
     if args.source == "sanctions-match":
-        from .ingest.sanctions_match import run
-        return run()
+        from .ingest.sanctions_match import REGISTRY_ORDER, run
+        regs = (tuple(r.strip().upper() for r in args.registries.split(","))
+                if args.registries else REGISTRY_ORDER)
+        return run(registries=regs)
     if args.source == "registries":
         from .ingest.registries import run
         return run(only=args.only, path=args.path)
@@ -487,8 +489,12 @@ def main():
     pves = ing.add_parser("gfw-vessels", help="identity for vessels seen in the event tables")
     pves.add_argument("--limit", type=int, default=None)
 
-    ing.add_parser("sanctions-match",
-                   help="match identified vessels against OFAC sanctioned hulls (ADR-016a)")
+    psm = ing.add_parser(
+        "sanctions-match",
+        help="match identified vessels against OFAC/UN/EU sanctioned hulls (ADR-016a)")
+    psm.add_argument("--registries", default=None,
+                     help="comma list of OFAC,UN,EU — default is all three. "
+                          "Use --registries OFAC to reproduce a pre-UN/EU run.")
 
     preg = ing.add_parser("registries", help="OFAC SDN, UN, EU sanctions + WPI ports")
     preg.add_argument("--only", choices=["ofac", "un", "eu", "wpi"], default=None,

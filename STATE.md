@@ -8,7 +8,10 @@ session. `CLAUDE.md`, `ARCHITECTURE.md`, `DECISIONS.md` are stable contracts;
 > between status buckets, record what was verified vs assumed, log anything now
 > broken, and set "Next up." If you don't update it, the next session starts blind.
 
-**Last updated:** 2026-07-31 (second pass). The real corpus profile landed
+**Last updated:** 2026-08-10 — demo data-coverage session (ADR-024): findings
+table, UN+EU sanctions matching, map density + truncation honesty, SAR contact
+layer. See "Demo data coverage" at the end of this file. Prior entry:
+2026-07-31 (second pass). The real corpus profile landed
 from the laptop and **found six defects in the generator**, all now fixed —
 most seriously, synthetic rows were separable from real ones by a single
 `IS NOT NULL` filter. Seven of fifteen parameters are now MEASURED from 12,483
@@ -974,6 +977,35 @@ earlier 18% was measured against a corpus that was easier than reality.
    Not mutually exclusive — (a) now, (b) or (c) later. Still **do not let this be
    decided by default**, but it no longer gates the build.
 
+9. **Should the scenario corpus simulate GFW's `gfw_intentional_disabling`
+   verdict?** Right now it does not — every synthetic gap lands the column
+   `None`, by an explicit decision in `scenario/scenarios/common.py`, on the
+   grounds that inventing another organisation's assessment puts words in their
+   mouth and could hand the answer to any detector that read it.
+
+   **Half of that decision's stated justification is now refuted.** The
+   docstring also argued "the real corpus has exactly zero gaps flagged
+   intentional, so the combined column stays honest." That was measured against
+   a column that was null because of a mapper bug. The host run on 2026-07-31
+   found **5 of 5 real gaps flagged `intentionalDisabling=true`**. So across a
+   combined corpus the real gaps are 100% flagged and the synthetic ones 100%
+   null, and `gfw_intentional_disabling IS NULL` is a **single-filter
+   synthetic-row detector** — the exact defect class `scenario/nulls.py` exists
+   to close (ADR-019).
+
+   The practical cost: the Findings screen's dark-gap section — the most
+   valuable rows in the real corpus — is **empty on any sandbox corpus** and
+   populated only where the real rows live. Nothing can exercise it here.
+
+   *Not fixed, deliberately.* Simulating a third party's assessment is a
+   decision about what the scenario corpus may claim, not a bug fix. If it is
+   taken, the defensible construction is to derive GFW's flag from the physical
+   cause **and** the modelled reception at the off-position — true only where an
+   intentional shutdown happened inside plausible coverage, null where it
+   happened outside it, false for other causes in coverage — so the column is
+   not a copy of the answer key, plus a guard test that no detection path reads
+   it. **Ask Eshan before doing it.**
+
 8. **Terminology: "D1"/"D2" are retired.** They were never defined in the repo
    and collided with the `D-0x` decision-ID shorthand. Refer to work by execution
    spec unit numbers (0.0–6.3) or in plain language. What earlier sessions called
@@ -1501,3 +1533,120 @@ deliberately append-only (§6, it cannot be backfilled). Alerts carry a
 `source_ref`; the measurement should filter on the current pipeline version
 rather than trusting the table. That is a harness design change and wants its
 own decision.
+
+---
+
+## Demo data coverage — what the demo shows, and four things it was discarding (2026-08-10)
+
+**The question:** *"What data do we have in our demo? Is it only synthetic? We
+need to show more than we currently are."* Answered by measurement, not by
+reading the docs — the corpus was regenerated in the sandbox and every number
+below came off a running API.
+
+### What the demo actually held, measured
+
+Sandbox (a fresh clone with `scenario generate` + `run_scenario_pipeline`):
+
+```
+vessels     210 synthetic /   0 real     alerts        1 synthetic / 0 real
+events      432 synthetic /   0 real     sanctions    19 synthetic / 0 real
+ais_position 211,562 synthetic / 0 real  scenes        0 (catalog is on the laptop)
+```
+
+**So: in the sandbox, 100% synthetic.** On the laptop it is both — real and
+scenario rows share every table, split by `is_synthetic` on every count.
+
+**The sharper answer, and the one that matters for the demo:** *everything that
+moves on the map is synthetic, always.* The time scrubber animates vessels
+along AIS position tracks, and the real corpus has **zero AIS positions** —
+there is no free raw AIS for this AOI. Real data can only ever appear there as
+static event dots plus scene footprints. Equally, **real alerts will always be
+0** on the current build: every detector reads the track engine, and there are
+no real tracks to read (ADR-005).
+
+### Four things landed and reaching no screen — all now fixed (ADR-024)
+
+1. **UN + EU sanctions were matched against nothing.** 7,028 real designated-
+   entity rows landed since the first live run, read by no code path outside a
+   reporting script. `sanctions_match.py` now matches all three registries, on
+   terms that fit what UN and EU actually are (no vessel record type, so IMO
+   from free text plus a vessel-marker gate on name matching). Indexes are built
+   **per registry** so OFAC's published 126/98 cannot move for a UN-shaped
+   reason, and a hull designated by two lists lands two rows — corroboration,
+   not ambiguity.
+2. **The map silently truncated the real corpus.** `limit: 4000` applied per
+   kind with `ORDER BY start_time` meant 24,153 real loitering events rendered
+   as the earliest 4,000 and stopped, reading as "nothing happened after
+   mid-July." Added `/api/events/density` (per-H3-cell counts over **every**
+   row, drawn as graduated markers), and `/api/events` now returns `truncated`
+   per kind with the true total, surfaced on screen.
+3. **The 636 Sentinel-1 footprints defaulted to a layer that was off.** On.
+4. **`scenario_detections` had no endpoint,** so the map could not draw a radar
+   contact at all. Added `/api/detections` + a layer that draws an unmatched
+   contact **hollow** — the shape of a dark vessel, with the word withheld.
+
+Plus the screen the data was always asking for: **`/api/findings` and a Findings
+tab**, leading with GFW-assessed intentional-disabling gaps and then the
+IMO-matched sanctioned hulls, each row expandable to its evidence. Rank is a sum
+of named signals, never a blended score, and a test asserts the priority equals
+the sum of the reasons shown.
+
+### Two real-vs-synthetic divergences found while building it
+
+Both are the ADR-019 separability family, and both were invisible until the same
+code read both corpora:
+
+1. **`ofac_name` meant two different things** — a listed *vessel* name from the
+   real matcher, a *company* name from the scenario generator (which reaches a
+   hull through its owner). So "sails under a different name than the listing"
+   fired on **19 of 19** scenario rows, turning the identity-laundering signal
+   into noise. Fixed with an explicit `listed_entity_type` on both sides.
+2. **The matcher wrote `ship_name`/`flag`/`imo`; the API reads `vessel_name`/
+   `vessel_flag`/`vessel_imo`.** The scenario generator wrote the latter, so the
+   sanctions panel looked right on scenario data and rendered **blank vessel
+   fields on the real corpus**. The matcher now writes both.
+
+### Status, stated precisely
+
+**Built + verified in sandbox.** 480 tests green (28 of them new, covering the
+findings contract, density-vs-page, truncation honesty and detection
+labelling), frontend builds, and both screens were rendered in a headless
+browser and read. **None of this has run against the real corpus** — that lives
+on the laptop, and every number above the "measured" heading is from the
+scenario corpus.
+
+### What Eshan needs to run, in this order
+
+```
+python -m maritime_isr.cli ingest registries          # refresh UN + EU
+python -m maritime_isr.cli ingest sanctions-match     # now all three registries
+python tools/data_health.py                           # the demo gate
+python -m maritime_isr.api                            # then open /findings
+```
+
+**The matcher must be re-run** — `sanctioned_vessel_matches` gains `registry`,
+`listed_entity_type` and the `vessel_*` fields, and `registry` joins the natural
+key, so rows landed earlier carry retired semantics. `--registries OFAC`
+reproduces the previous behaviour exactly if the new number needs comparing
+against the old one.
+
+*Success:* it prints a per-registry breakdown, a tier breakdown, and — if any
+hull is designated by two lists — a line naming how many. *The number to look
+for:* how many findings UN and EU add beyond OFAC's 126. **Report it even if it
+is zero** — zero is a finding about the free data (UN and EU list far fewer
+vessels than OFAC, and mostly DPRK-related hulls that may not trade in this
+AOI), not a failure.
+
+Then open `/findings`. On the real corpus its top section should hold the **5
+GFW-flagged intentional-disabling gaps**. If it is empty there, the flag did not
+survive the rebuild and `tools/rebuild_conformed.py` needs re-running.
+
+### Still open after this
+
+- **The scenario corpus cannot exercise the dark-gap section** — see OPEN
+  QUESTION #9. Synthetic gaps land `gfw_intentional_disabling = None`, so
+  `IS NULL` is a synthetic-row detector across a combined corpus. Deliberately
+  not fixed; it needs a decision, not a patch.
+- **Real alerts remain structurally impossible** and no work here changes that.
+- **The 3,000-row port-visit page cap is still unpaginated**, so no count taken
+  from that table describes the Arabian Sea.

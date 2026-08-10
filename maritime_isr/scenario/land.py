@@ -462,6 +462,16 @@ def land_world(world: ScenarioWorld) -> dict[str, int]:
             ofac_imo=None, sanctions_as_of=s["as_of"],
             vessel_name=v.name, vessel_imo=str(v.imo), vessel_flag=v.flag,
             registry=s["registry"],
+            # `ofac_name` means two different things across the two corpora and
+            # a reader cannot tell which without this column. The real matcher
+            # only ever matches `sdn_type='vessel'` rows, so its `ofac_name` is
+            # the LISTED VESSEL's name; here the designation is against an ORG
+            # and the vessel is reached through ownership, so `ofac_name` is a
+            # company. Without the distinction, "our name disagrees with the
+            # listing" fires on every scenario row — a hull name never equals a
+            # company name — and the identity-laundering signal it is supposed
+            # to carry becomes noise.
+            listed_entity_type="organisation",
         )
         match_rows.append(_stamp(row, source_ref=f"{v.entity_id}:{s['entry_id']}",
                                  acquired_at=s["as_of"], confidence=0.95))
