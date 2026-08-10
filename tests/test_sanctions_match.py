@@ -455,3 +455,309 @@ def test_reported_count_is_what_landed_not_what_was_built(tmp_path, monkeypatch,
     assert "2 built" in out, "the gap between built and landed must be explained, not hidden"
     assert "landed 2 match" not in out, "the built count must never be the headline"
     con.close()
+
+
+# ==========================================================================
+# UN and EU registries
+#
+# Neither list has a vessel record type, a call-sign column or a flag column.
+# Everything below exists to keep that difference from being flattened into
+# "another OFAC" — which would turn thousands of company and person names into
+# vessel name-match candidates.
+# ==========================================================================
+
+def _un_xml(*entities: str) -> bytes:
+    body = "".join(entities)
+    return f"<CONSOLIDATED_LIST>{body}</CONSOLIDATED_LIST>".encode()
+
+
+def _un_entity(data_id: str, name: str, comments: str = "",
+               list_type: str = "DPRK") -> str:
+    return (f"<ENTITY><DATAID>{data_id}</DATAID>"
+            f"<FIRST_NAME>{name}</FIRST_NAME>"
+            f"<UN_LIST_TYPE>{list_type}</UN_LIST_TYPE>"
+            f"<COMMENTS1>{comments}</COMMENTS1></ENTITY>")
+
+
+def _un_individual(data_id: str, name: str) -> str:
+    return (f"<INDIVIDUAL><DATAID>{data_id}</DATAID>"
+            f"<FIRST_NAME>{name}</FIRST_NAME>"
+            f"<UN_LIST_TYPE>DPRK</UN_LIST_TYPE></INDIVIDUAL>")
+
+
+def _un_con(tmp_path, monkeypatch, xml: bytes, name: str = "un.duckdb"):
+    import duckdb
+
+    from maritime_isr.ingest import registries as reg
+
+    con = duckdb.connect(str(tmp_path / name))
+    reg._ensure_snapshot_meta(con)
+    monkeypatch.setattr(reg, "_fetch", lambda *a, **k: xml)
+    reg.refresh_un(con, AS_OF)
+    return con
+
+
+# ---- free-text IMO extraction --------------------------------------------
+
+def test_imo_extraction_requires_the_imo_keyword():
+    """A bare 7-digit number is not an IMO.
+
+    Sanctions free text is full of registration, passport and licence numbers
+    of exactly seven digits. Anchoring on the literal token is what stops a
+    passport number becoming a 0.95-confidence hull match.
+    """
+    assert sm.extract_imo_from_text("IMO 9111228") == "9111228"
+    assert sm.extract_imo_from_text("Passport No. 9111228") is None
+
+
+def test_imo_extraction_still_validates_the_check_digit():
+    """Anchoring and the checksum are independent checks; both must hold."""
+    assert sm.extract_imo_from_text("IMO 9111228") == "9111228"
+    assert sm.extract_imo_from_text("IMO 9111229") is None, "check digit fails"
+
+
+def test_imo_extraction_tolerates_separators_between_keyword_and_digits():
+    assert sm.extract_imo_from_text("IMO No. 9111228") == "9111228"
+    assert sm.extract_imo_from_text("IMO: 9111228") == "9111228"
+
+
+def test_imo_extraction_does_not_reach_across_a_long_run_of_text():
+    """The keyword must be near the digits, or it is not labelling them."""
+    assert sm.extract_imo_from_text("IMO listed, see annex, reference 9111228") is None
+
+
+# ---- the vessel-marker gate ----------------------------------------------
+
+def test_vessel_marker_admits_text_that_names_a_ship():
+    assert sm.looks_like_vessel("Vessel flying the flag of Panama")
+    assert sm.looks_like_vessel("Crude oil tanker, gross tonnage 60,000")
+
+
+def test_vessel_marker_rejects_an_ordinary_company():
+    assert not sm.looks_like_vessel("KOREA KUMSAN TRADING CORPORATION", "Pyongyang")
+
+
+def test_un_individuals_are_dropped(tmp_path, monkeypatch):
+    """A person is not a hull, and a vessel name matching a person's name is
+    pure collision — the exact false positive ADR-004 is about."""
+    con = _un_con(tmp_path, monkeypatch, _un_xml(
+        _un_individual("100", "SEA HARRIER"),
+        _un_entity("200", "SEA HARRIER", "Vessel, flag Panama"),
+    ))
+    rows = sm.load_un_vessels(con, AS_OF)
+    assert len(rows) == 1
+    assert rows[0]["ofac_ent_num"] == "200"
+    con.close()
+
+
+def test_un_entity_without_vessel_evidence_is_not_name_matchable(tmp_path, monkeypatch):
+    """A trading company keeps its designation but must not enter the name
+    index — otherwise every vessel sharing a word with it becomes a hit."""
+    con = _un_con(tmp_path, monkeypatch, _un_xml(
+        _un_entity("300", "OCEAN STAR TRADING CORPORATION", "Pyongyang office"),
+    ))
+    rows = sm.load_un_vessels(con, AS_OF)
+    assert rows == [], "no IMO and no vessel marker -> not a candidate hull at all"
+    con.close()
+
+
+def test_un_entity_with_an_imo_is_loaded_even_without_a_vessel_marker(tmp_path, monkeypatch):
+    """An IMO is a hull number and nothing else carries one, so it is its own
+    evidence that the row names a ship."""
+    con = _un_con(tmp_path, monkeypatch, _un_xml(
+        _un_entity("400", "ANONYMOUS HOLDING", "Registration IMO 9111228"),
+    ))
+    rows = sm.load_un_vessels(con, AS_OF)
+    assert len(rows) == 1 and rows[0]["ofac_imo"] == "9111228"
+    con.close()
+
+
+def test_un_row_carries_no_call_sign_so_it_cannot_reach_the_top_finding_tier(
+        tmp_path, monkeypatch):
+    """UN has no call-sign column. `call_sign_name` must be unreachable rather
+    than accidentally satisfied by a null matching a null."""
+    con = _un_con(tmp_path, monkeypatch, _un_xml(
+        _un_entity("500", "SEA HARRIER", "Vessel, flag Panama"),
+    ))
+    rows = sm.load_un_vessels(con, AS_OF)
+    assert rows[0]["_cs_key"] is None
+    by_imo, by_cs, by_name = sm.build_indexes(rows)
+    assert by_cs == {}, "a null call sign must not become an index key"
+
+    vessel = {"vessel_id": "v1", "imo": None, "ship_name": "SEA HARRIER",
+              "call_sign": None}
+    hit = sm.match_one(vessel, by_imo, by_cs, by_name)
+    assert hit is not None and hit[1] == "name", "name tier only"
+    assert sm.TIER_CONFIDENCE["name"] < sm.FINDING_THRESHOLD
+    con.close()
+
+
+def test_un_registry_is_stamped_on_the_designation(tmp_path, monkeypatch):
+    con = _un_con(tmp_path, monkeypatch, _un_xml(
+        _un_entity("600", "SEA HARRIER", "Vessel, flag Panama"),
+    ))
+    assert sm.load_un_vessels(con, AS_OF)[0]["registry"] == "UN"
+    con.close()
+
+
+def test_missing_un_table_returns_empty_rather_than_raising(tmp_path):
+    """UN is refreshed independently of OFAC; a corpus with only OFAC landed
+    must still match, not 500."""
+    import duckdb
+
+    con = duckdb.connect(str(tmp_path / "bare.duckdb"))
+    from maritime_isr.ingest import registries as reg
+    reg._ensure_snapshot_meta(con)
+    assert sm.load_un_vessels(con) == []
+    assert sm.load_eu_vessels(con) == []
+    con.close()
+
+
+# ---- cross-registry behaviour --------------------------------------------
+
+def test_indexes_are_built_per_registry_so_un_cannot_drop_an_ofac_name_key(
+        tmp_path, monkeypatch):
+    """The number that must not move.
+
+    A shared name index would see the same name in OFAC and UN, call it
+    ambiguous, and drop it — changing OFAC's published match count for a reason
+    that has nothing to do with OFAC. Matching runs per registry to prevent it.
+    """
+    _land_identity([
+        {"vessel_id": "v1", "imo": None, "ship_name": "SEA HARRIER",
+         "call_sign": None, "mmsi": "1", "flag": "IND"},
+    ])
+    import duckdb
+
+    from maritime_isr.ingest import registries as reg
+    from maritime_isr.ingest.landing import read_table
+
+    con = duckdb.connect(str(tmp_path / "x.duckdb"))
+    reg._ensure_snapshot_meta(con)
+    monkeypatch.setattr(reg, "_fetch", lambda *a, **k: (
+        '9639,"SEA HARRIER","vessel","IRAN","-0-","CS1","Cargo","1","2",'
+        '"Panama","OWNER","-0-"\n').encode())
+    reg.refresh_ofac(con, AS_OF)
+    monkeypatch.setattr(reg, "_fetch", lambda *a, **k: _un_xml(
+        _un_entity("700", "SEA HARRIER", "Vessel, flag Panama")))
+    reg.refresh_un(con, AS_OF)
+    monkeypatch.setattr(sm, "connect", lambda *a, **k: con)
+
+    sm.run()
+    rows = read_table(sm.MATCH_TABLE)
+    regs = sorted(r["registry"] for r in rows)
+    assert regs == ["OFAC", "UN"], (
+        f"both registries must land their own row, got {regs}")
+    con.close()
+
+
+def test_the_same_hull_in_two_registries_lands_two_rows(tmp_path, monkeypatch, capsys):
+    """Two independent lists naming one hull is corroboration. Collapsing it to
+    one row throws away the strongest evidence this module can produce."""
+    _land_identity([
+        {"vessel_id": "v1", "imo": "9111228", "ship_name": "SEA HARRIER",
+         "call_sign": None, "mmsi": "1", "flag": "IND"},
+    ])
+    import duckdb
+
+    from maritime_isr.ingest import registries as reg
+    from maritime_isr.ingest.landing import read_table
+
+    con = duckdb.connect(str(tmp_path / "corr.duckdb"))
+    reg._ensure_snapshot_meta(con)
+    monkeypatch.setattr(reg, "_fetch", lambda *a, **k: (
+        '9639,"SEA HARRIER","vessel","IRAN","-0-","CS1","Cargo","1","2",'
+        '"Panama","OWNER","Registration IMO 9111228"\n').encode())
+    reg.refresh_ofac(con, AS_OF)
+    monkeypatch.setattr(reg, "_fetch", lambda *a, **k: _un_xml(
+        _un_entity("800", "SEA HARRIER", "Vessel, IMO 9111228, flag Panama")))
+    reg.refresh_un(con, AS_OF)
+    monkeypatch.setattr(sm, "connect", lambda *a, **k: con)
+
+    sm.run()
+    rows = read_table(sm.MATCH_TABLE)
+    assert len(rows) == 2, "one row per designating registry"
+    assert all(r["match_tier"] == "imo" and r["is_finding"] for r in rows)
+    assert "MORE THAN ONE registry" in capsys.readouterr().out
+    con.close()
+
+
+def test_each_row_names_the_list_it_came_from_in_its_provenance(
+        tmp_path, monkeypatch):
+    """A finding an analyst cannot trace to a specific published list is not
+    traceable (CLAUDE.md §4.1)."""
+    _land_identity([
+        {"vessel_id": "v1", "imo": "9111228", "ship_name": "SEA HARRIER",
+         "call_sign": None, "mmsi": "1", "flag": "IND"},
+    ])
+    import duckdb
+
+    from maritime_isr.ingest import registries as reg
+    from maritime_isr.ingest.landing import read_table
+
+    con = duckdb.connect(str(tmp_path / "prov.duckdb"))
+    reg._ensure_snapshot_meta(con)
+    monkeypatch.setattr(reg, "_fetch", lambda *a, **k: _un_xml(
+        _un_entity("900", "SEA HARRIER", "Vessel, IMO 9111228")))
+    reg.refresh_un(con, AS_OF)
+    monkeypatch.setattr(sm, "connect", lambda *a, **k: con)
+
+    sm.run()
+    row = read_table(sm.MATCH_TABLE)[0]
+    assert row["source_id"] == "un-vessel-match"
+    assert "UN" in row["source_ref"]
+    con.close()
+
+
+def test_ofac_rows_keep_their_original_source_id(tmp_path, monkeypatch):
+    """Adding UN and EU must not restamp provenance on rows OFAC already owns."""
+    _land_identity([
+        {"vessel_id": "v1", "imo": "9111228", "ship_name": "SEA HARRIER",
+         "call_sign": None, "mmsi": "1", "flag": "IND"},
+    ])
+    import duckdb
+
+    from maritime_isr.ingest import registries as reg
+    from maritime_isr.ingest.landing import read_table
+
+    con = duckdb.connect(str(tmp_path / "ofacprov.duckdb"))
+    reg._ensure_snapshot_meta(con)
+    monkeypatch.setattr(reg, "_fetch", lambda *a, **k: (
+        '9639,"SEA HARRIER","vessel","IRAN","-0-","CS1","Cargo","1","2",'
+        '"Panama","OWNER","Registration IMO 9111228"\n').encode())
+    reg.refresh_ofac(con, AS_OF)
+    monkeypatch.setattr(sm, "connect", lambda *a, **k: con)
+
+    sm.run()
+    assert read_table(sm.MATCH_TABLE)[0]["source_id"] == "ofac-vessel-match"
+    con.close()
+
+
+def test_match_rows_carry_the_vessel_side_identity_fields(tmp_path, monkeypatch):
+    """The API and the findings screen read `vessel_name`/`vessel_flag`/
+    `vessel_imo`. The matcher used to write only `ship_name`/`flag`/`imo`, so
+    the sanctions panel rendered blank vessel fields on the real corpus while
+    looking correct on the scenario corpus."""
+    _land_identity([
+        {"vessel_id": "v1", "imo": "9111228", "ship_name": "SEA HARRIER",
+         "call_sign": None, "mmsi": "1", "flag": "IND"},
+    ])
+    import duckdb
+
+    from maritime_isr.ingest import registries as reg
+    from maritime_isr.ingest.landing import read_table
+
+    con = duckdb.connect(str(tmp_path / "vfields.duckdb"))
+    reg._ensure_snapshot_meta(con)
+    monkeypatch.setattr(reg, "_fetch", lambda *a, **k: (
+        '9639,"SEA HARRIER","vessel","IRAN","-0-","CS1","Cargo","1","2",'
+        '"Panama","OWNER","Registration IMO 9111228"\n').encode())
+    reg.refresh_ofac(con, AS_OF)
+    monkeypatch.setattr(sm, "connect", lambda *a, **k: con)
+
+    sm.run()
+    row = read_table(sm.MATCH_TABLE)[0]
+    assert row["vessel_name"] == "SEA HARRIER"
+    assert row["vessel_flag"] == "IND"
+    assert row["vessel_imo"] == "9111228"
+    con.close()

@@ -344,3 +344,175 @@ def test_ports_non_empty_and_split(client, H):
     assert set(po["count"]) == {"real", "synthetic"}
     for p in po["items"]:
         assert {"id", "name", "source", "is_synthetic"} <= set(p)
+
+
+# ==========================================================================
+# findings — the ranked table
+#
+# The screen exists because `graph_report.py` measured that a network view has
+# nothing to draw on the real corpus. These tests protect the two properties
+# that make it trustworthy rather than merely populated: a row never appears
+# without a stated basis, and a determination never appears without the name of
+# whoever made it.
+# ==========================================================================
+
+def _findings_or_skip(client, H):
+    d = client.get("/api/findings", headers=H).json()
+    if not d["items"]:
+        pytest.skip("no findings in this corpus — run the sanctions matcher")
+    return d
+
+
+def test_findings_returns_ranked_rows_with_split_counts(client, H):
+    d = _findings_or_skip(client, H)
+    assert d["count"]["real"] + d["count"]["synthetic"] == d["total_matched"]
+    prios = [f["priority"] for f in d["items"]]
+    assert prios == sorted(prios, reverse=True), "highest priority first"
+
+
+def test_every_finding_states_why_it_is_there(client, H):
+    """A row with no basis is an unexplained alert, which is the thing this
+    product cannot ship (CLAUDE.md §4.1)."""
+    for f in _findings_or_skip(client, H)["items"]:
+        assert f["basis"], f"{f['id']} ranks with no stated signal"
+        assert f["priority"] == sum(b["weight"] for b in f["basis"]), (
+            "priority must be exactly the sum of the signals shown — a number "
+            "the listed reasons do not add up to is not an explanation")
+
+
+def test_every_finding_names_who_determined_it(client, H):
+    """GFW assessed the gaps and OFAC/UN/EU decided the designations; ours is
+    the identity match. A row that does not say so invites 'we detected a dark
+    vessel' (CLAUDE.md §6)."""
+    for f in _findings_or_skip(client, H)["items"]:
+        assert f["attribution"], f"{f['id']} carries no attribution"
+        for g in f["dark_gaps"]:
+            assert "Global Fishing Watch" in g["attribution"]
+
+
+def test_a_gap_finding_is_never_described_as_our_detection(client, H):
+    for f in _findings_or_skip(client, H)["items"]:
+        head = f["headline"].lower()
+        assert "we detected" not in head
+        if f["has_dark_gap"]:
+            assert "global fishing watch" in head, (
+                "a dark-gap headline must name GFW as the assessor")
+
+
+def test_findings_notes_label_the_synthetic_split(client, H):
+    d = _findings_or_skip(client, H)
+    joined = " ".join(d["notes"]).lower()
+    assert "scenario" in joined and "real" in joined
+
+
+def test_a_name_only_candidate_never_becomes_a_finding_row(client, H):
+    """Candidates are leads for the vessels table. Promoting them here is the
+    alert-fatigue failure ADR-004 names outright."""
+    for f in _findings_or_skip(client, H)["items"]:
+        if not f["has_dark_gap"]:
+            assert any(s["is_finding"] for s in f["sanctions"]), (
+                f"{f['id']} is listed on candidate-grade evidence alone")
+
+
+def test_an_organisation_designation_is_not_reported_as_a_listed_hull(client, H):
+    """`ofac_name` holds a vessel name for a real matcher row and a company
+    name for a scenario ownership match. Comparing the two is what made every
+    scenario row claim identity laundering."""
+    for f in _findings_or_skip(client, H)["items"]:
+        org_only = f["sanctions"] and all(
+            s.get("listed_entity_type") == "organisation"
+            for s in f["sanctions"] if s["is_finding"])
+        if org_only and f["sanctions_is_finding"]:
+            assert "not listed" in f["headline"], (
+                "the headline must say the hull itself is not designated")
+            assert not any(b["signal"] == "name_disagreement"
+                           for b in f["basis"]), (
+                "a hull name differing from a company name is not a name "
+                "disagreement")
+
+
+def test_findings_never_expose_scenario_truth(client, H):
+    """The answer key is forbidden to every serving path (ADR-019 §d)."""
+    body = client.get("/api/findings", headers=H).text.lower()
+    for leak in ("scenario_truth", "expected_anomaly", "true_anomaly",
+                 "deliberate_miss", "decoy"):
+        assert leak not in body, f"{leak} leaked into the findings response"
+
+
+# ==========================================================================
+# event density + truncation honesty
+# ==========================================================================
+
+def test_density_counts_the_whole_corpus_not_a_page(client, H):
+    """The number this endpoint exists to fix.
+
+    The map used to request N events and draw them. On the real corpus that
+    silently truncated 24,153 loitering events to the earliest 4,000, so the
+    map showed a chronological prefix and stopped. Density is aggregated
+    server-side over every row, so its total must be >= any capped page.
+    """
+    d = client.get("/api/events/density", params={"res": 4}, headers=H).json()
+    if not d["items"]:
+        pytest.skip("no positioned events in this corpus")
+    dens_total = d["count"]["real"] + d["count"]["synthetic"]
+    page = client.get("/api/events", params={"limit": 5}, headers=H).json()
+    page_total = page["count"]["real"] + page["count"]["synthetic"]
+    assert dens_total > page_total, (
+        f"density {dens_total} must exceed a 5-per-kind page {page_total}")
+
+
+def test_density_rejects_a_resolution_it_cannot_serve(client, H):
+    assert client.get("/api/events/density", params={"res": 9},
+                      headers=H).status_code == 422
+
+
+def test_density_cells_carry_a_position_and_a_kind_breakdown(client, H):
+    d = client.get("/api/events/density", params={"res": 4}, headers=H).json()
+    if not d["items"]:
+        pytest.skip("no positioned events in this corpus")
+    for c in d["items"][:10]:
+        assert c["lat"] is not None and c["lon"] is not None
+        assert c["by_kind"], "a cell with no kind breakdown cannot be read"
+        assert sum(c["by_kind"].values()) == c["real"] + c["synthetic"]
+
+
+def test_a_truncated_event_response_says_so(client, H):
+    """Silent truncation is the defect; the loud version is the fix."""
+    d = client.get("/api/events", params={"limit": 1}, headers=H).json()
+    if not d["items"]:
+        pytest.skip("no events in this corpus")
+    assert d["truncated"], "a 1-row page over a real table must report truncation"
+    assert "TRUNCATED" in (d["note"] or "")
+    for kind, t in d["truncated"].items():
+        assert t["matching"] > t["returned"], kind
+
+
+def test_an_uncapped_event_response_reports_no_truncation(client, H):
+    d = client.get("/api/events", params={"limit": 20000}, headers=H).json()
+    assert d["truncated"] == {}
+    assert d["note"] is None
+
+
+# ==========================================================================
+# SAR detections
+# ==========================================================================
+
+def test_detections_shape_and_synthetic_labelling(client, H):
+    d = client.get("/api/detections", headers=H).json()
+    if not d["items"]:
+        pytest.skip("no detection table landed")
+    for x in d["items"][:10]:
+        assert x["lat"] is not None and x["lon"] is not None
+        assert x["prov"]["source_id"], "a contact with no provenance cannot land"
+
+
+def test_synthetic_only_detections_say_no_real_sar_was_processed(client, H):
+    """An empty real split must not read as 'the pipeline ran and found
+    nothing' — no SAR scene has been processed at all (ADR-017)."""
+    d = client.get("/api/detections", headers=H).json()
+    if not d["items"]:
+        pytest.skip("no detection table landed")
+    if d["count"]["real"] == 0 and d["count"]["synthetic"] > 0:
+        assert "synthetic" in (d["note"] or "").lower()
+        assert "dark" in (d["note"] or "").lower(), (
+            "the note must withhold the word 'dark' from an unmatched contact")

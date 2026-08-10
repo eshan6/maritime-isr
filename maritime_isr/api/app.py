@@ -137,6 +137,21 @@ def create_app() -> FastAPI:
             raise HTTPException(404, f"no alert {alert_id!r}")
         return gsvc.get_alert(alert_id)
 
+    # ---- findings --------------------------------------------------------
+    @api.get("/findings", dependencies=guard)
+    def findings(synthetic: Optional[bool] = None,
+                 limit: int = Query(default=500, ge=1, le=settings.max_page)
+                 ) -> dict:
+        res = service.list_findings(synthetic=synthetic, limit=limit)
+        return {
+            "count": models.SplitCount(**res["count"]).model_dump(),
+            "total_matched": res["total_matched"],
+            "basis_legend": [models.FindingBasis(**b).model_dump()
+                             for b in res["basis_legend"]],
+            "notes": res["notes"],
+            "items": [models.Finding(**f).model_dump() for f in res["items"]],
+        }
+
     # ---- events / scenes / ports ----------------------------------------
     @api.get("/events", dependencies=guard)
     def events(kinds: Optional[str] = Query(default=None,
@@ -154,7 +169,37 @@ def create_app() -> FastAPI:
             "count": models.SplitCount(**res["count"]).model_dump(),
             "by_kind": {k: models.SplitCount(**v).model_dump()
                         for k, v in res["by_kind"].items()},
+            # Which kinds hit the cap, and their true totals. The map reads this
+            # to say "4,000 of 24,153" rather than drawing a prefix in silence.
+            "truncated": res["truncated"],
+            "note": res["note"],
             "items": [models.Event(**e).model_dump() for e in res["items"]],
+        }
+
+    @api.get("/events/density", dependencies=guard)
+    def events_density(res: int = Query(default=4, description="H3 resolution: 4, 6 or 7"),
+                       kinds: Optional[str] = None,
+                       synthetic: Optional[bool] = None) -> dict:
+        kind_list = [k.strip() for k in kinds.split(",")] if kinds else None
+        try:
+            d = service.event_density(res=res, kinds=kind_list,
+                                      synthetic=synthetic)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+        return {
+            "res": d["res"],
+            "count": models.SplitCount(**d["count"]).model_dump(),
+            "note": d["note"],
+            "items": [models.DensityCell(**c).model_dump() for c in d["items"]],
+        }
+
+    @api.get("/detections", dependencies=guard)
+    def detections(limit: int = Query(default=5000, ge=1, le=50000)) -> dict:
+        d = service.list_detections(limit=limit)
+        return {
+            "count": models.SplitCount(**d["count"]).model_dump(),
+            "note": d["note"],
+            "items": [models.Detection(**x).model_dump() for x in d["items"]],
         }
 
     @api.get("/tracks", dependencies=guard)

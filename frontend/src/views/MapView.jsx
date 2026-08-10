@@ -42,16 +42,25 @@ const BASEMAP = {
 const LAYERS = [
   { id: "positions", label: "Vessel positions", color: "#1a5fb4" },
   { id: "tracks", label: "Vessel tracks", color: "#7aa8dd" },
+  { id: "density", label: "Event density (whole corpus)", color: "#5b3fa8" },
   { id: "encounter", label: "Encounters", color: "#b0221b" },
   { id: "loitering", label: "Loitering", color: "#9a6300" },
   { id: "port_visit", label: "Port visits", color: "#1f7a4d" },
   { id: "gap", label: "AIS gaps", color: "#b0221b" },
+  { id: "detections", label: "SAR radar contacts", color: "#00707a" },
   { id: "scenes", label: "Sentinel-1 footprints", color: "#6039c4" },
   { id: "ports", label: "Ports", color: "#55636f" },
   { id: "alerts", label: "Alert markers", color: "#b0221b" },
 ];
 
 const EVENT_COLOR = { encounter: "#b0221b", loitering: "#9a6300", port_visit: "#1f7a4d", gap: "#b0221b" };
+
+//: Events requested for the individual-dot layers. The dots are the detail
+//: view; `density` is what shows the whole corpus, so this cap no longer hides
+//: anything — but it is still reported, because a truncated layer that says
+//: nothing is how the map came to draw a chronological prefix of the real
+//: corpus and stop.
+const EVENT_LIMIT = 6000;
 
 export function MapView() {
   const mapEl = useRef(null);
@@ -60,10 +69,19 @@ export function MapView() {
   const [ready, setReady] = useState(false);
   const [selected, setSelected] = useState(null);
   const [visible, setVisible] = useState({
-    positions: true, tracks: false, encounter: true, loitering: true,
-    port_visit: true, gap: true, scenes: false, ports: true, alerts: true,
+    positions: true, tracks: false, density: true, encounter: true,
+    loitering: true, port_visit: true, gap: true, detections: true,
+    // Sentinel-1 footprints are REAL satellite coverage — 636 of them on the
+    // laptop corpus — and defaulting the layer off meant the one unambiguously
+    // real thing on the map was hidden until somebody found the checkbox.
+    scenes: true, ports: true, alerts: true,
   });
-  const [data, setData] = useState({ events: [], ports: [], scenes: [], alerts: [] });
+  const [data, setData] = useState({
+    events: [], ports: [], scenes: [], alerts: [], density: [], detections: [],
+  });
+  // What the API told us it could not fit in the events response, and what the
+  // detections response is. Surfaced in the corner rather than swallowed.
+  const [notes, setNotes] = useState({});
   const [tracks, setTracks] = useState([]);
   const [window_, setWindow] = useState(null); // {start,end} epoch ms
   const [t, setT] = useState(1); // 0..1 across the window
@@ -92,11 +110,26 @@ export function MapView() {
   useEffect(() => {
     let live = true;
     const set = (patch) => live && setData((d) => ({ ...d, ...patch }));
-    api.events({ limit: 4000 }).then((r) => set({ events: r.items })).catch(() => {});
+    const note = (k, v) =>
+      live && v && setNotes((n) => ({ ...n, [k]: v }));
+
+    api.events({ limit: EVENT_LIMIT })
+      .then((r) => { set({ events: r.items }); note("events", r.note); })
+      .catch(() => {});
+    // Res 4 hexes are ~22 km across — coarse enough that 24,153 loitering
+    // events become a few hundred markers instead of a solid smear.
+    api.eventDensity({ res: 4 })
+      .then((r) => { set({ density: r.items }); note("density", r.note); })
+      .catch(() => {});
+    api.detections()
+      .then((r) => { set({ detections: r.items }); note("detections", r.note); })
+      .catch(() => {});
     api.ports().then((r) => set({ ports: r.items })).catch(() => {});
-    api.scenes().then((r) => set({ scenes: r.items })).catch(() => {});
+    api.scenes().then((r) => { set({ scenes: r.items }); note("scenes", r.note); }).catch(() => {});
     api.alerts().then((r) => set({ alerts: r.items })).catch(() => {});
-    api.tracks({ max_points: 160 }).then((r) => live && setTracks(r.items || [])).catch(() => {});
+    api.tracks({ max_points: 160 })
+      .then((r) => { live && setTracks(r.items || []); note("tracks", r.note); })
+      .catch(() => {});
     api.stats().then((s) => {
       const w = s.corpus_window || {};
       if (live && w.start && w.end) {
@@ -116,6 +149,7 @@ export function MapView() {
   useEffect(() => {
     if (!ready || !map.current) return;
     renderStatic(map.current, data, tracks, visible, (id) => setSelected(id));
+    renderDensity(map.current, data.density, visible.density);
   }, [ready, data, tracks, visible]);
 
   // ---- moving vessels: interpolate each track to the clock and glide ----
@@ -159,6 +193,24 @@ export function MapView() {
           </label>
         ))}
       </div>
+
+      {/* What the map is NOT showing, in the operator's line of sight. Every
+          one of these used to be silent: a capped event query looked like an
+          empty second half of the window, and an empty SAR layer looked like a
+          clean scene rather than a scene we never processed. */}
+      {Object.values(notes).some(Boolean) && (
+        <div className="notebar" style={{
+          position: "absolute", left: 12, bottom: 74, maxWidth: 460, zIndex: 5,
+          background: "var(--surface, #fff)", border: "1px solid var(--line, #d7dde3)",
+          borderRadius: 6, padding: "9px 11px", fontSize: 11.5, lineHeight: 1.5,
+        }}>
+          {Object.entries(notes).filter(([, v]) => v).map(([k, v]) => (
+            <div key={k} style={{ marginBottom: 4 }}>
+              <b className="mono" style={{ fontSize: 10.5 }}>{k}</b> — {v}
+            </div>
+          ))}
+        </div>
+      )}
 
       {window_ && (
         <div className="scrubber">
@@ -311,9 +363,113 @@ function renderStatic(m, data, tracks, visible, onSelect) {
   }
   upsertCircleLayer(m, "alerts", alertPts, "#b0221b", visible.alerts, onSelect, 7, true);
 
+  // SAR radar contacts. A contact with no matched MMSI is drawn hollow — it is
+  // the SHAPE of a dark vessel, not a dark vessel. Asserting darkness needs
+  // demonstrated AIS reception at the position (ADR-005, CLAUDE.md §6), so the
+  // map shows the contact and withholds the word.
+  const detFeats = data.detections
+    .filter((d) => d.lat != null && d.lon != null)
+    .map((d) => ({
+      type: "Feature",
+      geometry: { type: "Point", coordinates: [d.lon, d.lat] },
+      properties: {
+        vessel_id: "",
+        synthetic: d.is_synthetic ? 1 : 0,
+        unmatched: d.matched_mmsi ? 0 : 1,
+        label: `SAR contact${d.length_m ? ` · ${Math.round(d.length_m)} m` : ""}` +
+          ` · ${d.matched_mmsi ? `matched to MMSI ${d.matched_mmsi}` : "no AIS track associated"}`,
+      },
+    }));
+  upsertDetectionLayer(m, "detections", detFeats, visible.detections);
+
   // Sentinel-1 footprints
   const sceneFeats = data.scenes.map((s) => wktToFeature(s.footprint_wkt)).filter(Boolean);
   upsertPolyLayer(m, "scenes", sceneFeats, "#6039c4", visible.scenes);
+}
+
+// Event density — one graduated circle per H3 cell, counted over the WHOLE
+// corpus rather than over the page the dot layers requested. This is the layer
+// that makes 24,153 real loitering events visible at all: as individual dots
+// they were both capped and unreadable.
+function renderDensity(m, cells, on) {
+  const feats = cells
+    .filter((c) => c.lat != null && c.lon != null)
+    .map((c) => {
+      const total = c.real + c.synthetic;
+      const kinds = Object.entries(c.by_kind)
+        .sort((a, b) => b[1] - a[1])
+        .map(([k, n]) => `${n} ${k.replace("_", " ")}`)
+        .join(", ");
+      return {
+        type: "Feature",
+        geometry: { type: "Point", coordinates: [c.lon, c.lat] },
+        properties: { vessel_id: "", total, label: `${total} events · ${kinds}` },
+      };
+    });
+  const fc = { type: "FeatureCollection", features: feats };
+  const src = m.getSource("density");
+  if (src) src.setData(fc);
+  else {
+    m.addSource("density", { type: "geojson", data: fc });
+    m.addLayer({
+      id: "density",
+      type: "circle",
+      source: "density",
+      paint: {
+        // Square-root scaling on the radius, so the MARK AREA is proportional
+        // to the count. Scaling the radius linearly would make a 100-event cell
+        // look ten times heavier than a 10-event one instead of ten times
+        // bigger, which overstates the hot cells badly.
+        "circle-radius": [
+          "interpolate", ["linear"], ["sqrt", ["get", "total"]],
+          1, 4, 5, 10, 12, 18, 30, 30,
+        ],
+        "circle-color": "#5b3fa8",
+        "circle-opacity": 0.28,
+        "circle-stroke-width": 1,
+        "circle-stroke-color": "#5b3fa8",
+        "circle-stroke-opacity": 0.55,
+      },
+    }, m.getLayer("ev-encounter") ? "ev-encounter" : undefined);
+    m.on("click", "density", (e) => {
+      new maplibregl.Popup({ closeButton: false, offset: 10 })
+        .setLngLat(e.lngLat)
+        .setHTML(`<b>${e.features[0].properties.label}</b>`)
+        .addTo(m);
+    });
+  }
+  if (m.getLayer("density"))
+    m.setLayoutProperty("density", "visibility", on ? "visible" : "none");
+}
+
+function upsertDetectionLayer(m, id, feats, on) {
+  const fc = { type: "FeatureCollection", features: feats };
+  const src = m.getSource(id);
+  if (src) src.setData(fc);
+  else {
+    m.addSource(id, { type: "geojson", data: fc });
+    m.addLayer({
+      id, type: "circle", source: id,
+      paint: {
+        "circle-radius": 6,
+        // Hollow when no AIS track was associated. The visual difference is the
+        // whole point of the layer, so it is encoded in the mark rather than in
+        // a popup the operator has to open.
+        "circle-color": ["case", ["==", ["get", "unmatched"], 1], "rgba(0,0,0,0)", "#00707a"],
+        "circle-stroke-width": 2,
+        "circle-stroke-color": "#00707a",
+      },
+    });
+    m.on("click", id, (e) => {
+      new maplibregl.Popup({ closeButton: false, offset: 10 })
+        .setLngLat(e.lngLat)
+        .setHTML(`<b>${e.features[0].properties.label}</b>`)
+        .addTo(m);
+    });
+    m.on("mouseenter", id, () => (m.getCanvas().style.cursor = "pointer"));
+    m.on("mouseleave", id, () => (m.getCanvas().style.cursor = ""));
+  }
+  if (m.getLayer(id)) m.setLayoutProperty(id, "visibility", on ? "visible" : "none");
 }
 
 function upsertCircleLayer(m, id, feats, color, on, onSelect, radius = 5, star = false) {

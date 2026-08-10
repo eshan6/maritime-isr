@@ -278,9 +278,10 @@ def _main() -> int:
 # synthetic prototype: detection, tracks, fusion, graph, anomaly, product.
 # One AOI class serves both: AOI_V1 is the same locked Arabian Sea box.
 # =====================================================================
-
-from dataclasses import dataclass
-from pathlib import Path
+# `dataclass` and `Path` are already imported at the top of this file. The
+# duplicate import that used to sit here re-bound both names to themselves —
+# dead code, and the only finding ruff's undefined-name/redefinition rules
+# report across the whole package.
 
 PIPELINE_VERSION = "0.7.0"
 

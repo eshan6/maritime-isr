@@ -1103,3 +1103,124 @@ problem: Kandla's weight is 0.4 and the rule's threshold is 0.5, so a Kandla
 call alone can never clear it. Karachi (0.7) would, and no track calls there.
 **Not tuned — reported.** Scenario generation is byte-identical (determinism
 test green).
+
+---
+
+## ADR-024 — The demo shows a ranked findings table, three sanctions registries, and the whole corpus *(Accepted)*
+**2026-08-10. Demo data-coverage session.**
+
+**Context.** The question that started this was "what data do we have in the
+demo, is it only synthetic, and why aren't we showing more?" Measured in the
+sandbox against a freshly generated corpus, the demo served: 210 vessels, 432
+events, 19 sanctions matches, **1 alert**, 0 real rows of anything. On the
+laptop it also serves the real corpus — 27,172 GFW events, 9,184 identities,
+26,185 sanctions rows, 636 Sentinel-1 footprints — but four things were landed
+and reaching no screen at all.
+
+**Four decisions, all in the same direction: stop discarding data we already
+have, and say what is missing rather than rendering absence as emptiness.**
+
+### 1. A findings table, ranked by named signals and not by a score
+
+`graph_report.py` had already settled this: on the real corpus the encounter
+graph is star-shaped (14 encounters across 9,184 vessels; **0 of 126**
+sanctions-matched hulls with an encounter neighbour), so a network view has
+nothing to draw and *"what to build instead: a ranked table"* was the recorded
+conclusion. It had not been built. `/api/findings` and the Findings screen are
+it.
+
+Two populations feed it and they are **not the same kind of claim**: GFW's
+intentional-disabling gap assessments (theirs, carried through with
+attribution), and sanctions identity matches (the registry decided who is
+designated, GFW observed the vessel, *ours* is the match between them — ADR-018).
+
+**There is deliberately no blended risk number.** Rank is a sum of named
+signals, each returned with the row in plain English, and a test asserts the
+priority equals the sum of the reasons shown. A number the listed reasons do
+not add up to is not an explanation. Candidate-grade matches never rank a row:
+they are leads for the vessels table, and promoting them here is the
+alert-fatigue failure ADR-004 exists to prevent.
+
+### 2. UN and EU sanctions are matched, on terms that fit what they actually are
+
+`registries.py` has landed UN consolidated (1,011 rows) and EU consolidated
+(6,017) since the first live run, and **nothing read either of them.** They are
+matched now, but not as "another OFAC":
+
+- **OFAC SDN has a vessel record type** — `sdn_type='vessel'` rows carry call
+  sign, vessel type, tonnage and flag, so all four match tiers are reachable.
+- **UN and EU have no vessel schema at all.** UN is individuals and entities;
+  EU is `logical_id, name, programme, identifier`. Neither has a call-sign,
+  flag or vessel-type column. A designated ship appears as an entity whose free
+  text mentions it.
+
+So UN/EU contribute through **IMO extracted from free text** — keyword-anchored
+and check-digit validated, the same two independent checks `review_matches.py`
+verified 98 of 98 against — and contribute a *name* match only when the
+designation carries positive evidence it names a vessel. Matching vessel names
+against arbitrary UN entity names would mostly hit trading companies and
+people: a name collision dressed as a sanctions hit.
+
+**Indexes are built per registry, not over the union.** Two reasons, the first
+load-bearing: a shared name index would let a UN entity make an OFAC name key
+"ambiguous" and drop it, silently moving a published number (126 matches, 98 by
+IMO) for a reason unrelated to OFAC. And two lists naming one hull is
+**corroboration, not ambiguity** — it lands as two rows that visibly agree, and
+is ranked as the second-strongest signal available.
+
+### 3. The map shows the whole corpus, and says what it is not showing
+
+The map requested `limit: 4000`, applied **per kind** with `ORDER BY
+start_time`. Against 24,153 real loitering events that drew the earliest 4,000
+and stopped — roughly the last five weeks of the window absent from the screen,
+with nothing saying so. It read as "no events after mid-July" rather than "you
+asked for 4,000 of 24,153."
+
+Raising the cap alone was not the fix; 27,000 undifferentiated dots is a smear.
+`/api/events/density` aggregates per H3 cell **over every matching row**, and
+the map draws graduated markers with area proportional to count. `/api/events`
+now also returns `truncated` per kind with the true total, and the map surfaces
+every such note on screen.
+
+The Sentinel-1 footprint layer — 636 real scenes, the one unambiguously real
+thing on that map — **defaulted to off**. It is on.
+
+### 4. SAR contacts are drawn, and the word "dark" is withheld from them
+
+`scenario_detections` was registered in the API reader and queried by no
+endpoint, so the map had no way to draw a radar contact. `/api/detections`
+serves them and the map draws them **hollow when no AIS track was associated**.
+That is the *shape* of a dark vessel and the layer stops there: asserting
+intentional silence requires demonstrated reception at the position (ADR-005,
+CLAUDE.md §6). Everything this endpoint returns today is synthetic and the
+response says so — an empty real split must not read as "the pipeline ran and
+found nothing" when no SAR scene has been processed at all (ADR-017).
+
+### Two real/synthetic divergences found while building this
+
+**`ofac_name` meant two different things.** The real matcher only matches
+`sdn_type='vessel'` rows, so its `ofac_name` is a listed *vessel* name; the
+scenario generator reaches a hull through its owner, so its `ofac_name` is a
+*company*. Comparing our vessel name to a company name always disagrees, so
+"sails under a different name than the listing" — the identity-laundering
+signal an IMO match exists to catch — fired on **19 of 19** scenario rows.
+Fixed with an explicit `listed_entity_type` written by both sides; rows landed
+before the column existed default to `vessel`, which is what the real matcher
+has always produced.
+
+**The matcher wrote `ship_name`/`flag`/`imo`; the API reads
+`vessel_name`/`vessel_flag`/`vessel_imo`.** The scenario generator wrote the
+latter, so the sanctions panel looked correct on the scenario corpus and
+rendered blank vessel fields on the real one. The matcher now writes both.
+
+**Consequences.** `sanctioned_vessel_matches` gains `registry`,
+`listed_entity_type` and the `vessel_*` fields, and its natural key gains
+`registry` — without it an OFAC row and a UN row for the same hull and tier
+would collide on re-landing and one would silently overwrite the other, losing
+exactly the corroboration this change is for. **The matcher must be re-run**;
+rows landed earlier carry the pre-ADR-024 schema. `--registries OFAC`
+reproduces the previous behaviour exactly.
+
+**What this does not do.** It does not make a real alert possible. Every
+detector reads the track engine, the real corpus has no AIS positions, and that
+is ADR-005's unfunded feed, not a tuning problem.

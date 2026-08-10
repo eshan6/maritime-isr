@@ -135,9 +135,23 @@ def add_gap_event(world: ScenarioWorld, scenario_id: str, key: str,
     verdict is the thing being measured, so the column stays empty and the
     system has to reach one.
 
-    The real corpus has exactly zero gaps flagged intentional, so this also
-    keeps the combined column honest: still zero flagged, now with a stated
-    denominator.
+    ⚠ **The second half of that justification is now refuted, and this is a
+    known separability hole — see STATE.md OPEN QUESTION #9.** This docstring
+    used to add: "the real corpus has exactly zero gaps flagged intentional, so
+    the combined column stays honest." That was measured against a null column
+    caused by a mapper bug. The host run on 2026-07-31 (ADR-020 work) found
+    **5 of 5 real gaps flagged `intentionalDisabling=true`**. So on a combined
+    corpus the real gaps are 100% flagged and the synthetic ones 100% null,
+    which makes `gfw_intentional_disabling IS NULL` a single-filter synthetic-row
+    detector — the exact defect class `scenario/nulls.py` exists to close
+    (ADR-019).
+
+    It is **left as-is deliberately** rather than fixed in passing: simulating a
+    third party's assessment is a decision about what the scenario corpus is
+    allowed to claim, not a bug fix, and CLAUDE.md §9 says to ask rather than
+    invent. The consequence to know meanwhile is that the findings screen's
+    dark-gap section is empty on any sandbox corpus and populated only where the
+    real rows live.
     """
     v = V(world, key)
     return world.add_event(LandedEvent(
