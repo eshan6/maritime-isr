@@ -322,7 +322,64 @@ def add_identities(store, vessels: dict[str, dict]) -> tuple[int, int]:
                 superseded += 1
 
         total += _add_key_identities(store, vid, rec)
+        _emit_identity_changes(store, vid, rec.get("intervals", []))
     return total, superseded
+
+
+#: Identity fields whose replacement is a first-class event. A rename, a
+#: reflag and an MMSI swap are the three the laundering rule names; IMO is
+#: excluded on purpose — it is a permanent hull number, so a *change* in it is
+#: a different and stronger claim than a change of label, and folding it in
+#: here would let a data error read as a laundering step.
+_CHANGE_TRACKED_FIELDS = (("name", "ship_name"), ("flag", "flag"),
+                          ("mmsi", "mmsi"))
+
+
+def _emit_identity_changes(store, vid: str, intervals: list[dict]) -> int:
+    """Emit `identity_changed` for every genuine replacement in this hull's
+    identity history. Returns the number written.
+
+    **This is the plumbing that was missing, and the whole reason
+    `detect_identity_then_anomaly` measured zero.** That rule reads
+    `SELECT ... FROM events WHERE event_type='identity_changed'`, and the only
+    writer of those events was `identity.fold_registry_snapshot`, which the
+    scenario pipeline never calls — it populates Phase 4 through
+    :func:`populate` instead. So the table was empty, five of the six detectors
+    were reported silent, and this one was silent for a reason that had nothing
+    to do with its logic.
+
+    **The supersession rule here is the one the 100%-closed result forced** (see
+    :func:`add_identities`): a value counts as replaced only when a **later**
+    interval carries a **different** value. An interval merely closing means
+    GFW stopped hearing it inside our query window — reading that as a change
+    would emit an identity_changed event for essentially every vessel in the
+    fleet, which is how this rule would go from silent to worthless in one
+    step.
+
+    **The timestamp is when the new value starts, not when the old one ends.**
+    The detector correlates a change against a later anomaly inside a window, so
+    it needs the moment the hull began presenting the new identity. Those two
+    differ whenever the intervals do not abut, and using the old interval's end
+    would date the change to the last time we heard the *previous* identity.
+    """
+    written = 0
+    for field, column in _CHANGE_TRACKED_FIELDS:
+        # (t_start, value) for every interval that states this field
+        seq = [(_epoch(iv.get("valid_from")), iv.get(column), iv)
+               for iv in intervals
+               if iv.get(column) not in (None, "") and
+               _epoch(iv.get("valid_from")) is not None]
+        prev_val = prev_iv = None
+        for t_start, value, iv in seq:
+            value = str(value)
+            if prev_val is not None and value != prev_val:
+                payload = dict(field=field, old=prev_val, new=value,
+                               vessel=vessel_node_id(vid))
+                if store.emit_once("identity_changed", vessel_node_id(vid),
+                                   t_start, payload):
+                    written += 1
+            prev_val, prev_iv = value, iv
+    return written
 
 
 #: Identity kinds that are *lookup keys* into a hull, as opposed to labels.

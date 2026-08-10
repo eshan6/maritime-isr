@@ -336,3 +336,136 @@ def test_a_null_match_confidence_falls_back_to_the_tier_not_to_zero(store):
     conf, stated = fl._conf({"confidence": None})
     assert conf == fl.UNSTATED_CONFIDENCE and stated is False
     assert TIER_CONFIDENCE["imo"] == 0.95
+
+
+# ==========================================================================
+# identity_changed events — the plumbing `detect_identity_then_anomaly` reads
+#
+# That rule measured zero alerts across every session, and the cause was not
+# its logic: the `events` table was empty because the only writer of
+# identity_changed was `identity.fold_registry_snapshot`, which the scenario
+# pipeline never calls. It populates Phase 4 through `populate()` instead.
+# ==========================================================================
+
+def _changes(store, vid=None):
+    q = ("SELECT subject, ts, payload FROM events "
+         "WHERE event_type='identity_changed'")
+    rows = store._con.execute(q).fetchall()
+    import json
+    out = [dict(subject=s, ts=t, **json.loads(p)) for s, t, p in rows]
+    if vid is not None:
+        out = [c for c in out if c["subject"] == fl.vessel_node_id(vid)]
+    return out
+
+
+def test_populate_emits_an_identity_changed_event_for_a_real_rename(store):
+    """v-a is OLD NAME then NEW NAME. Without this the detector has no input
+    at all and reads as a silent rule rather than an unfed one."""
+    fl.populate(store)
+    names = [c for c in _changes(store, "v-a") if c["field"] == "name"]
+    assert len(names) == 1
+    assert names[0]["old"] == "OLD NAME"
+    assert names[0]["new"] == "NEW NAME"
+
+
+def test_a_reflag_and_an_mmsi_swap_are_also_identity_changes(store):
+    """The rule's own docstring names rename, reflag and MMSI swap."""
+    fl.populate(store)
+    fields = {c["field"] for c in _changes(store, "v-a")}
+    assert "flag" in fields, "IND -> PAN is a reflag"
+    # v-a keeps one MMSI throughout, so no mmsi event for it
+    assert "mmsi" not in fields
+
+
+def test_an_imo_change_is_not_emitted_as_an_identity_change(store):
+    """IMO is a permanent hull number. A change in it is a far stronger claim
+    than a change of label, and folding it in here would let a transcription
+    error read as a laundering step."""
+    fl.populate(store)
+    assert all(c["field"] != "imo" for c in _changes(store))
+
+
+def test_a_vessel_that_never_changed_emits_nothing(store):
+    """v-b holds one identity throughout. An event here would mean the rule
+    fires on the whole fleet."""
+    fl.populate(store)
+    assert _changes(store, "v-b") == []
+
+
+def test_a_closed_interval_with_no_successor_emits_no_change(store):
+    """The 100%-closed lesson, applied to events.
+
+    GFW's `transmissionDateTo` is the end of *our query window*, so nearly
+    every interval is closed. If closure counted as a change, this would emit
+    an identity_changed event for essentially every hull in the corpus and the
+    laundering rule would go from silent to worthless in one step.
+    """
+    fl.populate(store)
+    before = len(_changes(store))
+    solo = {"v-closed": {"intervals": [
+        {"ship_name": "ONLY NAME", "flag": "IND", "mmsi": "419000009",
+         "valid_from": T0, "valid_to": T0 + timedelta(days=5),
+         "record_kind": "registry"}]}}
+    fl.add_vessels(store, solo)
+    fl.add_identities(store, solo)
+    assert len(_changes(store)) == before, "a closed interval is not a change"
+
+
+def test_re_using_the_same_name_later_emits_no_change(store):
+    """Two intervals carrying the same name is GFW splitting a record, not a
+    rename — the same rule the supersession edge already applies."""
+    fl.populate(store)
+    before = len(_changes(store))
+    same = {"v-same2": {"intervals": [
+        {"ship_name": "SAME NAME", "valid_from": T0,
+         "valid_to": T0 + timedelta(days=5), "record_kind": "registry"},
+        {"ship_name": "SAME NAME", "valid_from": T0 + timedelta(days=6),
+         "valid_to": None, "record_kind": "self_reported"},
+    ]}}
+    fl.add_vessels(store, same)
+    fl.add_identities(store, same)
+    assert len(_changes(store)) == before
+
+
+def test_the_event_is_timestamped_when_the_new_identity_starts(store):
+    """The detector correlates a change against a later anomaly inside a
+    window, so it needs when the hull began presenting the new identity. Using
+    the old interval's end would date the change to the last time we heard the
+    PREVIOUS one — a different instant whenever the intervals do not abut."""
+    fl.populate(store)
+    change = [c for c in _changes(store, "v-a") if c["field"] == "name"][0]
+    assert change["ts"] == pytest.approx(
+        (T0 + timedelta(days=11)).timestamp()), (
+        "must be the successor interval's valid_from, not the predecessor's "
+        "valid_to (which is day 10)")
+
+
+def test_repopulating_does_not_duplicate_identity_changed_events(store):
+    """The events table is an append-only log with an autoincrement key, so a
+    populator re-deriving the same facts would append a duplicate on every run
+    and any rule counting changes would see the corpus grow. Same defect class
+    as the stale alerts in STATE.md."""
+    fl.populate(store)
+    first = len(_changes(store))
+    assert first > 0
+    fl.populate(store)
+    assert len(_changes(store)) == first
+
+
+def test_two_genuinely_different_changes_are_both_kept(store):
+    """Deduplication must not collapse real history — the guard above keys on
+    (type, subject, ts, payload), and two distinct renames differ in both."""
+    fl.populate(store)
+    before = len(_changes(store, "v-multi"))
+    multi = {"v-multi": {"intervals": [
+        {"ship_name": "FIRST", "valid_from": T0, "valid_to": None,
+         "record_kind": "registry"},
+        {"ship_name": "SECOND", "valid_from": T0 + timedelta(days=3),
+         "valid_to": None, "record_kind": "registry"},
+        {"ship_name": "THIRD", "valid_from": T0 + timedelta(days=6),
+         "valid_to": None, "record_kind": "registry"},
+    ]}}
+    fl.add_vessels(store, multi)
+    fl.add_identities(store, multi)
+    names = [c for c in _changes(store, "v-multi") if c["field"] == "name"]
+    assert len(names) - before == 2, "FIRST->SECOND and SECOND->THIRD"

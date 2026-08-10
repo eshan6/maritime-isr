@@ -1,5 +1,7 @@
 // Small shared presentational pieces. Kept together so the visual language of
 // "finding vs candidate" and "risk" is defined once.
+import { useState } from "react";
+import { api } from "../api.js";
 import {
   NA,
   num,
@@ -47,6 +49,34 @@ export function SanctionsBadge({ sanctioned, isFinding, tier }) {
     <span className="badge badge-candidate" title={`match tier: ${tier || "name"}`}>
       sanctions candidate
     </span>
+  );
+}
+
+// The one-click incident report (CLAUDE.md §0 — the last named piece of the M6
+// demo). Reports its own state rather than failing silently: a button that
+// appears to do nothing is worse than one that says it could not.
+export function ExportButton({ id, primary = false, label = "Export report" }) {
+  const [state, setState] = useState("idle");
+  return (
+    <button
+      className={`btn btn-sm ${primary ? "btn-primary" : ""}`}
+      disabled={state === "working"}
+      title="Download a self-contained incident report — opens in any browser, prints to PDF"
+      onClick={async () => {
+        setState("working");
+        try {
+          await api.downloadReport(id);
+          setState("done");
+          setTimeout(() => setState("idle"), 2500);
+        } catch (e) {
+          setState("failed");
+          setTimeout(() => setState("idle"), 4000);
+        }
+      }}
+    >
+      {{ idle: label, working: "Building…", done: "Downloaded ✓",
+         failed: "Export failed" }[state]}
+    </button>
   );
 }
 

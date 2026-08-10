@@ -14,6 +14,7 @@ import {
 } from "../lib/format.js";
 import {
   Attribution,
+  ExportButton,
   NAtext,
   ProvChip,
   RiskDecomposition,
@@ -165,6 +166,11 @@ export function VesselPanel({ vesselId, onOpenGraph }) {
       <EventList title="AIS gaps" events={v.gaps} kind="gap" />
 
       <div className="section">
+        {/* The export sits on the vessel itself, not only on the findings row:
+            an analyst establishing whether a hull is worth flagging needs to be
+            able to hand over what is known about it, and the report is
+            available for any vessel rather than only for flagged ones. */}
+        <ExportButton id={vesselId} primary label="Export incident report" />{" "}
         <button className="btn" onClick={() => onOpenGraph?.(vesselId)}>
           Open graph neighbourhood →
         </button>{" "}

@@ -41,8 +41,38 @@ async function post(path, body) {
   return r.json();
 }
 
+// The one-click incident report. It cannot be a plain <a href> — every /api
+// route is token-gated and a navigation sends no headers, so the browser would
+// get a 401 page instead of a file. Fetch it, then hand the blob to a synthetic
+// click, honouring the filename the server chose (it carries the SCENARIO-
+// prefix for generated vessels, which is the label that must survive being
+// forwarded).
+async function downloadReport(vesselId) {
+  const path = `${BASE}/vessels/${encodeURIComponent(vesselId)}/report`;
+  const r = await fetch(path, { headers: authHeaders() });
+  if (!r.ok) throw new Error(`${r.status} report`);
+
+  const disp = r.headers.get("Content-Disposition") || "";
+  const m = disp.match(/filename="([^"]+)"/);
+  const name = m ? m[1] : `incident-report-${vesselId}.html`;
+
+  const blob = await r.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  // Revoking immediately can cancel the download in some browsers; one tick is
+  // enough for the click to have been handed off.
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return name;
+}
+
 export const api = {
   health: () => get("/health"),
+  downloadReport,
   stats: () => get("/stats"),
   vessels: (params) => get("/vessels", params),
   vessel: (id) => get(`/vessels/${encodeURIComponent(id)}`),

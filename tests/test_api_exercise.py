@@ -516,3 +516,149 @@ def test_synthetic_only_detections_say_no_real_sar_was_processed(client, H):
         assert "synthetic" in (d["note"] or "").lower()
         assert "dark" in (d["note"] or "").lower(), (
             "the note must withhold the word 'dark' from an unmatched contact")
+
+
+# ==========================================================================
+# the one-click incident report
+#
+# CLAUDE.md §0 defines done as: find a dark vessel, click it, read the reason,
+# and EXPORT A ONE-CLICK INCIDENT REPORT. This file is the thing that leaves
+# the building and gets forwarded to someone who was not here, so the tests
+# below are mostly about what it must not be able to imply once it has.
+# ==========================================================================
+
+def _any_vessel(client, H):
+    items = client.get("/api/vessels", params={"limit": 1}, headers=H).json()["items"]
+    if not items:
+        pytest.skip("no vessels in this corpus")
+    return items[0]["id"]
+
+
+def _report(client, H, vid=None, fmt=None):
+    vid = vid or _any_vessel(client, H)
+    params = {"format": fmt} if fmt else None
+    return client.get(f"/api/vessels/{vid}/report", params=params, headers=H)
+
+
+def test_report_downloads_as_a_named_html_file(client, H):
+    r = _report(client, H)
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+    disp = r.headers.get("content-disposition", "")
+    assert "attachment" in disp and ".html" in disp, (
+        "the export must download rather than navigate")
+
+
+def test_report_is_self_contained(client, H):
+    """It has to say the same thing on a laptop with no network. A report that
+    silently loses its stylesheet or an image when forwarded is a report that
+    can be misread."""
+    body = _report(client, H).text
+    for pattern in ('src="http', "src='http", 'href="http', "href='http",
+                    "@import", "url(http"):
+        assert pattern not in body, f"external reference {pattern!r} in the report"
+
+
+def test_report_404s_for_a_vessel_that_does_not_exist(client, H):
+    """A dossier about nothing is worse than no dossier."""
+    assert client.get("/api/vessels/vessel:gfw:no-such-hull/report",
+                      headers=H).status_code == 404
+
+
+def test_a_synthetic_vessel_is_unmistakably_labelled(client, H):
+    """The label has to survive being forwarded, because by then it is out of
+    our hands (CLAUDE.md §4.6)."""
+    syn = client.get("/api/vessels", params={"synthetic": True, "limit": 1},
+                     headers=H).json()["items"]
+    if not syn:
+        pytest.skip("no synthetic vessels in this corpus")
+    r = _report(client, H, syn[0]["id"])
+    body = r.text
+    assert "NOT A REAL VESSEL" in body
+    assert body.count("SCENARIO DATA") >= 2, (
+        "the banner must appear at the top AND the bottom — a long report is "
+        "read from wherever it was scrolled to")
+    assert "SCENARIO-" in r.headers.get("content-disposition", ""), (
+        "the filename itself must carry the label")
+
+
+def test_a_report_never_claims_we_detected_a_dark_vessel(client, H):
+    """The overclaim that would travel furthest (CLAUDE.md §5, §6)."""
+    for vid in [v["id"] for v in client.get(
+            "/api/vessels", params={"limit": 8}, headers=H).json()["items"]]:
+        body = _report(client, H, vid).text.lower()
+        for phrase in ("we detected a dark vessel", "dark vessel detected",
+                       "confirmed dark vessel"):
+            assert phrase not in body, f"{vid} report contains {phrase!r}"
+
+
+def test_every_report_states_what_it_does_not_establish(client, H):
+    """An omission reads as 'no concern here' unless it is named as 'we cannot
+    see this'."""
+    body = _report(client, H).text
+    assert "does not establish" in body.lower()
+    assert "did not detect a dark vessel" in body.lower()
+
+
+def test_a_gap_assessment_in_a_report_is_attributed_to_gfw(client, H):
+    """If any vessel in this corpus carries a GFW-flagged gap, its report must
+    name GFW as the assessor rather than presenting it as our finding."""
+    findings = client.get("/api/findings", headers=H).json()["items"]
+    dark = [f for f in findings if f["has_dark_gap"]]
+    if not dark:
+        pytest.skip("no GFW-flagged gaps in this corpus")
+    body = _report(client, H, dark[0]["id"]).text
+    assert "Global Fishing Watch" in body
+    assert "did not compute" in body, (
+        "the report must disclaim authorship of GFW's assessment")
+
+
+def test_a_sanctions_candidate_is_never_rendered_as_a_finding(client, H):
+    """ADR-018's gradient has to survive into the exported document, which is
+    the copy that outlives the screen."""
+    findings = client.get("/api/findings", headers=H).json()["items"]
+    with_cand = [f for f in findings
+                 if any(not s["is_finding"] for s in f["sanctions"])]
+    if not with_cand:
+        pytest.skip("no sanctions candidates in this corpus")
+    body = _report(client, H, with_cand[0]["id"]).text
+    assert "candidate" in body
+    assert "lead to verify" in body
+
+
+def test_json_and_html_are_the_same_payload(client, H):
+    """Two renderings of one dict — so a caveat added in one cannot go missing
+    from the other."""
+    vid = _any_vessel(client, H)
+    j = _report(client, H, vid, fmt="json").json()
+    assert set(j) >= {"vessel", "finding", "alerts", "summary",
+                      "not_established", "provenance", "is_synthetic"}
+    html = _report(client, H, vid).text
+    for line in j["not_established"]:
+        # the HTML escapes, so compare on a distinctive unescaped fragment
+        frag = line.split(".")[0][:40]
+        assert frag.replace("'", "&#x27;") in html or frag in html
+
+
+def test_the_report_carries_its_provenance(client, H):
+    """A finding an analyst cannot trace to a source and a code version is
+    worthless — worse, a landmine (CLAUDE.md §4.1)."""
+    j = _report(client, H, fmt="json").json()
+    assert j["provenance"]["sources"], "no source id reached the report"
+    body = _report(client, H).text
+    assert "Provenance" in body
+
+
+def test_a_report_can_be_exported_for_a_vessel_with_no_finding(client, H):
+    """An analyst establishing whether a hull is worth flagging needs to hand
+    over what is known about it. Refusing unless it is already flagged makes
+    the export useless in exactly that case."""
+    findings = {f["id"] for f in
+                client.get("/api/findings", headers=H).json()["items"]}
+    plain = [v["id"] for v in client.get("/api/vessels", params={"limit": 200},
+                                         headers=H).json()["items"]
+             if v["id"] not in findings]
+    if not plain:
+        pytest.skip("every vessel in this corpus carries a finding")
+    body = _report(client, H, plain[0]).text
+    assert "carries no finding" in body
