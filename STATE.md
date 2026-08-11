@@ -62,6 +62,17 @@ dark-vessel detection needs SAR contacts matched against AIS tracks, and neither
 is obtainable free for this AOI (see DATA_SOURCES.md). The synthetic Phase 1–6
 prototype remains green in-sandbox and every metric it produces is synthetic.
 
+**What the demo is, as of 2026-08-10 (ADR-024/025).** Five screens — Map,
+Findings, Alerts, Vessels, Graph — plus a one-click incident report, served by
+one Python process. The M6 demo definition in CLAUDE.md §0 is now **built end
+to end**: a map, a ranked list, a plain-English reason, and an export.
+
+**And one sentence that has to travel with it:** of six detectors, **two fire**,
+producing **one alert** on the scenario corpus and **zero on real data** — every
+detector reads the track engine, and the real corpus has no AIS positions. The
+demo's strength is the evidence chain, the provenance and the sanctions identity
+matching; it is not detection performance. Say that before anyone asks.
+
 ---
 
 ## Unit status
@@ -75,6 +86,7 @@ prototype remains green in-sandbox and every metric it produces is synthetic.
 | 0.4 | GFW + versioned OFAC/UN/EU/WPI registries | ✅ | **Ran live.** GFW events 27,172 rows; vessel identity 9,648 intervals / 9,184 summaries; OFAC 19,157 (1,516 vessels); UN 1,011; EU 6,017. WPI blocked by an NGA outage — optional per ADR-016. SAR clause amended (ADR-014). NOAA PARKED. |
 | 0.5 | Inspection dashboard v0 (AOI frame, AIS tracks, scene footprints) | 🟡 | Throwaway/ugly by design. Verifies once real AIS + scenes are landing. |
 | 1.0 → 6.3 | Phases 1–6 (synthetic prototype) | 🟡 | Implemented and green on the synthetic suites. Every metric is synthetic-only. |
+| 6.0 → 6.3 | Phase 6 product surface (API + UI + export) | 🟡 | **The M6 demo definition is now fully built** (ADR-024/025): map, ranked findings, plain-English reason, one-click incident report. Sandbox-green and browser-verified; **never run against the real corpus**. |
 
 **Ingest rework detail (units 0.1 / 0.3 / 0.4), 2026-07-29:**
 
@@ -91,9 +103,21 @@ prototype remains green in-sandbox and every metric it produces is synthetic.
 | GFW SAR (gridded + portal CSV) | ⬜ | Upstream offline since 2026-07-03. Both paths degrade cleanly. |
 | Ingest report | ✅ | Prints real counts, date ranges, AOI checks and disk usage. |
 
-**Test tally:** 390 tests passing in-sandbox. Sandbox-green ≠ host-verified — do
-**not** report this as "273 tests prove it works on real data." Every number the
-system has ever produced comes from synthetic fixtures or fixture-driven tests.
+**Test tally: 525 passing in-sandbox** (was 390 on 2026-07-31). Sandbox-green ≠
+host-verified — do **not** report this as "525 tests prove it works on real
+data." Every number the system has ever produced comes from synthetic fixtures
+or fixture-driven tests.
+
+*A caveat on that number that matters more than its size:* `test_api_exercise.py`
+and parts of `test_phase6.py` **skip themselves** when no corpus is landed. A
+bare checkout reports green with the most valuable ~30 tests never executed.
+Generate the corpus and run the pipeline before quoting the tally:
+
+```
+python -m maritime_isr.cli scenario generate --seed 7
+rm -f data/graph.sqlite && python tools/run_scenario_pipeline.py
+python -m pytest -q -rs        # read the SKIPPED lines, do not skim them
+```
 
 **Host-only bugs found once real hardware was involved (6).** None were visible
 in the sandbox; all sat in the seam between the code and the real world:
@@ -149,6 +173,33 @@ steps personally.
 ---
 
 ## Next up
+
+> **Read this box first — the rest of this section is from 2026-07-31 and some
+> of it is done.** The current highest-leverage action, as of 2026-08-10, is
+> **running the demo on the laptop against the real corpus.** Everything in
+> ADR-024 and ADR-025 is sandbox-green and browser-verified and *none of it has
+> touched real data*. In order:
+>
+> ```
+> python -m maritime_isr.cli ingest registries        # refresh UN + EU
+> python -m maritime_isr.cli ingest sanctions-match   # REQUIRED: schema + key changed
+> python tools/data_health.py                         # the demo gate
+> python -m maritime_isr.api                          # then open /findings
+> ```
+>
+> **Three numbers to report back**, whatever they are:
+> 1. How many findings **UN and EU add beyond OFAC's 126.** Zero is a result.
+> 2. Whether `/findings` shows the **5 GFW-flagged intentional-disabling gaps**.
+>    If that section is empty on real data, the flag did not survive
+>    `rebuild_conformed.py`.
+> 3. The count of **`identity_changed` events**. 12 across 5 hulls in the
+>    sandbox; a figure near the 9,184-vessel fleet size would mean the
+>    supersession rule regressed to counting interval *closure* — the
+>    100%-closed trap.
+>
+> Then click **Export report** on a real finding and read the resulting file
+> end to end. It is the artefact that leaves the building, and nobody has yet
+> seen one built from real rows.
 
 **Everything below is built and sandbox-green. None of it has run on the real
 landed tables** — those live on Eshan's laptop, not in the sandbox. The numbers
@@ -850,6 +901,28 @@ earlier 18% was measured against a corpus that was easier than reality.
 
 ## Known broken / rough / watch
 
+- **Two of six detectors fire; five of six scenarios in the identity family are
+  gated behind an unfunded feed.** `dark_vessel` and `dark_rendezvous` return
+  `suppressed_coverage` at `hearable_conf = 0.0` on every verdict, and
+  `identity_then_anomaly` is *composite* — it needs one of those to have fired
+  first. So fixing its empty input (ADR-025) moved it from **unfed** to **fed
+  and gated**, and recall did not move. Not a threshold anywhere in that chain.
+- **`test_api_exercise.py` skips itself on a bare checkout.** Roughly 30 of the
+  most valuable tests do not run unless the scenario corpus is generated and the
+  pipeline has been run. A green tally on a fresh clone proves much less than it
+  looks like it does — see the note under the test tally above.
+- **No CI.** A workflow was written and then dropped on 2026-08-10 at Eshan's
+  instruction. The design that had been verified locally: lint on a
+  **real-bug-only** ruff subset (`E9,F63,F7,F82,F811` — the full default set
+  reports 153 pre-existing findings, and a gate that fails on day one for
+  unrelated reasons teaches everyone to ignore the gate); `shell: bash` on any
+  step that pipes pytest, because GitHub's default `bash -e` has **no pipefail**
+  and `pytest | tee` would report green on a failing suite; corpus generation
+  before the test step, with a guard that **fails the build if the
+  corpus-dependent tests skipped**; and a frontend job comparing the committed
+  `dist/` bundle hash against a fresh build, since a stale `dist` makes the
+  Python-only demo serve a blank white page with the server reporting nothing
+  wrong.
 - **GFW SAR is offline upstream since 2026-07-03**, pending their migration to
   Sentinel-1C/1D, with a ≥1 month gap announced. Both SAR paths degrade to a
   clear message. Re-check before assuming a SAR pull will return anything.
@@ -1007,6 +1080,27 @@ earlier 18% was measured against a corpus that was easier than reality.
    happened outside it, false for other causes in coverage — so the column is
    not a copy of the answer key, plus a guard test that no detection path reads
    it. **Ask Eshan before doing it.**
+
+10. **Should an individual scenario vessel be marked ON SCREEN?** Right now it
+    is not. `SyntheticBadge` renders `null` — a deliberate no-op with a comment
+    saying the distinction "is preserved in the data layer and communicated
+    outside the product." The data layer *is* honest: `is_synthetic` on every
+    row, every count split, and the exported incident report labels a scenario
+    vessel top, bottom and in its filename.
+
+    But on the map, in the vessels table and in the vessel panel, **a generated
+    hull renders exactly like a real one.** With a corpus that is deliberately
+    both (ADR-019), an operator looking at a screen has no way to tell which
+    they are pointing at, and "communicated outside the product" is a promise
+    about a conversation rather than a property of the thing.
+
+    The inconsistency got sharper on 2026-08-10: the report now shouts SCENARIO
+    DATA while the screen it was exported from says nothing. Two defensible
+    resolutions — mark it on screen too, or drop the label from the report for
+    consistency — and they point in opposite directions, so **ask Eshan.**
+    (README.md claimed a `SCENARIO` badge and a violet treatment "everywhere
+    they appear" until this was found; that text has been corrected to describe
+    what is actually rendered.)
 
 8. **Terminology: "D1"/"D2" are retired.** They were never defined in the repo
    and collided with the `D-0x` decision-ID shorthand. Refer to work by execution

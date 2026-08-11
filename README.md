@@ -140,9 +140,17 @@ Each command's exit test is defined in `maritime-isr-execution-spec.md`. A comma
 
 The first screen this project has: a local **FastAPI** backend plus a
 **React + MapLibre** frontend, both on `localhost`. Real and scenario data share
-every table and are **always shown separately, never blended** (ADR-019); the
-scenario rows carry a `SCENARIO` badge and a distinct violet treatment
-everywhere they appear.
+every table, and **every count is returned split `{real, synthetic}`, never
+blended** (ADR-019).
+
+> ⚠ **On screen, an individual scenario vessel is not marked.** The API carries
+> `is_synthetic` on every row and splits every total, and the exported incident
+> report labels a scenario vessel unmistakably — but the map, the tables and the
+> vessel panels render a generated hull exactly like a real one.
+> `SyntheticBadge` is a deliberate no-op today. That is a decision worth
+> re-taking rather than inheriting: see STATE.md OPEN QUESTION #10. This README
+> previously claimed a `SCENARIO` badge and a violet treatment "everywhere they
+> appear", which had stopped being true.
 
 ### Run the demo — Python only, no Node (the easy path)
 
@@ -162,25 +170,54 @@ python -m maritime_isr.api                            # serves 127.0.0.1:8000
 ```
 
 Then open **http://127.0.0.1:8000** in a browser. That's the whole demo — Map,
-Alerts, Vessels, Graph. Nav routes, hard refreshes and pasted deep links all
-work; the backend falls back to the app's `index.html` for any non-`/api` path.
+Findings, Alerts, Vessels, Graph. Nav routes, hard refreshes and pasted deep
+links all work; the backend falls back to the app's `index.html` for any
+non-`/api` path.
 
 The API reads the conformed Parquet tables through DuckDB and the object graph
 through SQLite, and writes nothing except alert dispositions. Auth is a shared
 token (`X-API-Token`, default `maritime-isr-dev`, override with `MISR_API_TOKEN`
 — injected into the served page so you never type it). JSON lives under `/api`:
-`/api/vessels`, `/api/vessels/{id}` (+ `/track`, `/neighbourhood`), `/api/alerts`
-(+ detail, `/disposition`), `/api/events`, `/api/scenes`, `/api/ports`,
-`/api/stats`, and interactive docs at `/docs`. Every vessel/edge payload carries
-`is_synthetic` and the provenance envelope; every count returns `{real,
-synthetic}` separately.
 
-The four views: **Map** (AOI framed on the Arabian Sea, toggleable layers, an
-8-week time scrubber with play/pause, click a vessel for its entity panel),
-**Alerts** (a short, high-signal queue — each alert's evidence chain as labelled
-hops, with confirm/watch/dismiss that persist), **Vessels** (a sortable,
-filterable table), and **Graph** (seed-and-expand from one vessel, one hop per
-click, never a hairball).
+| Route | What it serves |
+|---|---|
+| `/api/vessels`, `/api/vessels/{id}` | the table and one hull's full record |
+| `/api/vessels/{id}/track`, `/neighbourhood` | AIS positions; graph neighbours |
+| `/api/vessels/{id}/report` | **the one-click incident report** (HTML, or `?format=json`) |
+| `/api/findings` | the ranked findings table |
+| `/api/alerts` (+ detail, `/disposition`) | the alert queue and analyst feedback |
+| `/api/events`, `/api/events/density` | event rows; per-H3-cell counts over the whole corpus |
+| `/api/detections` | SAR radar contacts |
+| `/api/tracks`, `/api/scenes`, `/api/ports`, `/api/stats` | map layers and headline figures |
+
+Interactive docs at `/docs`. Every vessel/edge payload carries `is_synthetic`
+and the provenance envelope; every count returns `{real, synthetic}` separately.
+
+The five views:
+
+- **Map** — AOI framed on the Arabian Sea, an 8-week time scrubber with
+  play/pause that animates vessels along their AIS tracks, and toggleable
+  layers: events, **event density** (per-H3-cell counts over the *whole* corpus,
+  not the page — the plain event layers are capped and say so), **SAR radar
+  contacts** (drawn hollow when no AIS track is associated), Sentinel-1
+  footprints, ports and alert markers. Click a vessel for its entity panel.
+- **Findings** — the ranked table: GFW-assessed intentional-disabling AIS gaps
+  first, then sanctions-matched hulls, each row expanding to its evidence.
+  Ranking is a sum of **named signals shown with the row**, never a blended
+  score.
+- **Alerts** — a short, high-signal queue; each alert's evidence chain as
+  labelled hops, with confirm/watch/dismiss that persist.
+- **Vessels** — a sortable, filterable table.
+- **Graph** — seed-and-expand from one vessel, one hop per click, never a
+  hairball.
+
+**The export** is on every findings row and every vessel panel. It downloads a
+**self-contained HTML incident report** — no external assets, so it reads the
+same offline — carrying the vessel's identity and history, why it was flagged,
+the evidence with its attribution, a *"what this report does not establish"*
+section, and the provenance chain. It prints to PDF from the browser. A scenario
+vessel's report is labelled top and bottom and the filename carries a
+`SCENARIO-` prefix.
 
 ### Developing the frontend (needs Node)
 
