@@ -235,3 +235,31 @@ events. 12 across 5 hulls here; on 9,184 real vessels it will be far larger,
 but a figure near the fleet size would mean the supersession rule has regressed
 to counting interval *closure* — the 100%-closed trap, and the one failure mode
 this change had to avoid.
+
+---
+
+## docs: bring the documents up to what was actually built
+
+No code. Four documents had drifted from the tree, and one of them was asserting
+a UI feature that does not exist.
+
+```
+git add README.md STATE.md ARCHITECTURE.md GLOSSARY.md COMMITS.md
+git commit -m "docs: bring README, STATE, ARCHITECTURE and GLOSSARY up to ADR-024/025"
+```
+
+**The one worth knowing about:** README claimed scenario rows "carry a
+`SCENARIO` badge and a distinct violet treatment everywhere they appear."
+`SyntheticBadge` returns `null` and has done for some time, so on screen a
+generated hull renders exactly like a real one. Corrected to describe what is
+rendered, and raised as **OPEN QUESTION #10** rather than fixed — the no-op is
+deliberate and reversing it is Eshan's call, made sharper by the fact that the
+new incident report *does* label a scenario vessel.
+
+Nothing to verify beyond reading, but the claims were checked against the tree
+rather than against memory:
+
+```
+grep -n "SyntheticBadge" -A 4 frontend/src/components/bits.jsx   # returns null
+grep -rn "<SyntheticBadge" frontend/src/                          # one call site
+```

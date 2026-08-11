@@ -175,6 +175,37 @@ files instead of scanning everything.
 - **API/UI (6.x) consume the derived stores + graph** → the operational picture,
   replay, entity pages, and one-click reports.
 
+### 6a. The serving layer as built (ADR-024/025)
+
+`api/` is a **read layer with one write**, and the split inside it is worth
+knowing before changing anything:
+
+| Module | Owns |
+|---|---|
+| `reader.py` | a fresh DuckDB connection per request, with the conformed Parquet tables registered as temp views. A missing table is left unregistered so the endpoint degrades to empty rather than 500. |
+| `service.py` | every domain query. This is where the two cross-cutting rules live once instead of per endpoint: the canonical vessel id is the graph node id, and **counts are split real/synthetic, never blended**. |
+| `graph_service.py` | the SQLite object graph — neighbourhoods, risk, alerts, dispositions. |
+| `report.py` | the incident report: `build_report()` assembles a payload, `render_html()` renders it. Kept apart so the JSON and HTML forms **cannot drift** — both are the one dict, so a caveat added once appears in both. |
+| `models.py` | the response contracts. `Provenance` is a required nested model and `SplitCount` has no `total` field, so neither rule can be forgotten by accident. |
+| `app.py` | routing, the shared-secret gate, and serving the built frontend so the demo is one Python process. |
+
+Two things the serving layer must never do, both enforced by tests:
+
+- **Never read `scenario_truth`.** It is the evaluation answer key; no serving,
+  detection or scoring code may touch it (ADR-019 §d). The product must not show
+  an operator the answers.
+- **Never present a determination without its author.** GFW assessed the AIS
+  gaps, the sanctions registries decided the designations, and *ours* is the
+  identity match between them. Both the findings API and the exported report
+  carry that attribution as a field, not as prose someone might drop.
+
+**Two read paths over the same events, deliberately.** `/api/events` returns
+rows and is capped — so it reports `truncated` per kind with the true total,
+because a silent cap once made the map draw a chronological prefix of the real
+corpus and stop. `/api/events/density` aggregates per H3 cell **over every
+matching row**, which is the only path that describes the whole corpus. Prefer
+density for anything that makes a claim about volume or distribution.
+
 ---
 
 ## 7. Coverage model & the free-path honesty rule

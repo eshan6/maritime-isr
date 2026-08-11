@@ -246,3 +246,51 @@ and restarts it after a reboot, so capture never silently stops.
 
 **Cloudflare tunnel** — a way to expose the VM's API to the internet without opening
 firewall ports, used to connect the Vercel frontend to the backend.
+
+---
+
+## Terms an operator meets on screen (Phase 6)
+
+**Finding vs candidate** — the distinction the whole sanctions gradient exists to
+protect. A **finding** is matched on an IMO (a permanent hull number, hard to
+fake) or on a call sign *and* a name agreeing — two independent identifiers. A
+**candidate** is a name-only or call-sign-only hit: names change and collide, and
+call signs are reassigned by the flag state, so it is a lead to verify rather
+than an assertion. A candidate never earns a red treatment and never ranks a row
+on the Findings screen. (ADR-018, CLAUDE.md §4.4.)
+
+**Match tier** — *which* of those a given match is: `imo` (0.95) > `call_sign_name`
+(0.80) > `call_sign` (0.40) > `name` (0.35). The gap between 0.80 and 0.40 is the
+finding threshold and is deliberately wide, so the tiers can never look
+interchangeable downstream.
+
+**Designated owner** (as opposed to a sanctions finding) — the sanctions list
+named the *company* that owns or operates the hull, not the hull itself. Both are
+worth an analyst's time and they are not the same claim, so the badge and the
+sentence say which. It also means a vessel name differing from the listed name is
+*not* evidence of anything: a ship's name never equals a company's.
+
+**Priority** (Findings screen) — the sum of the named signals a vessel actually
+carries, shown with the signals under it. **It is an ordering, not a
+probability**, and it is never displayed without its parts. Deliberately not a
+blended risk score: a number whose listed reasons do not add up to it is not an
+explanation.
+
+**Event density** — per-H3-cell counts of behaviour events, aggregated over the
+**whole** corpus rather than over the page of rows the map requested. The plain
+event layers are capped and say so; density is the layer that can make a claim
+about how much is where. 24,153 loitering events are a solid smear as dots and a
+readable surface as graduated hexagons.
+
+**SAR radar contact** — a ship-sized return in a satellite radar image. A contact
+drawn **hollow** has no AIS track associated with it. That is the *shape* of a
+dark vessel, not a dark vessel: asserting a silence is intentional requires
+demonstrated receiver coverage at that position, which mostly does not exist here.
+(ADR-005, CLAUDE.md §6.)
+
+**Incident report** — the one-click export: a self-contained HTML file carrying a
+vessel's identity and history, why it was flagged, the evidence with its
+attribution, the provenance chain, and a **"what this report does not establish"**
+section. It opens in any browser and prints to PDF. A scenario vessel's report is
+labelled top and bottom and its filename starts `SCENARIO-`, because the label has
+to survive the file being forwarded to someone who was not here.
