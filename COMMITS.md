@@ -189,3 +189,49 @@ python -m maritime_isr.cli ingest sanctions-match     # all three registries
 Scenario generation is unchanged in geometry — the only new column on a
 scenario row is `listed_entity_type`, so the corpus is otherwise byte-identical
 and the determinism test stays green.
+
+---
+
+## demo: the one-click incident report, and the identity_changed events (ADR-025)
+
+Two units, committed together because the second is small and both close items
+this file already listed as open.
+
+```
+git add maritime_isr/api/{app,report,service}.py \
+        maritime_isr/graph/{store,from_landed}.py \
+        frontend/src/api.js frontend/src/components/{bits,VesselPanel}.jsx \
+        frontend/src/views/FindingsView.jsx frontend/dist \
+        tests/test_api_exercise.py tests/test_graph_from_landed.py \
+        DECISIONS.md STATE.md COMMITS.md
+git commit -m "demo: the one-click incident report, and the identity-change events nothing was writing"
+```
+
+Verification, in this order:
+
+```
+python -m pytest tests/test_graph_from_landed.py -q   # 28 green (11 new)
+python -m pytest tests/test_api_exercise.py -q        # 43 green (12 new)
+python -m pytest tests/ -q                            # 525 green
+cd frontend && npm run build
+rm -f data/graph.sqlite && python tools/run_scenario_pipeline.py
+```
+
+**The numbers to check after the pipeline run:**
+
+```
+identity_then_anomaly   1 alert   (was 0)
+recall                  5%        (UNCHANGED — and that is the finding)
+false positives         0         (must stay 0)
+```
+
+Recall not moving is expected and is recorded in ADR-025: the new alert lands
+on B5, which was already detected. The rule is composite and the five scenarios
+that declare it still miss because they have no companion dark alert — both
+dark rules are structurally silent under ADR-005.
+
+**A number worth eyeballing on the laptop:** the count of `identity_changed`
+events. 12 across 5 hulls here; on 9,184 real vessels it will be far larger,
+but a figure near the fleet size would mean the supersession rule has regressed
+to counting interval *closure* — the 100%-closed trap, and the one failure mode
+this change had to avoid.

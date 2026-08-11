@@ -18,7 +18,7 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api.js";
 import { fmtDate, num, shortId } from "../lib/format.js";
-import { NAtext } from "../components/bits.jsx";
+import { ExportButton, NAtext } from "../components/bits.jsx";
 
 const KIND_LABEL = {
   encounter: "encounters",
@@ -131,6 +131,7 @@ export function FindingsView() {
                 >
                   {isOpen ? "Hide evidence" : "Why this is here"}
                 </button>
+                <ExportButton id={f.id} primary />
                 <button className="btn btn-sm" onClick={() => nav(`/vessels/${encodeURIComponent(f.id)}`)}>
                   Open vessel
                 </button>

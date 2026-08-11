@@ -1224,3 +1224,115 @@ reproduces the previous behaviour exactly.
 **What this does not do.** It does not make a real alert possible. Every
 detector reads the track engine, the real corpus has no AIS positions, and that
 is ADR-005's unfunded feed, not a tuning problem.
+
+---
+
+## ADR-025 — The incident report, and the identity-change events that were never written *(Accepted)*
+**2026-08-10. Same session as ADR-024, second pass.**
+
+Two changes. One completes the M6 demo definition; the other fixes a piece of
+plumbing that had been making a detector look like a tuning problem.
+
+### 1. The one-click incident report
+
+`CLAUDE.md` §0 defines done as: a non-engineer opens a map, finds last week's
+dark vessels, clicks one, reads the plain-English reason, **and exports a
+one-click incident report** — in under five minutes. Every clause but the last
+was built. Searching the tree for it returned nothing: no endpoint, no button,
+no renderer.
+
+`GET /api/vessels/{id}/report` returns a **self-contained HTML file** by
+default (`?format=json` gives the same payload as data). HTML rather than PDF
+because it opens in any browser, prints to PDF from there in one keystroke,
+survives being emailed, and needs no renderer on either end. Every style is
+inline and no asset is fetched, so the document says the same thing on a
+machine with no network — which for a file that exists to be forwarded is the
+entire point.
+
+**The report is written for someone who was not in the room**, so three things
+are structural rather than a matter of care at authoring time:
+
+- **A scenario vessel is unmistakable.** Banner at the top, banner at the
+  bottom, and `SCENARIO-` on the filename itself. A generated dossier mistaken
+  for a real one is exactly the failure §4.6 exists to prevent, and by the time
+  it happens the label is out of our hands. A long document is also read from
+  wherever it was scrolled to, which is why one banner is not enough.
+- **Every determination names who made it.** GFW assessed the gaps; OFAC, the
+  UN and the EU decided the designations; ours is the identity match between
+  them. A test asserts no report can contain "we detected a dark vessel".
+- **"What this report does not establish" is a required section.** An omission
+  reads as *no concern here* unless it is named as *we cannot see this*. It
+  always states that we detected no dark vessel, and — when no gap is flagged —
+  that this is not evidence the vessel never went dark, because outside
+  demonstrated coverage a silence cannot be attributed at all.
+
+The export is available for **any** vessel, not only flagged ones: an analyst
+establishing whether a hull is worth flagging needs to hand over what is known
+about it, and refusing unless it is already flagged makes the export useless in
+precisely that case.
+
+### 2. `identity_changed` events — a rule that was unfed, not mistuned
+
+`detect_identity_then_anomaly` has measured zero across every session, and was
+recorded in STATE.md as blocked by "the `events` table is empty (0 rows)".
+
+**The cause was a missing writer.** Those events had exactly one producer,
+`identity.fold_registry_snapshot`, and the scenario pipeline never calls it —
+it populates Phase 4 through `from_landed.populate()` instead. Nothing on that
+path emitted an identity change, so the rule read an empty table and reported
+silence. Five of six detectors were being described as silent; this one was
+silent for a reason that had nothing to do with its logic.
+
+`from_landed.add_identities` was **already computing genuine supersession** for
+the rename analysis. It now emits the event alongside, for name, flag and MMSI.
+
+Three decisions inside that, each of which could have been made wrongly:
+
+- **Supersession, not closure.** A value counts as replaced only when a *later*
+  interval carries a *different* value. GFW's `transmissionDateTo` is the end
+  of our query window, so nearly every interval is closed — this is the same
+  100%-closed trap that once labelled the entire fleet as having changed
+  identity. Emitting on closure would fire the laundering rule on essentially
+  every hull in the corpus: silent to worthless in one step.
+- **IMO is excluded.** It is a permanent hull number, so a change in it is a
+  far stronger and different claim than a change of label. Folding it in would
+  let a transcription error read as a laundering step.
+- **The timestamp is when the new identity starts**, not when the old one ends.
+  The rule correlates a change against a later anomaly inside a window, and the
+  two instants differ whenever intervals do not abut. Using the predecessor's
+  end would date the change to the last time we heard the *old* identity.
+
+`GraphStore.emit_once()` deduplicates on `(event_type, subject, ts, payload)`.
+The events table is an append-only log with an autoincrement key, so a
+populator re-deriving the same facts would append a duplicate on every run and
+any rule counting changes would watch the corpus grow — the same defect class
+as the stale alerts already recorded in STATE.md.
+
+### Measured, including the part that did not move
+
+```
+identity_changed events    12, across 5 hulls  (name 2, flag 7, mmsi 3)
+detectors firing            2 of 6   (was 1 of 6)
+identity_then_anomaly       1 alert  (was 0)
+
+true anomalies  22   DETECTED 1   MISSED 21     <- unchanged
+decoys          16   FALSE POSITIVE 0           <- unchanged
+precision 100%   recall 5%                      <- unchanged
+```
+
+**The rule fires and the scorecard does not move, and that is the finding.**
+The alert lands on `clone_ghost`, which is B5 — already detected via
+`ais_spoofing`. B5 now carries two alerts instead of one.
+
+B1, B2, B3, B6 and D2 all declare `identity_then_anomaly` as their expected
+type and all still miss, because **the rule is composite**: it needs an
+identity change *and* a `dark_vessel` / `dark_rendezvous` / `ais_spoofing`
+alert on the same hull within 14 days. Those hulls now have the identity change
+and have no companion alert, because `dark_vessel` and `dark_rendezvous` are
+structurally silent — every dark verdict is `suppressed_coverage` with
+`hearable_conf = 0.0`, which is ADR-005's unfunded satellite feed arriving in
+the detector.
+
+So the plumbing fix was **necessary and not sufficient**, and the remaining
+blocker on this family is the same funding decision as everywhere else. Zero
+false positives were added, which is the other number that had to hold.

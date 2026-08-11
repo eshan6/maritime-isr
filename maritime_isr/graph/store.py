@@ -457,6 +457,33 @@ class GraphStore:
             (event_type, subject, ts, json.dumps(payload or {})))
         self._con.commit()
 
+    def emit_once(self, event_type: str, subject: str, ts: float,
+                  payload: dict | None = None) -> bool:
+        """Emit, unless an identical event is already recorded. True if written.
+
+        The events table is an append-only processing log with an autoincrement
+        key, so a populator that re-derives the same facts from the same landed
+        rows would append a duplicate on every run — and a detector counting
+        identity changes would see the corpus grow each time the pipeline was
+        re-run. That is the same class of defect as the stale alerts recorded in
+        STATE.md, where a re-run reported rows a current build cannot emit.
+
+        Identity is `(event_type, subject, ts, payload)`. Two genuinely distinct
+        changes to the same hull differ in at least `ts` or `payload`, so this
+        deduplicates re-derivation without collapsing real history.
+        """
+        body = json.dumps(payload or {}, sort_keys=True)
+        row = self._con.execute(
+            "SELECT 1 FROM events WHERE event_type=? AND subject=? AND ts=? "
+            "AND payload=? LIMIT 1", (event_type, subject, ts, body)).fetchone()
+        if row:
+            return False
+        self._con.execute(
+            "INSERT INTO events(event_type,subject,ts,payload) VALUES (?,?,?,?)",
+            (event_type, subject, ts, body))
+        self._con.commit()
+        return True
+
     def pending_events(self) -> list[dict]:
         return [dict(event_id=r[0], event_type=r[1], subject=r[2], ts=r[3],
                      payload=json.loads(r[4]))
