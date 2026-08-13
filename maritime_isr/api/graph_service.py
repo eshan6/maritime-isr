@@ -58,6 +58,106 @@ def graph_exists() -> bool:
     return graph_path().exists()
 
 
+#: Ceiling on the whole-graph view. Chosen from measured layout cost, not taste.
+#:
+#: The real corpus graph is an estimated ~19,000 nodes / ~22,000 edges (9,184
+#: vessels plus their identity intervals, flags and ports), which no in-browser
+#: force layout will draw. So the view shows the most-connected core and states
+#: how much it left out.
+#:
+#: Measured end-to-end in Chromium, page load to settled picture, on a graph
+#: shaped like the real one:
+#:
+#:     219 nodes  ->  2.5s      900 nodes  ->  5.8s      1,409 nodes -> 7.0s
+#:
+#: Most of that is fixed overhead rather than per-node cost, so raising the cap
+#: from 900 to 1,500 buys 66% more graph for about a second. (For reference,
+#: cytoscape's built-in `cose` took **115s** on 1,409 nodes before the frontend
+#: switched to `fcose` — see the note in GraphView.jsx.)
+FULL_GRAPH_MAX_NODES = 1500
+
+
+def full_graph(limit: int = FULL_GRAPH_MAX_NODES) -> dict:
+    """Every current relationship in the graph, as one web — up to `limit`
+    nodes, most-connected first.
+
+    Returns the same node/edge shape as :func:`neighbourhood` so the view can
+    render either without a second code path, plus the counts needed to state
+    honestly what is on screen: `total_nodes`, `total_edges`, `truncated`.
+
+    **A truncated web must never be described as the whole graph.** On the real
+    corpus this will be truncated by a wide margin, and a picture that looks
+    complete is exactly how a viewer concludes the dataset is smaller and
+    sparser than it is.
+    """
+    limit = max(1, min(5000, limit))
+    with open_graph() as g:
+        if g is None:
+            return {"nodes": [], "edges": [], "total_nodes": 0,
+                    "total_edges": 0, "truncated": False, "focus": None,
+                    "focus_basis": None, "limit": limit}
+        sub = g.subgraph_by_degree(limit)
+
+    nodes = [{
+        "id": n["node_id"],
+        "node_type": n["node_type"],
+        "label": _node_label(n["props"], n["node_id"]),
+        "is_synthetic": n["is_synthetic"],
+        "degree": n["degree"],
+        "props": n["props"],
+    } for n in sub["nodes"]]
+    edges = [{
+        "source": e.src, "target": e.dst, "edge_type": e.edge_type,
+        "confidence": round(e.base_confidence, 3),
+        "t_start": _iso(e.t_start), "t_end": _iso(e.t_end),
+        # Explicit rather than left to the client to infer from `t_end`: an
+        # ended relationship drawn like a live one asserts a stale fact as
+        # current, which invariant 3 exists to prevent. The web styles these
+        # differently instead of hiding them.
+        "is_current": e.t_end is None,
+        "is_synthetic": bool(e.is_synthetic),
+    } for e in sub["edges"]]
+
+    focus, basis = _pick_focus(nodes)
+    return {
+        "nodes": nodes, "edges": edges,
+        "total_nodes": sub["total_nodes"], "total_edges": sub["total_edges"],
+        "truncated": sub["truncated"], "limit": limit,
+        "focus": focus, "focus_basis": basis,
+    }
+
+
+def _pick_focus(nodes: list[dict]) -> tuple[str | None, str | None]:
+    """Which node the web opens centred on, and the sentence explaining why.
+
+    **The criteria, in order.** A designated vessel with the most connections;
+    failing that, the most connected vessel; failing that, the most connected
+    node of any type.
+
+    Sanctions designation comes first because it is the only finding-grade
+    signal available at the node level — it is what `_RANK` already treats as
+    evidence, rather than something this view invented. Degree breaks the tie
+    because a lone designated hull makes a worse opening picture than a
+    connected one, and the point of a web view is structure.
+
+    The basis string travels with the choice so the UI can state the claim
+    rather than let a centred node read as a conclusion. "Most connected
+    designated vessel" is not "most suspicious vessel", and the difference is
+    the sort of thing an operator will otherwise assume in our favour.
+    """
+    vessels = [n for n in nodes if n["node_type"] == "vessel"]
+    designated = [n for n in vessels if (n["props"] or {}).get("designated")]
+    for pool, basis in (
+        (designated, "the most connected sanctioned vessel in the graph"),
+        (vessels, "the most connected vessel in the graph"),
+        (nodes, "the most connected node in the graph"),
+    ):
+        if pool:
+            best = max(pool, key=lambda n: n["degree"])
+            return best["id"], basis
+    return None, None
+
+
 def best_seeds(limit: int = 12) -> list[dict]:
     """Vessels worth opening the graph on, most-connected first.
 

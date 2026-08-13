@@ -359,3 +359,39 @@ python -m maritime_isr.api   # open /, then switch to Findings and back
 there when you leave the Map and return. Graph opens with a network drawn and a
 line naming the vessel it chose. *Failure:* a blank white page means a stale
 `dist/` — rebuild with `npm run build` in `frontend/`.
+
+---
+
+## feat: the Graph opens on the whole network, centred on one node
+
+```
+git add maritime_isr/api/ maritime_isr/graph/store.py frontend/ \
+        tests/test_map_graph_loading.py STATE.md COMMITS.md
+git commit -m "feat: the Graph opens on the whole network, centred on one node"
+```
+
+`/api/graph/all` returns every current relationship as one web, most-connected
+core first, with the totals it was drawn from. The view opens on it, centred on
+the most-connected sanctioned vessel.
+
+**The layout was the whole problem.** Cytoscape's built-in `cose` compares every
+pair of nodes each iteration: measured at **115s** on 1,409 nodes — a hung tab.
+`fcose` (new dependency) does the same graph in ~6.5s via spectral seeding plus
+quadtree repulsion. `cose` is kept below 250 nodes.
+
+**New dependency — `npm install` is required**, a `git pull` alone will not
+install `cytoscape-fcose` and the build will fail without it.
+
+Verify:
+
+```
+cd frontend && npm install && npm run build
+python -m pytest tests/test_map_graph_loading.py -q   # 21 passed
+python -m pytest -q       # 594 passed, 4 skipped, 1 pre-existing failure
+python -m maritime_isr.api                            # open /graph
+```
+
+*Success:* a web of the whole graph, framed on one vessel, with a panel stating
+how much of the graph is on screen and on what basis the centre was chosen.
+*Failure:* a tab that locks for a minute means `fcose` did not load and it fell
+back to `cose` — check `npm install` ran.
