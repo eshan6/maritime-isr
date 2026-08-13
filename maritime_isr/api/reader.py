@@ -41,6 +41,7 @@ CONFORMED_TABLES = (
     "gfw_port_visits",
     "gfw_ais_gaps",
     "sanctioned_vessel_matches",
+    "sar_imaging_opportunity",
     "scenario_detections",
     "scenario_organizations",
     "scenario_ownership",

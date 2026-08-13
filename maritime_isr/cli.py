@@ -417,6 +417,17 @@ def cmd_live_validate(args):
     return run(limit=args.limit)
 
 
+def cmd_overpass(args):
+    """Which AIS gaps a Sentinel-1 pass could have imaged.
+
+    Its own verb rather than an `ingest` subcommand because it fetches nothing
+    — it reads two tables already landed and produces a third.
+    """
+    from .overpass import V_MAX_DEFAULT_KN, run
+    return run(v_max_kn=args.v_max if args.v_max is not None else V_MAX_DEFAULT_KN,
+               flagged_only=not args.all_gaps)
+
+
 def cmd_live_ingest(args):
     if args.source == "s1":
         from .ingest.copernicus import run
@@ -469,6 +480,18 @@ def main():
     p = sub.add_parser("validate", help="0.2 exit test: sigma0 dB-range sanity")
     p.add_argument("--limit", type=int, default=None)
     p.set_defaults(fn=cmd_live_validate)
+
+    p = sub.add_parser(
+        "overpass",
+        help="which AIS gaps a Sentinel-1 pass could have imaged (no pixels needed)")
+    p.add_argument("--v-max", type=float, default=None,
+                   help="assumed top vessel speed in knots (default 20, "
+                        "deliberately generous — a higher value makes a "
+                        "'confirmed' containment harder to claim, not easier)")
+    p.add_argument("--all-gaps", action="store_true",
+                   help="assess every landed AIS gap, not only those GFW "
+                        "flagged as intentional disabling")
+    p.set_defaults(fn=cmd_overpass)
 
     p = sub.add_parser("ingest", help="run a live source connector")
     ing = p.add_subparsers(dest="source", required=True)

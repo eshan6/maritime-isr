@@ -1336,3 +1336,95 @@ the detector.
 So the plumbing fix was **necessary and not sufficient**, and the remaining
 blocker on this family is the same funding decision as everywhere else. Zero
 false positives were added, which is the other number that had to hold.
+
+---
+
+## ADR-026 — Imaging opportunity is a claim about geometry, never about a ship *(Accepted)*
+**2026-08-13. First analytical assertion the system makes on its own behalf.**
+
+**Context.** Since ADR-017 every dark-vessel and AIS-gap determination in this
+system has been Global Fishing Watch's. We landed 636 Sentinel-1 catalogue
+records on 2026-07-29 and nothing has ever read them; they carry a footprint
+polygon and an acquisition time, and no pixels (ADR-013's 1 GB cap).
+
+Reading `ingest/gfw_events.py` closely turned up something this file had not
+recorded: **gap rows carry `gap_off_lat/lon` and `gap_on_lat/lon`** — the
+positions where AIS stopped and resumed — alongside both timestamps. A known
+start point, a known end point and an elapsed time is a solvable problem. A
+vessel that went dark at A and reappeared at B was, at the moment of any
+satellite pass in between, inside the intersection of a disc growing from A and
+a disc shrinking toward B. Compare that region against the scene footprint and
+the question *"was anyone watching?"* is answerable from data already on disk.
+
+**Decision — four parts.**
+
+**(a) The claim is about where a satellite was pointed, and nothing else.** A
+`confirmed` row asserts that an image exists whose footprint necessarily
+contained the vessel. It asserts nothing about what the image shows, because
+nobody has looked — the pixels are not downloaded. The sentence "no image has
+been examined and no vessel has been detected" is written into the module, the
+CLI output and the incident report, and is covered by tests in all three. This
+does not re-assess the gap: whether the silence was intentional remains GFW's
+determination per ADR-017.
+
+**(b) Three tiers, and the boundary is geometric.** `confirmed` = the reachable
+region is entirely inside the footprint; `partial` = the footprint covers part
+of it, reported as an **area fraction and never as a probability** (calling 40%
+of an area a 40% chance would assume the vessel is uniformly distributed within
+it, which nothing here establishes); `none` = evaluated, no pass. A fourth tier
+`unknown` covers rows that could not be assessed at all — a gap missing both
+positions, an unparseable footprint — because absence of a pass and inability
+to look are different facts (ADR-021).
+
+**(c) A gap nobody imaged still lands a row.** Tier `none`, empty scene id.
+Without it, a gap that was evaluated and found unwatched is indistinguishable
+from one the job never reached. Same reasoning as ADR-021, applied to output
+rather than to a check.
+
+**(d) It does not rank a vessel.** No entry is added to the findings `_RANK`
+table. A satellite having flown overhead says nothing about whether a hull is
+suspicious — it says the question is *resolvable*, which is a different axis.
+Folding actionability into a suspicion score would build exactly the blended
+number ADR-024 declined to build. The opportunity attaches as evidence on the
+gap and travels into the report; it never moves a row up the list.
+
+**The speed bound is an assumption and is labelled as one.** `v_max` defaults
+to **20 knots** and is written onto every row. Generous is the safe direction:
+a higher assumed speed enlarges the reachable region, which makes containment
+*harder* to claim, so the error runs toward under-claiming (ADR-004).
+
+**A gap that exceeds the speed bound is a spoofing tell, not a bad row.** Where
+the endpoints are further apart than `v_max` explains, the assumed speed is
+raised just above what the gap requires — geometry stays valid — and
+`implied_speed_exceeds_vmax` is set so the fact surfaces. Discarding it would
+be the anti-pattern CLAUDE.md §6 names outright.
+
+**Alternatives rejected.** *Score it as a dark-vessel detection* — rejected
+outright; it is the overclaim this whole file exists to prevent. *Use H3 cells
+to pre-filter scene against region* — rejected: with 636 scenes exact geometry
+costs nothing, and a resolution mismatch in the prefilter is precisely the bug
+class ADR-015 was written about. Output rows are still H3-stamped at every
+resolution so downstream joins work. *Skip gaps missing an endpoint* —
+rejected: a single-sided cone is a weaker bound but an honest one, and it is
+labelled `forward_cone` / `backward_cone` on the row.
+
+**Consequences.**
+
+- **The tier that fires depends on gap length, and that is physics.** A
+  Sentinel-1 IW footprint is ~250 km square (~62,500 km²); at 20 kn the
+  reachable region passes that size roughly six hours into a gap. So short gaps
+  can be contained outright, long gaps only near their ends, and a mid-gap pass
+  on a 24-hour silence lands `partial` at around 10% of area. Pinned by a
+  characterisation test so a future threshold change cannot quietly turn thin
+  coverage into confident claims.
+- **It produces a shopping list.** Every confirmed opportunity names a scene id
+  whose download would resolve a concrete question about a specific hull. That
+  is a far better argument for un-parking Phase 1 than "SAR would be nice," and
+  it is printed by the CLI.
+- **It is not fusion-core work.** Two named sources joined into their own table;
+  `fusion/` is untouched (CLAUDE.md §4.5), the same posture
+  `ingest/sanctions_match.py` states for itself. It lives at package root
+  because it belongs to neither ingest (it fetches nothing) nor the core.
+- **Unverified on the real corpus.** Every number in this ADR is geometry or
+  sandbox fixture. Nothing here has run against the 636 landed scenes or the 5
+  flagged gaps, which live on Eshan's laptop.

@@ -8,7 +8,10 @@ session. `CLAUDE.md`, `ARCHITECTURE.md`, `DECISIONS.md` are stable contracts;
 > between status buckets, record what was verified vs assumed, log anything now
 > broken, and set "Next up." If you don't update it, the next session starts blind.
 
-**Last updated:** 2026-08-10 — demo data-coverage session, two passes.
+**Last updated:** 2026-08-13 — satellite imaging opportunities over AIS gaps
+(ADR-026): the first analytical claim this system makes on its own behalf
+rather than reproducing Global Fishing Watch's. See "Was anyone watching?" at
+the end of this file. Prior entry: 2026-08-10 — demo data-coverage session, two passes.
 ADR-025 (second): the one-click incident report, and the identity_changed
 events that were never written. ADR-024 (first): findings
 table, UN+EU sanctions matching, map density + truncation honesty, SAR contact
@@ -67,6 +70,13 @@ Findings, Alerts, Vessels, Graph — plus a one-click incident report, served by
 one Python process. The M6 demo definition in CLAUDE.md §0 is now **built end
 to end**: a map, a ranked list, a plain-English reason, and an export.
 
+**One thing in it is now ours.** As of 2026-08-13 (ADR-026) the system computes
+**satellite imaging opportunities** over flagged AIS gaps — where a vessel could
+have been during its silence, against where Sentinel-1 was actually pointed.
+That is the first analytical claim here that is not a reproduction of someone
+else's finding. It still claims nothing about any vessel: it says an image
+exists, or does not, and nobody has looked at it.
+
 **And one sentence that has to travel with it:** of six detectors, **two fire**,
 producing **one alert** on the scenario corpus and **zero on real data** — every
 detector reads the track engine, and the real corpus has no AIS positions. The
@@ -103,7 +113,10 @@ matching; it is not detection performance. Say that before anyone asks.
 | GFW SAR (gridded + portal CSV) | ⬜ | Upstream offline since 2026-07-03. Both paths degrade cleanly. |
 | Ingest report | ✅ | Prints real counts, date ranges, AOI checks and disk usage. |
 
-**Test tally: 525 passing in-sandbox** (was 390 on 2026-07-31). Sandbox-green ≠
+**Test tally: 573 passing / 4 skipped / 1 failing in-sandbox, with the scenario
+corpus *and* the Phase 1–6 fixtures generated** (was 525 on 2026-08-10). The
+one failure is **pre-existing and newly visible** — see "A latent defect the
+fixtures exposed" below. Sandbox-green ≠
 host-verified — do **not** report this as "525 tests prove it works on real
 data." Every number the system has ever produced comes from synthetic fixtures
 or fixture-driven tests.
@@ -183,6 +196,7 @@ steps personally.
 > ```
 > python -m maritime_isr.cli ingest registries        # refresh UN + EU
 > python -m maritime_isr.cli ingest sanctions-match   # REQUIRED: schema + key changed
+> python -m maritime_isr.cli overpass                 # NEW (ADR-026): who was watching
 > python tools/data_health.py                         # the demo gate
 > python -m maritime_isr.api                          # then open /findings
 > ```
@@ -1824,3 +1838,179 @@ identity history, against 5 hulls here — so it is worth printing the count and
 checking it is not implausibly large. A number near the fleet size would mean
 the supersession rule has regressed to counting interval closure, which is the
 100%-closed trap and the one failure mode this change had to avoid.
+
+---
+
+## "Was anyone watching?" — imaging opportunities over AIS gaps (2026-08-13, ADR-026)
+
+### What was built
+
+`maritime_isr/overpass.py` + `maritime-isr overpass`. For each AIS gap GFW
+flagged as intentional disabling, it works out where the vessel could
+physically have been at the moment of each Sentinel-1 pass during the silence,
+and compares that area against the scene footprint. Lands
+`sar_imaging_opportunity`; surfaces on the findings gap rows and in the
+exported incident report.
+
+**It needs no pixels.** Both inputs are already on disk: 636 Sentinel-1
+catalogue records (footprint polygon + acquisition time, landed 2026-07-29) and
+the gap events. Nothing new is downloaded, so ADR-013's 1 GB cap is untouched.
+
+### The thing that made it possible, which this file had not recorded
+
+**Gap rows carry `gap_off_lat/lon` and `gap_on_lat/lon`** — the positions where
+AIS stopped and where it resumed — alongside both timestamps. That is a known
+start point, a known end point and an elapsed time, which is a solvable
+geometry problem. It was found by reading `ingest/gfw_events.py`, not from any
+document.
+
+### The measured finding, and it reframes the capability
+
+Built a realistic fixture (three gaps of 3 h / 9 h / 28 h; 14 scenes on a
+~11.7 h repeat with ~250 km footprints) and ran the real CLI against it:
+
+```
+by tier: confirmed: 0   partial: 3   none: 1   unknown: 0
+2 of 3 gap(s) had at least one imaging opportunity
+  S1A_..._20260712T103000  partial, 10% of area, t+4.5h into the gap
+  S1A_..._20260712T221200  partial,  8% of area, t+16.2h
+  S1A_..._20260711T110600  partial,  7% of area, t+5.1h
+```
+
+**Zero confirmed, and that is geometry rather than a bug.** At 20 kn the area a
+vessel could occupy passes the ~62,500 km² of one Sentinel-1 footprint about
+**four hours** into a gap. So:
+
+- a **short** gap can be bounded inside a single footprint outright;
+- a **long** gap can only be bounded by a pass near one of its **ends**;
+- a mid-gap pass on a 24-hour silence lands `partial` at roughly **10%**.
+
+`partial` is therefore the ordinary outcome, not the exception. The tool was
+rewritten mid-build to serve that regime: the scene shopping list draws from
+partial rows too, ordered by coverage, because printing only confirmed rows
+would report an empty list on most real corpora while useful scenes sat in the
+table. Pinned by a characterisation test so a later threshold change cannot
+quietly turn thin coverage into confident claims.
+
+**What this means for the pitch.** "We can tell you which satellite images
+would resolve this gap" survives. "We can tell you the vessel was definitely
+photographed" survives only for short gaps or well-timed passes. Say the first.
+
+### What it may never claim
+
+A `confirmed` row means *an image exists whose footprint necessarily contained
+the vessel* — nothing about what the image shows, because nobody has looked and
+the pixels are not downloaded. The sentence "no image has been examined and no
+vessel has been detected" is in the module, the CLI output and the report, with
+tests on all three. Partial coverage is reported as an **area fraction, never
+as a probability**. And this does not re-assess the gap: whether the silence
+was intentional stays GFW's determination (ADR-017).
+
+**It does not rank a vessel** (ADR-026d). A satellite having flown overhead
+says nothing about whether a hull is suspicious — it says the question is
+resolvable, which is a different axis. Folding actionability into a suspicion
+score would build the blended number ADR-024 declined to build.
+
+### Two things it does that are easy to get wrong
+
+- **A gap nobody imaged lands an explicit row** (tier `none`), so
+  evaluated-and-unwatched is distinguishable from never-run (ADR-021). "Nobody
+  was watching" is itself a finding about coverage.
+- **A gap whose endpoints are further apart than 20 kn explains is flagged, not
+  dropped.** The assumed speed is raised just above what the gap requires so
+  the geometry stays valid, and `implied_speed_exceeds_vmax` records it. Per
+  CLAUDE.md §6 an apparent teleport is a spoofing tell, not a bad row.
+
+### Status, stated precisely
+
+**Built + verified in sandbox.** 49 new tests (26 geometry, 23 seam/landing/
+report); full suite **567 passed, 10 skipped** with the scenario corpus
+generated. The CLI was exercised end to end against a fixture through the real
+landing path, and the report section was rendered and read.
+
+**It has never run against the real corpus.** The 636 scenes and the 5 flagged
+gaps live on Eshan's laptop. Every number above is fixture geometry.
+
+### Two sandbox limits worth knowing before it runs for real
+
+1. **The scenario corpus cannot exercise it.** Synthetic gaps land
+   `gfw_intentional_disabling = None` (OPEN QUESTION #9), so the flagged path
+   finds nothing here — `pytest -rs` says so directly: *"no GFW-flagged gaps in
+   this corpus."* `--all-gaps` reaches them, but the sandbox has no scene
+   catalog either. Both failure modes print the connector to run.
+2. **Wall-clock overlap holds, and had to.** The scene catalogue was pulled 90
+   days back and the gap events 8 weeks back, both ending on the same date, so
+   GFW's window sits inside the Sentinel-1 one. If either is re-pulled alone
+   that stops being true and the join goes quiet for a reason that has nothing
+   to do with ships.
+
+### What Eshan should run, and what to report back
+
+```
+python -m maritime_isr.cli overpass          # after the ADR-024/025 commands
+```
+
+*Success:* a tier breakdown, and for each opportunity a scene id with a
+coverage percentage. **Three numbers to report back, whatever they are:**
+
+1. **How many of the 5 flagged gaps got any pass at all.** Zero is a real
+   result — it means Sentinel-1 was not overhead during those silences.
+2. **The best coverage percentage across all of them**, and whether any gap
+   reached `confirmed`. Given the geometry above, expect `partial` and expect
+   the number to be low.
+3. **Whether any row has `implied_speed_exceeds_vmax` set.** On real GFW data
+   that would be a hull whose gap endpoints do not agree with 20 kn — worth
+   looking at directly, and the one output here that could be a spoofing tell.
+
+Then export an incident report for a vessel that got a pass, and read the
+**Satellite imaging opportunities** section end to end. It is the first section
+in that document describing something we computed rather than something we
+were told.
+
+### Flagged this session, no action taken
+
+- **Union across passes is not computed, deliberately.** If five passes each
+  cover 10% of the reachable area, the honest combined figure is *not* 50% —
+  the reachable region differs at each pass time, so combining them is a
+  statement about trajectories rather than points and needs a different
+  construction. Each pass is reported on its own. Raising it rather than
+  approximating it.
+- **`v_max = 20 kn` is assumed, not measured.** The landed AIS positions in the
+  scenario corpus could give a real speed distribution for the fleet; the real
+  corpus has no AIS positions at all, so there is nothing to measure it against
+  where it matters.
+
+### A latent defect the fixtures exposed (2026-08-13) — not fixed, needs a decision
+
+`tests/test_api_exercise.py::test_alerts_carry_evidence_chains` **fails**, and
+it is nothing to do with ADR-026 — it fails identically on a clean tree with
+this session's changes stashed. Verified that way rather than assumed.
+
+```
+assert al["subject"].startswith("vessel:")
+AssertionError: 'detection:det_SYN3_022_00154'.startswith('vessel:')
+```
+
+**Why nobody saw it before.** It needs the graph populated by *both*
+`tools/run_scenario_pipeline.py` **and** the Phase 1–6 runners
+(`make_synthetic_feed_phase2.py` → `make_synthetic_scenes_phase3.py` →
+`make_synthetic_orgworld_phase4.py` → `run_phase{2..5}_synthetic.py` →
+`run_phase6_product.py`). That combination had apparently never been built in
+one tree, because the phase runners need three generator steps that nothing
+documents as prerequisites — each one fails with a bare `FileNotFoundError`
+naming a file, and you discover the chain by walking it.
+
+**What it means.** Phase 3's `dark_vessel` alerts are subjected to a
+**detection id**, while the API contract and every consumer assume an alert
+subject is a vessel. So a dark-vessel alert cannot be joined to the hull it
+concerns. That is the same failure family as ADR-022 (one canonical vessel key,
+published by the side that owns it) reappearing on the alert side.
+
+**Not fixed, deliberately.** The fix is a choice — resolve the detection to its
+associated vessel before emitting, or declare that alert subjects are
+polymorphic and teach every consumer — and that is a design decision touching
+ADR-022, not a patch to slip into an unrelated commit. **Ask Eshan.**
+
+**Also worth recording:** the test tally in this file has never been reproduced
+from a bare checkout, because the fixture chain above is undocumented. Anyone
+quoting it should say which fixtures were present.

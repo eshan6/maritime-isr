@@ -55,6 +55,8 @@ maritime_isr/
   inspect/   throwaway inspection dashboards (ugly on purpose, pre-Phase 6)
   infra/     cron entries, VM setup scripts, R2 config
   schemas/   canonical schemas (versioned) + the shared H3 helper
+  ports.py   the one port gazetteer (ADR-023)
+  overpass.py  satellite imaging opportunities over AIS gaps (ADR-026)
 frontend/    React + MapLibre product surface (Phase 6) — Map · Alerts · Vessels · Graph
 ```
 
@@ -126,6 +128,9 @@ maritime-isr ingest ais
 maritime-isr ingest noaa
 maritime-isr ingest gfw
 maritime-isr ingest registries
+
+# which AIS gaps a satellite could have imaged (reads landed data, downloads nothing)
+maritime-isr overpass
 
 # Inspection dashboard v0 (open the generated HTML in a browser)
 maritime-isr inspect v0
@@ -285,6 +290,29 @@ maritime-isr ingest s1 --days 56 --catalog-only   # Sentinel-1 scene metadata, n
 
 Each is idempotent — running it twice downloads the same window again and lands
 no duplicates, so an interrupted run is safe to repeat.
+
+**3b. Who was watching? (no download, ADR-026).**
+
+```bash
+maritime-isr overpass                        # imaging opportunities over flagged AIS gaps
+maritime-isr overpass --all-gaps             # every landed gap, not only GFW-flagged ones
+```
+
+This one fetches nothing. It reads the two tables above and asks, for each gap
+GFW flagged as intentional AIS disabling: *given where the vessel went dark,
+where it reappeared, and how long it was silent, could a Sentinel-1 pass have
+photographed it?* Bounding vessel speed gives the area it must have been inside
+at the moment of each pass; that area is compared against the scene footprint.
+
+It is the first determination in this system that is **ours** rather than a
+third party's — and it is strictly a statement about **where a satellite was
+pointed**. We hold scene metadata, not imagery, so nothing has been examined and
+no vessel has been detected. Expect mostly `partial` coverage: at 20 kn the area
+a vessel could occupy exceeds one Sentinel-1 footprint about four hours into a
+gap, so a full containment needs a short gap or a pass near one of its ends.
+
+Its most useful output is a **shopping list** — named scene ids whose download
+would resolve a concrete question about a specific hull.
 
 **4. SAR detections (currently degraded — read this).**
 

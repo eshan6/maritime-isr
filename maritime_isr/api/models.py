@@ -315,12 +315,48 @@ class FindingBasis(BaseModel):
     explanation: str
 
 
+class ImagingOpportunity(BaseModel):
+    """A Sentinel-1 pass acquired while a vessel's AIS was off (ADR-026).
+
+    **The one determination in this payload that is ours** rather than a third
+    party's — and it is strictly about where a satellite was pointed. `tier`
+    `confirmed` means an image exists whose footprint necessarily contained the
+    vessel; it does **not** mean anything was found in it, because the pixels
+    are not downloaded and nobody has looked. `coverage_fraction` is a fraction
+    of **area**, never a probability that the vessel was seen.
+
+    `statement` carries the sentence written once in `overpass.py` so the API,
+    the UI and the exported report cannot drift into three different phrasings
+    of the same claim.
+    """
+    tier: str
+    scene_id: Optional[str] = None
+    scene_acquired_at: Optional[str] = None
+    hours_into_gap: Optional[float] = None
+    coverage_fraction: Optional[float] = None
+    reachable_area_km2: Optional[float] = None
+    covered_area_km2: Optional[float] = None
+    geometry_basis: Optional[str] = None
+    scene_has_pixels: Optional[bool] = None
+    orbit_direction: Optional[str] = None
+    v_max_knots: Optional[float] = None
+    implied_speed_exceeds_vmax: Optional[bool] = None
+    statement: Optional[str] = None
+    is_synthetic: bool = False
+    prov: Optional[Provenance] = None
+
+
 class FindingGap(BaseModel):
     """An AIS gap GFW assessed as intentional disabling.
 
     `attribution` is required reading: this is **GFW's** assessment carried
     through, not our detection. We did not compute it and have no coverage
     model at these positions (CLAUDE.md §6).
+
+    `imaging` is the separate, ours-not-theirs layer: which satellites could
+    have photographed the vessel during this silence. It is evidence attached
+    to the gap and deliberately does not contribute to the finding's rank —
+    see ADR-026(d).
     """
     start_time: Optional[str] = None
     end_time: Optional[str] = None
@@ -332,6 +368,8 @@ class FindingGap(BaseModel):
     distance_km: Optional[float] = None
     distance_from_shore_km: Optional[float] = None
     attribution: str
+    imaging: list[ImagingOpportunity] = []
+    imaging_best_tier: Optional[str] = None
     is_synthetic: bool = False
     prov: Provenance
 
