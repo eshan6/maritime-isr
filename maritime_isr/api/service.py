@@ -903,6 +903,16 @@ def _corpus_window_only() -> dict:
         return _corpus_window(reader)
 
 
+def get_corpus_window() -> dict:
+    """The corpus time span, on its own — the map scrubber's only dependency.
+
+    Public counterpart to `_corpus_window_only`, which the report already used
+    for the same reason. Two min/max aggregates per event table instead of the
+    full `get_stats()` sweep.
+    """
+    return _corpus_window_only()
+
+
 # --------------------------------------------------------------------------
 # SAR detections (radar contacts)
 # --------------------------------------------------------------------------

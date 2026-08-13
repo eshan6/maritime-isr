@@ -319,3 +319,43 @@ once both the scenario pipeline and the Phase 1–6 fixture chain have populated
 the graph, which needs three undocumented generator steps. Recorded in STATE.md
 and left for a decision — the fix touches ADR-022's canonical-key rule and does
 not belong in an unrelated commit.
+
+---
+
+## fix: the timeline player vanished, and the graph opened empty
+
+Two loading defects reported from the laptop demo. Both about *when* data
+arrives rather than whether it exists.
+
+```
+git add maritime_isr/api/ maritime_isr/graph/store.py frontend/src frontend/dist \
+        tests/test_map_graph_loading.py STATE.md COMMITS.md
+git commit -m "fix: the timeline player vanished, and the graph opened empty"
+```
+
+**The scrubber** took its window from `/stats`, requested eighth of eight on
+mount. Browsers open ~6 connections per origin, so it queued behind `/tracks` —
+measured 3.06s, 40x the next slowest call — and the control rendered only once
+its window existed, so it was *absent* for those seconds and absent again after
+every navigation (React Router unmounts the view). Fixed by requesting the
+window first, session-caching it, keeping the scrubber mounted-but-disabled
+while waiting, and adding a cheap `/api/corpus-window`. The ordering was the
+fix; the cheaper endpoint was the smallest part, contrary to first diagnosis.
+
+**The graph** required picking from a dropdown of thousands where most picks
+give a lone node (GFW ownership covers ~1.3% of hulls here). New
+`/api/graph/seeds` ranks by edge degree and the view auto-seeds on the best.
+The panel states what that claim is: best-connected, not most suspicious.
+
+Verify — the browser half is the half that matters:
+
+```
+python -m pytest tests/test_map_graph_loading.py -q     # 10 passed
+python -m pytest -q          # 583 passed, 4 skipped, 1 pre-existing failure
+python -m maritime_isr.api   # open /, then switch to Findings and back
+```
+
+*Success:* the player is on screen with a live clock immediately, and stays
+there when you leave the Map and return. Graph opens with a network drawn and a
+line naming the vessel it chose. *Failure:* a blank white page means a stale
+`dist/` — rebuild with `npm run build` in `frontend/`.

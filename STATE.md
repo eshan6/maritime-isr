@@ -2014,3 +2014,79 @@ ADR-022, not a patch to slip into an unrelated commit. **Ask Eshan.**
 **Also worth recording:** the test tally in this file has never been reproduced
 from a bare checkout, because the fixture chain above is undocumented. Anyone
 quoting it should say which fixtures were present.
+
+---
+
+## The demo's two loading defects (2026-08-13, second pass)
+
+Both reported from the laptop: *"data isn't loading in Graph, and the timeline
+player isn't visible — it came on once, then disappeared when I switched menus
+and came back."* Both were about **when** data arrives, not whether it exists.
+
+### 1. The time scrubber was requested last, behind a 3-second call
+
+`MapView` fires eight requests on mount. The scrubber's window came from
+`/stats`, requested **eighth**. A browser opens ~6 connections per origin, so it
+queued behind `/tracks` — **measured at 3.06 s** against the scenario corpus,
+40× the next slowest call:
+
+```
+tracks 3.060s   events 0.262s   density 0.084s   detections 0.040s
+scenes 0.038s   ports  0.039s   stats  0.194s    corpus-window 0.073s
+```
+
+And the scrubber rendered only once its window existed (`{window_ && …}`), so
+for those seconds the demo's primary control was **absent**, not loading. React
+Router unmounts the view on navigation, so returning to the map paid the whole
+wait again — exactly the "it disappeared" report.
+
+**Four changes, in order of how much each mattered:**
+
+1. **Request the window first.** It no longer queues behind anything.
+2. **Session-cache it** (`api.corpusWindow`) — a corpus window cannot change
+   while the server is up, so a return visit does not reach the network at all.
+3. **Keep the scrubber mounted always**, disabled and faded while waiting. A
+   control that comes and goes reads as a broken page; a disabled one reads as
+   a loading page.
+4. **A cheap `/api/corpus-window`** — two aggregates per event table instead of
+   `/stats`, which also groups the sanctions matches, counts scenes, measures
+   length coverage and walks the graph. Worth 0.194 s → 0.073 s here, and more
+   on the real corpus. This was the *smallest* of the four, contrary to my
+   first diagnosis; the ordering was the fix.
+
+*Measured after, in a real browser:* scrubber present and live **at 400 ms** on
+first load and **at 350 ms** on return, against absent-for-3-seconds before.
+
+### 2. The Graph view opened empty and stayed that way
+
+It required choosing from a dropdown of thousands, and most choices produce a
+single circle because **GFW registry ownership covers ~1.3% of hulls in this
+AOI** — so exploring by hand mostly confirms an impression that the graph is
+broken.
+
+New `/api/graph/seeds` ranks vessel nodes by edge degree
+(`GraphStore.top_connected_nodes`), and the view auto-seeds on the best one when
+no `?seed=` is given.
+
+**The honesty constraint on this:** it is a presentation choice and changes no
+stored fact. A vessel missing from the seed list is less **connected**, not less
+suspicious, so the panel says which claim it is making — *"Opened on MV SYN 001
+— the most connected vessel in the graph (25 edges), chosen automatically. It is
+the best-connected hull, not the most suspicious one."* The empty state now also
+distinguishes "no ownership edges in the graph at all" from "you have not picked
+a vessel", which look identical on screen and mean different things.
+
+### Status
+
+**Built + verified in sandbox and in a real browser** (Chromium, both views,
+including the navigate-away-and-back case). 10 new tests; suite **583 passed / 4
+skipped / 1 pre-existing failure**. The frontend bundle was rebuilt — `dist/` is
+committed, and a stale one serves a blank page.
+
+### Flagged, not chased
+
+`/api/graph/seeds` reports `is_synthetic: false` for hulls named `MV SYN 001`.
+Those come from the **Phase 1–6 fixture world**, which predates ADR-019 and is a
+separate synthetic corpus from the scenario one — so this is probably correct
+rather than a flag drift, but it has not been checked and ADR-019 puts the whole
+real/synthetic split on that column.

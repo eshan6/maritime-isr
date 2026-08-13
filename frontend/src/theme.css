@@ -308,6 +308,11 @@ h1, h2, h3, h4 { margin: 0; font-weight: 600; letter-spacing: -0.01em; }
 .scrubber .play:hover { background: var(--surface); }
 .scrubber .clock { font-variant-numeric: tabular-nums; font-size: 12.5px;
   color: var(--ink-2); min-width: 148px; }
+/* Waiting on the corpus window. The control keeps its position and size so the
+   layout does not jump when the data lands — it fades, it does not vanish. */
+.scrubber-waiting { opacity: 0.62; }
+.scrubber-waiting .play, .scrubber-waiting input[type="range"] {
+  cursor: default; }
 
 .maplibregl-popup-content { font: inherit; border-radius: var(--radius);
   box-shadow: var(--shadow-lg); padding: 10px 12px; }

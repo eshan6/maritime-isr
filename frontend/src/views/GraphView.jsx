@@ -44,6 +44,10 @@ export function GraphView() {
   const [nodeCount, setNodeCount] = useState(0);
   const [vessels, setVessels] = useState([]);
   const [status, setStatus] = useState("");
+  // The vessel the view chose for itself, so the panel can say so rather than
+  // letting an operator believe they are looking at a considered selection.
+  const [autoSeed, setAutoSeed] = useState(null);
+  const [autoSeedFailed, setAutoSeedFailed] = useState(false);
 
   useEffect(() => {
     api.vessels({ limit: 1000 }).then((r) => setVessels(r.items));
@@ -173,14 +177,43 @@ export function GraphView() {
     };
   }, [syncLabelScale]);
 
+  // ---- seed the view ----
+  // Arriving at /graph with no ?seed= used to leave an empty canvas and a
+  // dropdown of ~9,000 vessels. That reads as "the graph is broken", and
+  // picking at random mostly confirms it: GFW registry ownership covers about
+  // 1.3% of hulls in this AOI, so most choices produce one circle and nothing
+  // else. Opening on the most-connected vessel shows the part of the graph
+  // that has structure. It changes no stored fact — a vessel missing from the
+  // seed list is less CONNECTED, not less suspicious, and the panel says so.
   useEffect(() => {
+    let live = true;
     const seed = params.get("seed");
-    if (seed && cyRef.current) {
+    if (seed) {
+      if (!cyRef.current) return;
       cyRef.current.elements().remove();
       expandedRef.current = new Set();
       setNodeCount(0);
+      setAutoSeed(null);          // an explicit pick is not an auto-seed
+      setAutoSeedFailed(false);
       expand(seed, 2, true);
+      return;
     }
+    setStatus("finding a vessel with a network…");
+    api.graphSeeds(12).then((r) => {
+      if (!live || !cyRef.current) return;
+      const best = (r.items || [])[0];
+      if (!best) {
+        setStatus("");
+        setAutoSeedFailed(true);
+        return;
+      }
+      setSeedInput(best.id);
+      setAutoSeed(best);
+      expand(best.id, 2, true);
+    }).catch(() => {
+      if (live) { setStatus(""); setAutoSeedFailed(true); }
+    });
+    return () => { live = false; };
   }, [params]);
 
   async function expand(nodeId, hops, isSeed = false) {
@@ -270,6 +303,17 @@ export function GraphView() {
           Opens two hops: operator, parent company, and vessels sharing the owner.
           Click a vessel or company to expand; hover to isolate.
         </p>
+        {/* Say that the view chose this hull, and on what basis. An operator
+            who assumes a considered selection would read "most edges" as
+            "most interesting", and those are not the same claim. */}
+        {autoSeed && (
+          <p className="muted" style={{ fontSize: 11.5, marginTop: 6, marginBottom: 0 }}>
+            Opened on <b>{autoSeed.label}</b> — the most connected vessel in the
+            graph ({autoSeed.degree} edge{autoSeed.degree === 1 ? "" : "s"}),
+            chosen automatically so the view opens on something. It is the
+            best-connected hull, not the most suspicious one.
+          </p>
+        )}
         {status && <p className="muted" style={{ fontSize: 11.5, marginTop: 6 }}>{status}</p>}
         {/* Legend grouped by family, so the colour system explains itself. */}
         <div style={{ marginTop: 10, borderTop: "1px solid var(--border)", paddingTop: 8 }}>
@@ -303,9 +347,18 @@ export function GraphView() {
 
       {info && <DetailCard info={info} onClose={() => setInfo(null)} />}
 
-      {nodeCount === 0 && (
+      {/* An empty canvas needs to say WHICH kind of empty it is. "No edges in
+          the graph at all" and "you have not picked a vessel yet" look
+          identical on screen and mean completely different things — the first
+          is a fact about the corpus (GFW ownership is ~1.3% populated here),
+          the second is a prompt. */}
+      {nodeCount === 0 && !status && (
         <div className="empty" style={{ position: "absolute", top: "45%", left: 0, right: 0 }}>
-          Pick a vessel and seed the graph to begin.
+          {autoSeedFailed
+            ? "No ownership edges in the graph yet. Run "
+              + "tools/run_scenario_pipeline.py to populate it, or pick a "
+              + "vessel to check one hull directly."
+            : "Pick a vessel and seed the graph to begin."}
         </div>
       )}
     </div>
