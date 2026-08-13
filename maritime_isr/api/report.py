@@ -117,12 +117,85 @@ def build_report(*, vessel: dict, finding: Optional[dict],
             "gaps": len(gaps),
             "alerts": len(alerts),
         },
-        "not_established": _not_established(vessel, finding, flagged_gaps),
+        # The finding's `dark_gaps` are the enriched copies — they carry the
+        # imaging opportunities; `flagged_gaps` above are the raw vessel rows
+        # and do not. Passing both keeps the gap count reading off the vessel
+        # while the imaging caveat reads off the enriched side.
+        "not_established": _not_established(
+            vessel, finding, flagged_gaps,
+            enriched_gaps=(finding or {}).get("dark_gaps") or []),
     }
 
 
+def _imaging_section(gaps: list) -> str:
+    """Satellite passes over the gaps above — the one determination here that
+    is ours rather than a third party's.
+
+    Deliberately worded to make the boundary unmissable: the claim is that an
+    image exists, never that anything was seen in it. A reader who takes
+    "confirmed" to mean "confirmed dark vessel" has been misled by this
+    section, so the words "no image has been examined" appear in it verbatim.
+    """
+    opps = [(g, o) for g in gaps for o in (g.get("imaging") or [])
+            if o.get("tier") in ("confirmed", "partial")]
+    evaluated = any(g.get("imaging") for g in gaps)
+    if not evaluated:
+        return ""
+    if not opps:
+        return ('<h2>Satellite imaging opportunities</h2>'
+                '<p>No Sentinel-1 pass was acquired over the area this vessel '
+                'could have occupied during the gaps above. Nobody was '
+                'watching, so no image of this silence exists to examine.</p>')
+
+    rows = []
+    for g, o in opps:
+        badge = ('<span class="badge b-risk">imaged</span>'
+                 if o.get("tier") == "confirmed"
+                 else '<span class="badge">partial</span>')
+        frac = o.get("coverage_fraction")
+        rows.append(
+            f"<tr><td class='mono'>{_fmt_ts(o.get('scene_acquired_at'))}</td>"
+            f"<td class='mono'>{_esc(o.get('scene_id'))}</td>"
+            f"<td>{badge}</td>"
+            f"<td class='num mono'>{_num((frac or 0) * 100, 0, '%')}</td>"
+            # Two different areas, and confusing them would overstate the
+            # search: `reachable` is where the vessel COULD have been,
+            # `covered` is how much of that the satellite actually imaged.
+            f"<td class='num mono'>{_num(o.get('reachable_area_km2'), 0, ' km²')}</td>"
+            f"<td class='num mono'>{_num(o.get('covered_area_km2'), 0, ' km²')}</td>"
+            f"<td class='mono'>{'held' if o.get('scene_has_pixels') else 'not downloaded'}</td>"
+            "</tr>")
+
+    confirmed = [o for _, o in opps if o.get("tier") == "confirmed"]
+    lede = (f"<p><b>{len(confirmed)} pass(es) imaged an area that necessarily "
+            "contained this vessel while its AIS was off.</b> "
+            if confirmed else
+            "<p>Passes below covered part of the area this vessel could have "
+            "occupied. ")
+    return (
+        '<h2>Satellite imaging opportunities</h2>'
+        + lede +
+        "<b>No image has been examined and no vessel has been detected.</b> "
+        "This is a statement about where a satellite was pointed, computed by "
+        "us from the Sentinel-1 catalogue and the gap endpoints — it is the "
+        "one determination in this report that is not a third party's.</p>"
+        "<table><thead><tr><th>Pass time</th><th>Scene</th><th>Coverage</th>"
+        "<th class='num'>% imaged</th><th class='num'>Could have been in</th>"
+        "<th class='num'>Actually imaged</th>"
+        "<th>Imagery</th></tr></thead><tbody>"
+        + "".join(rows) +
+        "</tbody></table>"
+        '<p class="muted"><b>How this was computed.</b> A vessel that went '
+        'dark at a known place and reappeared at another cannot have been '
+        'everywhere in between. Bounding its speed gives the area it must have '
+        'been inside at the moment of each pass; that area is compared against '
+        'the scene footprint. The speed bound is an assumption, stated on '
+        'every row, not a measurement.</p>')
+
+
 def _not_established(vessel: dict, finding: Optional[dict],
-                     flagged_gaps: list) -> list[str]:
+                     flagged_gaps: list,
+                     enriched_gaps: Optional[list] = None) -> list[str]:
     """The section a reader will not think to ask for.
 
     An omission reads as "no concern here" unless it is named as "we cannot see
@@ -148,6 +221,25 @@ def _not_established(vessel: dict, finding: Optional[dict],
             "That is not evidence the vessel never went dark — outside "
             "demonstrated receiver coverage a silence cannot be attributed at "
             "all, and most of this area has no coverage model.")
+    passes = [o for g in (enriched_gaps or []) for o in (g.get("imaging") or [])
+              if o.get("tier") in ("confirmed", "partial")]
+    confirmed_passes = [o for o in passes if o.get("tier") == "confirmed"]
+    if confirmed_passes:
+        out.append(
+            f"A Sentinel-1 pass imaged an area that necessarily contained this "
+            f"vessel during {len(confirmed_passes)} of the gaps above, but the "
+            "imagery has not been downloaded or examined. Whether the vessel "
+            "is visible in it, and what it was doing, are both unknown.")
+    elif passes:
+        # The ordinary case, and the one most open to being over-read: a pass
+        # that clipped the edge of a large reachable area is weak evidence of
+        # an imaging opportunity and no evidence at all about the vessel.
+        best = max((o.get("coverage_fraction") or 0) for o in passes)
+        out.append(
+            f"Sentinel-1 passed over part of the area this vessel could have "
+            f"occupied while dark — at best {best * 100:.0f}% of it — so it is "
+            "not established that any image contains the vessel at all. None "
+            "of that imagery has been downloaded or examined.")
     if finding and not (finding.get("sanctions_is_finding")):
         out.append("No sanctions designation was matched to this hull.")
     if not (vessel.get("port_calls") or vessel.get("encounters")):
@@ -296,6 +388,7 @@ def render_html(rep: dict) -> str:
                      'their determination, reproduced here. We did not compute '
                      'it and hold no receiver-coverage model at these '
                      'positions.</p>')
+        parts.append(_imaging_section(gaps))
 
     # ---- sanctions ----
     sanctions = v.get("sanctions") or []

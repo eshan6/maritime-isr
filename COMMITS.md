@@ -263,3 +263,59 @@ rather than against memory:
 grep -n "SyntheticBadge" -A 4 frontend/src/components/bits.jsx   # returns null
 grep -rn "<SyntheticBadge" frontend/src/                          # one call site
 ```
+
+---
+
+## feat: was anyone watching? — imaging opportunities over AIS gaps (ADR-026)
+
+The first analytical claim this system makes on its own behalf. For every AIS
+gap GFW flagged as intentional disabling, work out where the vessel could
+physically have been at the moment of each Sentinel-1 pass during the silence,
+and compare that area against the scene footprint.
+
+```
+git add maritime_isr/overpass.py maritime_isr/cli.py maritime_isr/api/ \
+        tests/test_overpass.py tests/test_overpass_e2e.py \
+        DECISIONS.md STATE.md README.md COMMITS.md
+git commit -m "feat: satellite imaging opportunities over AIS gaps (ADR-026)"
+```
+
+**Needs no pixels and downloads nothing.** Both inputs were already on disk: the
+636 Sentinel-1 catalogue records landed 2026-07-29 (footprint polygon +
+acquisition time) and the gap events. ADR-013's 1 GB cap is untouched.
+
+**What made it possible** was in `ingest/gfw_events.py` and not in any document:
+gap rows carry `gap_off_lat/lon` and `gap_on_lat/lon` alongside both timestamps.
+A known start, a known end and an elapsed time is a solvable problem.
+
+**The finding that reframed the build.** Run against a realistic fixture — three
+gaps of 3 h / 9 h / 28 h, fourteen scenes on a ~11.7 h repeat with ~250 km
+footprints — it returned **0 confirmed, 3 partial, 1 unwatched**. At 20 kn the
+area a vessel could occupy passes one Sentinel-1 footprint about **four hours**
+into a gap, so `partial` is the ordinary outcome and `confirmed` needs a short
+gap or a pass near one of its ends. The scene shopping list was rewritten
+mid-build to draw from partial rows too; printing only confirmed ones would
+report an empty list on most real corpora while useful scenes sat in the table.
+
+Verify:
+
+```
+python -m pytest tests/test_overpass.py tests/test_overpass_e2e.py -q   # 49 passed
+python -m pytest -q                                                     # 573 passed, 4 skipped, 1 pre-existing failure
+maritime-isr overpass                                                   # on the laptop
+```
+
+*Success on the laptop:* a tier breakdown and, per opportunity, a scene id with
+a coverage percentage. **Zero confirmed is a normal result** — read the geometry
+note the command prints before treating it as a fault. A run that prints "no
+Sentinel-1 scenes in the catalog" means the scene catalogue is not landed where
+the command is looking, not that no satellite passed.
+
+**One pre-existing failure surfaced while verifying this**, and it is not from
+this change — `test_alerts_carry_evidence_chains` fails identically on a clean
+tree with these changes stashed. Phase 3 `dark_vessel` alerts carry a
+`detection:` subject where every consumer expects `vessel:`. It only appears
+once both the scenario pipeline and the Phase 1–6 fixture chain have populated
+the graph, which needs three undocumented generator steps. Recorded in STATE.md
+and left for a decision — the fix touches ADR-022's canonical-key rule and does
+not belong in an unrelated commit.

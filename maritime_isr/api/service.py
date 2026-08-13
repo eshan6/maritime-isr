@@ -603,6 +603,48 @@ def _flagged_gaps(reader: Reader) -> list[dict]:
         "ORDER BY start_time DESC NULLS LAST")
 
 
+def _imaging_by_gap(reader: Reader) -> dict[str, list[dict]]:
+    """{gap_event_id: [imaging opportunity rows]}, best tier first.
+
+    Rows where a Sentinel-1 pass was acquired while the vessel was dark. See
+    `maritime_isr/overpass.py` — a `confirmed` row means an image exists whose
+    footprint necessarily contained the vessel; it does **not** mean anything
+    was detected in it, and nothing here may present it as if it did.
+    """
+    if not reader.has("sar_imaging_opportunity"):
+        return {}
+    out: dict[str, list[dict]] = {}
+    order = {"confirmed": 0, "partial": 1, "none": 2, "unknown": 3}
+    for r in reader.rows("SELECT * FROM sar_imaging_opportunity"):
+        gid = r.get("gap_event_id")
+        if gid:
+            out.setdefault(str(gid), []).append(r)
+    for rows in out.values():
+        rows.sort(key=lambda r: (order.get(r.get("tier"), 9),
+                                 -(r.get("coverage_fraction") or 0.0)))
+    return out
+
+
+def _imaging_model(r: dict) -> dict:
+    return {
+        "tier": r.get("tier"),
+        "scene_id": r.get("scene_id") or None,
+        "scene_acquired_at": as_iso(r.get("scene_acquired_at")),
+        "hours_into_gap": r.get("hours_into_gap"),
+        "coverage_fraction": r.get("coverage_fraction"),
+        "reachable_area_km2": r.get("reachable_area_km2"),
+        "covered_area_km2": r.get("covered_area_km2"),
+        "geometry_basis": r.get("geometry_basis"),
+        "scene_has_pixels": r.get("scene_has_pixels"),
+        "orbit_direction": r.get("orbit_direction"),
+        "v_max_knots": r.get("v_max_knots"),
+        "implied_speed_exceeds_vmax": r.get("implied_speed_exceeds_vmax"),
+        "statement": r.get("statement"),
+        "is_synthetic": _is_syn(r),
+        "prov": _prov(r),
+    }
+
+
 def _name_key(v) -> Optional[str]:
     if not v:
         return None
@@ -615,6 +657,7 @@ def list_findings(*, synthetic: Optional[bool] = None,
     with open_reader() as reader:
         identity = _identity_by_vessel(reader)
         gaps = _flagged_gaps(reader)
+        imaging = _imaging_by_gap(reader)
         counts = _event_counts_by_vessel(reader)
         ports = _ports_by_vessel(reader)
         matches: list[dict] = []
@@ -657,7 +700,15 @@ def list_findings(*, synthetic: Optional[bool] = None,
         if not vid:
             continue
         e = entry_for(vid, g)
+        # Imaging opportunities are attached as EVIDENCE on the gap and are
+        # deliberately absent from `_RANK`. A satellite having flown overhead
+        # says nothing about whether a vessel is suspicious — it says the
+        # question is resolvable. Folding actionability into a suspicion score
+        # would be the blended number ADR-024 refuses to build.
+        opps = [_imaging_model(o) for o in imaging.get(str(g.get("event_id")), [])]
         e["dark_gaps"].append({
+            "imaging": opps,
+            "imaging_best_tier": opps[0]["tier"] if opps else None,
             "start_time": as_iso(g.get("start_time")),
             "end_time": as_iso(g.get("end_time")),
             "duration_hours": g.get("gap_duration_hours") or g.get("duration_hours"),
