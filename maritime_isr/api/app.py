@@ -255,6 +255,32 @@ def create_app() -> FastAPI:
     def stats() -> dict:
         return models.Stats(**service.get_stats()).model_dump()
 
+    @api.get("/corpus-window", dependencies=guard)
+    def corpus_window() -> dict:
+        """Just the corpus time span — two aggregates, not the whole dashboard.
+
+        The map's time scrubber needs only this, and it used to take it from
+        `/stats`, which scans every event table, groups the sanctions matches,
+        counts scenes, measures length coverage and walks the graph. The
+        scrubber is hidden until its window arrives, so on the real corpus the
+        control the demo is built around was the last thing on screen — and it
+        vanished again on every navigation away and back, because the view
+        remounts and refetches. Splitting the cheap half out is the fix; the
+        dashboard keeps using `/stats`.
+        """
+        return service.get_corpus_window()
+
+    @api.get("/graph/seeds", dependencies=guard)
+    def graph_seeds(limit: int = Query(12, ge=1, le=100)) -> dict:
+        """Vessels worth opening the graph on, most-connected first.
+
+        `degree` travels with each one because on this corpus "best available"
+        and "well connected" are not the same thing — GFW ownership covers
+        ~1.3% of hulls, so the top of this list can still be a small cluster.
+        """
+        items = gsvc.best_seeds(limit)
+        return {"items": items, "count": len(items)}
+
     app.include_router(api, prefix="/api")
     _mount_frontend(app)
     return app

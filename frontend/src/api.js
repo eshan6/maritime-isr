@@ -70,10 +70,34 @@ async function downloadReport(vesselId) {
   return name;
 }
 
+// ---- session cache -------------------------------------------------------
+// React Router unmounts a view when you navigate away, so returning to it
+// refetches everything from scratch. For values that CANNOT change while the
+// server is up — the corpus time window, the graph seed list — that meant the
+// operator paid the full wait again on every visit, and the map's scrubber
+// disappeared and slowly came back each time.
+//
+// Cached by promise, not by result, so two callers racing on a cold cache
+// share one request instead of firing two. Deliberately not a general HTTP
+// cache: only endpoints whose answer is fixed for the life of the process
+// belong here, and anything an operator can change (alerts, dispositions) must
+// keep going to the server.
+const _memo = new Map();
+function memo(key, fn) {
+  if (!_memo.has(key)) {
+    _memo.set(key, fn().catch((e) => { _memo.delete(key); throw e; }));
+  }
+  return _memo.get(key);
+}
+
 export const api = {
   health: () => get("/health"),
   downloadReport,
   stats: () => get("/stats"),
+  // Cheap: two aggregates per event table, not the whole dashboard sweep.
+  corpusWindow: () => memo("corpus-window", () => get("/corpus-window")),
+  graphSeeds: (limit) => memo(`graph-seeds:${limit || 12}`,
+                              () => get("/graph/seeds", { limit })),
   vessels: (params) => get("/vessels", params),
   vessel: (id) => get(`/vessels/${encodeURIComponent(id)}`),
   track: (id, params) => get(`/vessels/${encodeURIComponent(id)}/track`, params),

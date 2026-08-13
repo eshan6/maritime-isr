@@ -302,6 +302,28 @@ class GraphStore:
                      is_synthetic=bool(r[3]))
                 if r else None)
 
+    def top_connected_nodes(self, node_type: str | None = None,
+                            limit: int = 12) -> list[dict]:
+        """Nodes with the most edges, descending. Degree counts both directions.
+
+        Exists so a view can open on a part of the graph that has structure
+        rather than on whatever node happens to sort first. Returns `degree`
+        alongside each node so a caller can tell "best available" from "well
+        connected" — on a sparse graph those are very different, and a caller
+        that cannot see the difference will present the first as the second.
+        """
+        rows = self._con.execute(
+            "SELECT n.node_id, n.node_type, n.props, n.is_synthetic, "
+            "       count(e.rowid) AS degree "
+            "  FROM nodes n "
+            "  JOIN edges e ON (e.src = n.node_id OR e.dst = n.node_id) "
+            + ("  WHERE n.node_type = ? " if node_type else "")
+            + " GROUP BY n.node_id HAVING degree > 0 "
+            "  ORDER BY degree DESC LIMIT ?",
+            ((node_type, limit) if node_type else (limit,))).fetchall()
+        return [dict(node_id=r[0], node_type=r[1], props=json.loads(r[2]),
+                     is_synthetic=bool(r[3]), degree=int(r[4])) for r in rows]
+
     def n_nodes(self, node_type: str | None = None) -> int:
         q = "SELECT COUNT(*) FROM nodes"
         return self._con.execute(

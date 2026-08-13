@@ -58,6 +58,39 @@ def graph_exists() -> bool:
     return graph_path().exists()
 
 
+def best_seeds(limit: int = 12) -> list[dict]:
+    """Vessels worth opening the graph on, most-connected first.
+
+    **Why this exists.** The Graph view used to open empty and wait for the
+    operator to pick a vessel from a dropdown of ~9,000. Most of those picks
+    land on a lone node, because GFW registry ownership covers roughly 1.3% of
+    hulls in this AOI (see DATA_SOURCES.md) — so the overwhelmingly likely
+    outcome of choosing at random is a single circle on an empty canvas, which
+    reads as "the graph is broken" rather than "this hull has no known owner".
+
+    Ranking by degree makes the default view show the part of the graph that
+    actually has structure. It is a **presentation** choice and changes no
+    stored fact: a vessel absent from this list is not less suspicious, it is
+    less connected, and the panel says so.
+
+    Sanctioned hulls are preferred at equal degree because they are what an
+    analyst opened the graph to look at.
+    """
+    with open_graph() as g:
+        if g is None:
+            return []
+        rows = g.top_connected_nodes("vessel", max(1, min(100, limit)))
+    out = [{
+        "id": r["node_id"],
+        "label": _node_label(r["props"], r["node_id"]),
+        "degree": r["degree"],
+        "is_synthetic": r["is_synthetic"],
+        "designated": bool((r["props"] or {}).get("designated")),
+    } for r in rows]
+    out.sort(key=lambda r: (-r["degree"], not r["designated"]))
+    return out
+
+
 def _iso(epoch: float | None) -> str | None:
     if epoch is None:
         return None

@@ -84,6 +84,7 @@ export function MapView() {
   const [notes, setNotes] = useState({});
   const [tracks, setTracks] = useState([]);
   const [window_, setWindow] = useState(null); // {start,end} epoch ms
+  const [windowError, setWindowError] = useState(null);
   const [t, setT] = useState(1); // 0..1 across the window
   const [playing, setPlaying] = useState(false);
 
@@ -113,6 +114,23 @@ export function MapView() {
     const note = (k, v) =>
       live && v && setNotes((n) => ({ ...n, [k]: v }));
 
+    // ---- FIRST, and that ordering is the actual fix ----------------------
+    // A browser opens ~6 connections per origin. This effect fires eight
+    // requests, and the time window used to be the eighth — so it queued
+    // behind `/tracks`, measured at 3.06s against the scenario corpus (the
+    // slowest call here by 40x). The scrubber was hidden until it landed, so
+    // the demo's primary control arrived seconds after everything else and
+    // did it again on every navigation back. Requesting it first costs
+    // nothing and puts it on screen immediately; `api.corpusWindow` is
+    // session-cached, so a return visit does not even reach the network.
+    api.corpusWindow().then((w) => {
+      if (live && w && w.start && w.end) {
+        setWindow({ start: +new Date(w.start), end: +new Date(w.end) });
+      } else if (live) {
+        setWindowError("the corpus has no dated events to scrub through");
+      }
+    }).catch(() => live && setWindowError("could not load the corpus window"));
+
     api.events({ limit: EVENT_LIMIT })
       .then((r) => { set({ events: r.items }); note("events", r.note); })
       .catch(() => {});
@@ -130,12 +148,6 @@ export function MapView() {
     api.tracks({ max_points: 160 })
       .then((r) => { live && setTracks(r.items || []); note("tracks", r.note); })
       .catch(() => {});
-    api.stats().then((s) => {
-      const w = s.corpus_window || {};
-      if (live && w.start && w.end) {
-        setWindow({ start: +new Date(w.start), end: +new Date(w.end) });
-      }
-    }).catch(() => {});
     return () => { live = false; };
   }, []);
 
@@ -212,32 +224,43 @@ export function MapView() {
         </div>
       )}
 
-      {window_ && (
-        <div className="scrubber">
-          <button className="play" onClick={() => setPlaying((p) => !p)}>
-            {playing ? "❚❚" : "▶"}
-          </button>
-          <span className="clock">
-            {clockMs ? fmtDate(new Date(clockMs).toISOString(), true) : "—"}
-          </span>
-          <input
-            type="range"
-            min={0}
-            max={1}
-            step={0.001}
-            value={t}
-            onChange={(e) => {
-              setPlaying(false);
-              setT(+e.target.value);
-            }}
-          />
-          <span className="muted" style={{ fontSize: 11.5 }}>
-            {movingCount > 0
+      {/* The scrubber is ALWAYS mounted — it is the demo's primary control and
+          it must not appear and disappear. It used to render only once its
+          window had arrived, so on the real corpus it was absent for as long
+          as the slowest call in the app took, and absent again after every
+          navigation away and back. A control that comes and goes reads as a
+          broken page; a disabled one reads as a loading page. */}
+      <div className={`scrubber ${window_ ? "" : "scrubber-waiting"}`}>
+        <button
+          className="play"
+          disabled={!window_}
+          onClick={() => setPlaying((p) => !p)}
+        >
+          {playing ? "❚❚" : "▶"}
+        </button>
+        <span className="clock">
+          {clockMs ? fmtDate(new Date(clockMs).toISOString(), true) : "—"}
+        </span>
+        <input
+          type="range"
+          min={0}
+          max={1}
+          step={0.001}
+          value={t}
+          disabled={!window_}
+          onChange={(e) => {
+            setPlaying(false);
+            setT(+e.target.value);
+          }}
+        />
+        <span className="muted" style={{ fontSize: 11.5 }}>
+          {!window_
+            ? (windowError || "loading time window…")
+            : movingCount > 0
               ? `${movingCount} vessel${movingCount === 1 ? "" : "s"} on AIS`
               : "no AIS tracks in this window"}
-          </span>
-        </div>
-      )}
+        </span>
+      </div>
 
       {selected && (
         <div className="drawer">
