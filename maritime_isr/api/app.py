@@ -270,6 +270,17 @@ def create_app() -> FastAPI:
         """
         return service.get_corpus_window()
 
+    @api.get("/graph/all", dependencies=guard)
+    def graph_all(limit: int = Query(gsvc.FULL_GRAPH_MAX_NODES, ge=1, le=5000)) -> dict:
+        """Every current relationship as one web, most-connected core first.
+
+        `truncated`, `total_nodes` and `total_edges` are not optional decoration
+        — the real corpus graph is an estimated ~19,000 nodes and this returns
+        at most 1,500 of them, so a caller that ignores those fields will draw
+        a partial picture and present it as complete.
+        """
+        return gsvc.full_graph(limit)
+
     @api.get("/graph/seeds", dependencies=guard)
     def graph_seeds(limit: int = Query(12, ge=1, le=100)) -> dict:
         """Vessels worth opening the graph on, most-connected first.

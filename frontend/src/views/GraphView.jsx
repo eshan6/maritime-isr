@@ -17,9 +17,23 @@
 //   * Zoom is bounded so the graph can never be lost off-scale, with explicit
 //     zoom and fit controls rather than wheel-only.
 import { useCallback, useEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { useSearchParams } from "react-router-dom";
 import cytoscape from "cytoscape";
+import fcose from "cytoscape-fcose";
 import { api } from "../api.js";
+
+// Cytoscape's built-in `cose` compares every pair of nodes on every iteration,
+// so its cost grows with the square of the node count and it blocks the main
+// thread while it does. Measured on the whole-web view: **115 seconds** to lay
+// out 1,409 nodes, with the iteration budget already cut to 250. That is not a
+// slow render, it is a hung tab.
+//
+// `fcose` seeds from a spectral (eigendecomposition) draft and then relaxes it
+// with quadtree-approximated repulsion, which is O(n log n) per iteration
+// rather than O(n^2). Same force-directed look, same deterministic settling
+// when randomize is off — see the measurement in the commit message.
+cytoscape.use(fcose);
 import {
   edgeCategoryColor, edgeTypeLabel, fmtDate, humanKey, nodeTypeColor,
   nodeTypeSize, num, shortId,
@@ -48,6 +62,9 @@ export function GraphView() {
   // letting an operator believe they are looking at a considered selection.
   const [autoSeed, setAutoSeed] = useState(null);
   const [autoSeedFailed, setAutoSeedFailed] = useState(false);
+  // The whole-web payload, kept so the panel can state what is on screen and
+  // — when the graph is larger than the cap — what is not.
+  const [web, setWeb] = useState(null);
 
   useEffect(() => {
     api.vessels({ limit: 1000 }).then((r) => setVessels(r.items));
@@ -97,7 +114,12 @@ export function GraphView() {
             // Every node is labelled by default — the graph should be readable
             // at rest, not only under the cursor. Hovering fades everything
             // outside the hovered neighbourhood rather than revealing new text.
-            label: "data(label)",
+            // Labelled when the view says so. The neighbourhood view labels
+            // everything (it holds tens of nodes); the whole-web view holds
+            // up to 1,500 and labelling all of them is an unreadable mat of
+            // text, so it marks only the nodes worth naming at rest —
+            // see `markWebLabels`.
+            label: (n) => (n.data("showLabel") === 0 ? "" : n.data("label")),
             color: "#1f2a36",
             "font-size": LABEL_PX,
             "font-family": "Inter, system-ui, sans-serif",
@@ -149,6 +171,19 @@ export function GraphView() {
         },
         { selector: "edge.faded", style: { opacity: 0.05, "text-opacity": 0 } },
         { selector: "edge.hl", style: { width: 2.4, opacity: 1, "z-index": 19 } },
+        // An ENDED relationship, drawn as such. It is still shown — it is a
+        // real assertion with a real time scope, and hiding it would make the
+        // web disagree with the dashboard's edge count — but drawing it
+        // identically to a live edge would assert a stale fact as current,
+        // which invariant 3 exists to prevent. Dashed and dimmed reads as
+        // "was true", which is what it is.
+        { selector: "edge[current = 0]", style: {
+            "line-style": "dashed", opacity: 0.28, "line-dash-pattern": [5, 4] } },
+        // The node the web opened on, and its immediate network.
+        { selector: "node.focus", style: {
+            "border-color": "#1a5fb4", "border-width": 4, "z-index": 30 } },
+        { selector: ".focus-nbr", style: { "z-index": 25 } },
+        { selector: "edge.focus-nbr", style: { opacity: 0.9, width: 2.2 } },
       ],
     });
 
@@ -195,26 +230,106 @@ export function GraphView() {
       setNodeCount(0);
       setAutoSeed(null);          // an explicit pick is not an auto-seed
       setAutoSeedFailed(false);
+      setWeb(null);               // no longer showing the whole web
       expand(seed, 2, true);
       return;
     }
-    setStatus("finding a vessel with a network…");
-    api.graphSeeds(12).then((r) => {
-      if (!live || !cyRef.current) return;
-      const best = (r.items || [])[0];
-      if (!best) {
-        setStatus("");
-        setAutoSeedFailed(true);
-        return;
-      }
-      setSeedInput(best.id);
-      setAutoSeed(best);
-      expand(best.id, 2, true);
-    }).catch(() => {
-      if (live) { setStatus(""); setAutoSeedFailed(true); }
-    });
+    loadWholeWeb(() => live);
     return () => { live = false; };
   }, [params]);
+
+  // ---- the whole web -----------------------------------------------------
+  // The default view is every relationship in the graph at once, centred on
+  // one node rather than opened on it. Two things make that honest rather
+  // than merely impressive:
+  //
+  //   * the server returns the most-connected core up to a cap, and this
+  //     states the cap — the real corpus graph is an estimated ~19,000 nodes
+  //     and a partial picture that looks whole is worse than no picture;
+  //   * the centred node is a camera position, not a verdict. The panel says
+  //     on what basis it was chosen.
+  async function loadWholeWeb(stillLive = () => true) {
+    setStatus("loading the whole network…");
+    let g;
+    try {
+      g = await api.graphAll();
+    } catch {
+      if (stillLive()) { setStatus(""); setAutoSeedFailed(true); }
+      return;
+    }
+    const cy = cyRef.current;
+    if (!stillLive() || !cy) return;
+    if (!g.nodes.length) {
+      setStatus("");
+      setAutoSeedFailed(true);
+      return;
+    }
+
+    cy.elements().remove();
+    // Everything is already on screen, so nothing needs expanding — marking
+    // every node expanded stops a click firing a redundant neighbourhood call.
+    expandedRef.current = new Set(g.nodes.map((n) => n.id));
+
+    const focusId = g.focus;
+    cy.add([
+      ...g.nodes.map((n) => ({
+        data: {
+          id: n.id, label: n.label || shortId(n.id), kind: n.node_type,
+          color: nodeTypeColor(n.node_type), size: nodeTypeSize(n.node_type),
+          synthetic: n.is_synthetic ? 1 : 0,
+          sanctioned: (n.props && n.props.designated) ||
+            n.node_type === "sanctions_authority" ? 1 : 0,
+          degree: n.degree, props: n.props, showLabel: 0,
+        },
+      })),
+      ...g.edges.map((e) => ({
+        data: {
+          id: `${e.edge_type}|${e.source}|${e.target}|${e.t_start || ""}`,
+          source: e.source, target: e.target,
+          label: edgeTypeLabel(e.edge_type), edge_type: e.edge_type,
+          color: edgeCategoryColor(e.edge_type),
+          ownership: e.edge_type === "owned-by" || e.edge_type === "operated-by" ? 1 : 0,
+          confidence: e.confidence, t_start: e.t_start, t_end: e.t_end,
+          current: e.is_current ? 1 : 0,
+          synthetic: e.is_synthetic ? 1 : 0,
+        },
+      })),
+    ]);
+
+    // Get this message on screen BEFORE handing the thread to the layout,
+    // which blocks it for seconds.
+    //
+    // Neither `setTimeout(0)` nor a double rAF is sufficient: React 18 batches
+    // and schedules the re-render, and both of those can run before the commit
+    // does — checked in a browser, where the message was set and never
+    // appeared. `flushSync` commits it synchronously; the rAF that follows
+    // then waits for the paint of that commit.
+    flushSync(() => setStatus(
+      `laying out ${g.nodes.length.toLocaleString()} nodes…`));
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    if (!stillLive() || cy.destroyed()) return;
+    runLayout(cy, g.nodes.length);
+    markWebLabels(cy, focusId);
+
+    if (focusId) {
+      const node = cy.getElementById(focusId);
+      if (node.length) {
+        node.addClass("focus");
+        node.closedNeighborhood().addClass("focus-nbr");
+        // Frame the focus neighbourhood, not the whole web: opening zoomed
+        // all the way out shows a grey mass and nothing legible. The web is
+        // still all there — zoom out and it is one picture.
+        cy.animate({ fit: { eles: node.closedNeighborhood(), padding: 90 } },
+                   { duration: 320 });
+      }
+    } else {
+      fitView(cy);
+    }
+    syncLabelScale(cy);
+    setNodeCount(cy.nodes().length);
+    setWeb(g);
+    setStatus("");
+  }
 
   async function expand(nodeId, hops, isSeed = false) {
     if (expandedRef.current.has(nodeId)) return;
@@ -303,6 +418,38 @@ export function GraphView() {
           Opens two hops: operator, parent company, and vessels sharing the owner.
           Click a vessel or company to expand; hover to isolate.
         </p>
+        {/* What is on screen, stated in numbers. A web that looks complete is
+            how a viewer concludes the dataset is smaller than it is, so the
+            truncation is named here rather than left to be inferred. */}
+        {web && (
+          <div className="muted" style={{ fontSize: 11.5, marginTop: 8 }}>
+            <div>
+              Showing <b>{web.nodes.length.toLocaleString()}</b> nodes and{" "}
+              <b>{web.edges.length.toLocaleString()}</b> relationships
+              {web.truncated ? (
+                <>
+                  {" "}of <b>{web.total_nodes.toLocaleString()}</b> and{" "}
+                  <b>{web.total_edges.toLocaleString()}</b> in the graph —{" "}
+                  <b>this is a partial picture</b>, the most-connected core.
+                  Seed a vessel below to see any hull's own network in full.
+                </>
+              ) : (
+                <> — the entire graph.</>
+              )}
+            </div>
+            {web.focus_basis && (
+              <div style={{ marginTop: 4 }}>
+                Centred on <b>{focusLabel(web)}</b> — {web.focus_basis}. That is
+                where the camera starts, not a finding: it is the
+                best-connected node, not the most suspicious one.
+              </div>
+            )}
+            <div style={{ marginTop: 4 }}>
+              Dashed links are relationships that have <b>ended</b>; solid ones
+              are current.
+            </div>
+          </div>
+        )}
         {/* Say that the view chose this hull, and on what basis. An operator
             who assumes a considered selection would read "most edges" as
             "most interesting", and those are not the same claim. */}
@@ -313,6 +460,15 @@ export function GraphView() {
             chosen automatically so the view opens on something. It is the
             best-connected hull, not the most suspicious one.
           </p>
+        )}
+        {!web && (
+          <button
+            className="btn btn-sm"
+            style={{ marginTop: 8, width: "100%" }}
+            onClick={() => { setParams({}); }}
+          >
+            ← Back to the whole network
+          </button>
         )}
         {status && <p className="muted" style={{ fontSize: 11.5, marginTop: 6 }}>{status}</p>}
         {/* Legend grouped by family, so the colour system explains itself. */}
@@ -421,16 +577,82 @@ function fitView(cy) {
   cy.panBy({ x: (PANEL_L - PANEL_R) / 2, y: 0 });
 }
 
-function runLayout(cy) {
+// Which nodes carry a label at rest in the whole-web view.
+//
+// The neighbourhood view labels everything, because "the graph should be
+// readable at rest" and it holds tens of nodes. The web holds up to 1,500, and
+// `syncLabelScale` pins label size to the SCREEN — so zooming out does not
+// shrink text away, it stacks it. Labelling all of them produces a solid mat.
+//
+// So: name the things worth naming without the cursor — the focus and its
+// immediate network, every organisation and sanctions authority (few, and the
+// reason an ownership graph exists), anything designated, and the best-connected
+// hubs. Everything else keeps its label and reveals it on hover, which is the
+// same interaction the view already had.
+function focusLabel(web) {
+  const n = (web.nodes || []).find((x) => x.id === web.focus);
+  return (n && n.label) || shortId(web.focus || "");
+}
+
+function markWebLabels(cy, focusId, hubCount = 40) {
+  cy.batch(() => {
+    cy.nodes().data("showLabel", 0);
+    cy.nodes().filter((n) =>
+      n.data("kind") === "organization" ||
+      n.data("kind") === "sanctions_authority" ||
+      n.data("sanctioned") === 1).data("showLabel", 1);
+    cy.nodes().sort((a, b) => (b.data("degree") || 0) - (a.data("degree") || 0))
+      .slice(0, hubCount).forEach((n) => n.data("showLabel", 1));
+    if (focusId) {
+      const f = cy.getElementById(focusId);
+      if (f.length) f.closedNeighborhood().nodes().data("showLabel", 1);
+    }
+  });
+}
+
+//: Above this many nodes the view switches from `cose` to `fcose`. Not a taste
+//: threshold — `cose` is O(n^2) per iteration and was measured at 115s on 1,409
+//: nodes, where `fcose` does the same graph in a couple of seconds. Below it,
+//: `cose` is kept because the neighbourhood view's look is tuned to it and
+//: there is nothing to gain from changing what already works.
+const FCOSE_ABOVE = 250;
+
+function runLayout(cy, nodeCount = 0) {
   // Un-animated on purpose: an animating force simulation keeps nudging nodes
-  // for seconds after a click and reads as a glitch. This settles instantly and
-  // deterministically (randomize: false), so the same graph always looks the same.
-  cy.layout({
+  // for seconds after a click and reads as a glitch. Both layouts settle
+  // deterministically (randomize: false), so the same graph always looks the
+  // same — a web that reshuffled on every visit would make it impossible to
+  // learn, and re-finding a cluster you saw yesterday is most of the value.
+  const big = nodeCount > FCOSE_ABOVE;
+  cy.layout(big ? {
+    name: "fcose",
+    animate: false,
+    randomize: false,
+    // `default`, never `draft`. Draft skips the spectral seeding that
+    // `randomize: false` then expects, and fcose throws
+    // "Cannot read properties of undefined (reading 'nodeIndexes')" — measured,
+    // not theorised. Determinism is worth more here than the seconds draft
+    // would have saved: a web that reshuffles on every visit cannot be learned.
+    quality: nodeCount > 900 ? "default" : "proof",
+    padding: 50,
+    // Labels are only drawn on a minority of nodes in the web view (see
+    // `markWebLabels`), and measuring every one of 1,400 label boxes costs
+    // more than it buys when most are empty.
+    nodeDimensionsIncludeLabels: false,
+    nodeRepulsion: 9000,
+    idealEdgeLength: 70,
+    edgeElasticity: 0.35,
+    gravity: 0.3,
+    gravityRange: 3.2,
+    numIter: nodeCount > 900 ? 800 : 2500,
+    fit: false,
+  } : {
     name: "cose",
     animate: false,
     padding: 50,
-    // Lay out around the LABELS, not the dots. Every node is labelled at rest,
-    // so a layout that only avoids circle overlap still stacks text on text.
+    // Lay out around the LABELS, not the dots. Every node is labelled at rest
+    // in this view, so a layout that only avoids circle overlap still stacks
+    // text on text.
     nodeDimensionsIncludeLabels: true,
     nodeRepulsion: 26000,
     idealEdgeLength: 150,

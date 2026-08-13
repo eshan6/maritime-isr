@@ -324,6 +324,57 @@ class GraphStore:
         return [dict(node_id=r[0], node_type=r[1], props=json.loads(r[2]),
                      is_synthetic=bool(r[3]), degree=int(r[4])) for r in rows]
 
+    def subgraph_by_degree(self, limit: int) -> dict:
+        """The whole graph, or its most-connected `limit` nodes and the edges
+        among them. Always reports the totals it was drawn from.
+
+        **Why degree and not a random slice.** A graph too large to draw has to
+        be cut somewhere, and cutting arbitrarily produces a picture that is
+        both incomplete AND unrepresentative — scattered fragments that imply
+        the data is sparse when it may not be. Keeping the highest-degree core
+        yields the part that actually has structure, which is the part a web
+        view exists to show. It is still a subset, and `truncated` plus the
+        totals say so; no caller may present it as the whole graph.
+
+        **Latest-wins per (type, src, dst), and closed edges are KEPT** — the
+        same resolution `edges()` and `counts_by_synthetic()['edges_current']`
+        use, so this view, the neighbourhood view and the dashboard count agree
+        on what a relationship is. Filtering `t_end IS NOT NULL` here instead
+        was measured to drop 191 of 344 edges on the fixture graph, which would
+        have made the web disagree with every other number in the product.
+
+        Callers must still honour invariant 3: `t_end` travels on every edge
+        and an ended relationship may not be *drawn* as a current one.
+        """
+        total_nodes = self._con.execute("SELECT count(*) FROM nodes").fetchone()[0]
+        rows = self._con.execute(
+            "SELECT n.node_id, n.node_type, n.props, n.is_synthetic, "
+            "       count(e.rowid) AS degree "
+            "  FROM nodes n "
+            "  LEFT JOIN edges e ON (e.src = n.node_id OR e.dst = n.node_id) "
+            " GROUP BY n.node_id ORDER BY degree DESC LIMIT ?",
+            (limit,)).fetchall()
+        nodes = [dict(node_id=r[0], node_type=r[1], props=json.loads(r[2]),
+                      is_synthetic=bool(r[3]), degree=int(r[4])) for r in rows]
+        keep = {n["node_id"] for n in nodes}
+
+        all_rows = self._con.execute(
+            "SELECT rowid,edge_type,src,dst,t_start,t_end,base_confidence,"
+            "observed_at,source,source_ref,pipeline_version,props,is_synthetic "
+            "FROM edges").fetchall()
+        latest: dict[tuple, Edge] = {}
+        for e in sorted(self._rows_to_edges(all_rows), key=lambda e: e.observed_at):
+            latest[(e.edge_type, e.src, e.dst)] = e
+        current = list(latest.values())
+        edges = [e for e in current if e.src in keep and e.dst in keep]
+        return {
+            "nodes": nodes,
+            "edges": edges,
+            "total_nodes": int(total_nodes),
+            "total_edges": len(current),
+            "truncated": len(nodes) < total_nodes or len(edges) < len(current),
+        }
+
     def n_nodes(self, node_type: str | None = None) -> int:
         q = "SELECT COUNT(*) FROM nodes"
         return self._con.execute(

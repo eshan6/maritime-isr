@@ -111,6 +111,121 @@ def test_best_seeds_is_empty_not_an_error_without_a_graph(monkeypatch, tmp_path)
     assert gsvc.best_seeds() == []
 
 
+# ---------------------------------------------------------------------------
+# the whole web
+# ---------------------------------------------------------------------------
+
+def _web():
+    if not gsvc.graph_exists():
+        pytest.skip("graph not populated — run tools/run_scenario_pipeline.py")
+    g = gsvc.full_graph()
+    if not g["nodes"]:
+        pytest.skip("graph is empty")
+    return g
+
+
+def test_web_edge_count_agrees_with_the_dashboard():
+    """The web and the stats panel must not report different graphs.
+
+    Filtering ended edges out here instead was measured to drop 191 of 344 on
+    the fixture graph — a view that quietly disagrees with every other number
+    in the product is worse than one that shows too much.
+    """
+    g = _web()
+    if g["truncated"]:
+        pytest.skip("graph exceeds the cap; counts are a subset by design")
+    with gsvc.open_graph() as store:
+        dash = store.counts_by_synthetic()["edges_current"]
+    assert len(g["edges"]) == dash["real"] + dash["synthetic"]
+
+
+def test_ended_edges_are_carried_and_flagged_not_dropped():
+    """Invariant 3: an ended relationship may be shown, but never as current."""
+    g = _web()
+    for e in g["edges"]:
+        assert "is_current" in e
+        assert e["is_current"] == (e["t_end"] is None)
+
+
+def test_every_edge_endpoint_is_a_node_that_was_returned():
+    """A dangling edge would make cytoscape throw and blank the whole view."""
+    g = _web()
+    ids = {n["id"] for n in g["nodes"]}
+    for e in g["edges"]:
+        assert e["source"] in ids and e["target"] in ids
+
+
+def test_truncation_is_reported_with_the_totals_it_was_drawn_from():
+    """A partial web that looks whole is how a viewer concludes the dataset is
+    sparser than it is."""
+    g = gsvc.full_graph(limit=5)
+    if g["total_nodes"] <= 5:
+        pytest.skip("graph smaller than the test limit")
+    assert g["truncated"] is True
+    assert len(g["nodes"]) == 5
+    assert g["total_nodes"] > len(g["nodes"])
+    assert g["total_edges"] >= len(g["edges"])
+
+
+def test_truncation_keeps_the_connected_core_not_an_arbitrary_slice():
+    g = gsvc.full_graph(limit=5)
+    if g["total_nodes"] <= 5:
+        pytest.skip("graph smaller than the test limit")
+    degrees = [n["degree"] for n in g["nodes"]]
+    assert degrees == sorted(degrees, reverse=True)
+
+
+def test_focus_is_a_node_that_is_actually_in_the_payload():
+    """A focus id the client cannot find leaves the camera unmoved and the
+    panel naming a vessel that is not on screen."""
+    g = _web()
+    assert g["focus"] in {n["id"] for n in g["nodes"]}
+
+
+def test_focus_basis_states_the_claim_it_is_making():
+    g = _web()
+    assert g["focus_basis"]
+    assert "connected" in g["focus_basis"]
+    # It must never describe itself as a risk judgement.
+    for word in ("suspicious", "risky", "dangerous", "dark"):
+        assert word not in g["focus_basis"].lower()
+
+
+def test_focus_prefers_a_designated_vessel_when_one_is_connected():
+    nodes = [
+        {"id": "vessel:a", "node_type": "vessel", "degree": 50, "props": {}},
+        {"id": "vessel:b", "node_type": "vessel", "degree": 9,
+         "props": {"designated": True}},
+        {"id": "org:c", "node_type": "organization", "degree": 99, "props": {}},
+    ]
+    focus, basis = gsvc._pick_focus(nodes)
+    assert focus == "vessel:b"
+    assert "sanctioned" in basis
+
+
+def test_focus_falls_back_through_vessel_then_any_node():
+    plain = [{"id": "vessel:a", "node_type": "vessel", "degree": 3, "props": {}}]
+    assert gsvc._pick_focus(plain)[0] == "vessel:a"
+    org = [{"id": "org:c", "node_type": "organization", "degree": 9, "props": {}}]
+    focus, basis = gsvc._pick_focus(org)
+    assert focus == "org:c" and "node" in basis
+    assert gsvc._pick_focus([]) == (None, None)
+
+
+def test_full_graph_is_empty_not_an_error_without_a_graph(monkeypatch, tmp_path):
+    monkeypatch.setattr(gsvc, "graph_path", lambda: tmp_path / "absent.sqlite")
+    g = gsvc.full_graph()
+    assert g["nodes"] == [] and g["edges"] == []
+    assert g["truncated"] is False and g["focus"] is None
+
+
+def test_full_graph_limit_is_bounded():
+    """The cap exists because an in-browser force layout cannot draw the real
+    graph; a URL must not be able to raise it arbitrarily."""
+    g = gsvc.full_graph(limit=10_000)
+    assert g["limit"] <= 5000
+
+
 def test_seed_limit_is_bounded():
     """An unbounded limit reaching the UI would let a URL ask for the whole
     node table."""

@@ -98,6 +98,10 @@ export const api = {
   corpusWindow: () => memo("corpus-window", () => get("/corpus-window")),
   graphSeeds: (limit) => memo(`graph-seeds:${limit || 12}`,
                               () => get("/graph/seeds", { limit })),
+  // The whole web. Cached: it is the default view, so every return to the
+  // Graph tab would otherwise re-fetch and re-run the force layout.
+  graphAll: (limit) => memo(`graph-all:${limit || 0}`,
+                            () => get("/graph/all", { limit })),
   vessels: (params) => get("/vessels", params),
   vessel: (id) => get(`/vessels/${encodeURIComponent(id)}`),
   track: (id, params) => get(`/vessels/${encodeURIComponent(id)}/track`, params),

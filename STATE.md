@@ -2090,3 +2090,101 @@ Those come from the **Phase 1–6 fixture world**, which predates ADR-019 and is
 separate synthetic corpus from the scenario one — so this is probably correct
 rather than a flag drift, but it has not been checked and ADR-019 puts the whole
 real/synthetic split on that column.
+
+---
+
+## The Graph opens on the whole network (2026-08-13, third pass)
+
+Operator request: make the default Graph state show **every relationship in the
+dataset as one web**, focused on a particular node. Built, with two constraints
+that had to be measured rather than assumed.
+
+### The layout was the whole problem, and `cose` could not do it
+
+The view used cytoscape's built-in `cose`, a force simulation that compares
+every pair of nodes on every iteration. Measured end-to-end in Chromium on a
+graph shaped like the real one:
+
+| nodes | `cose` | `fcose` |
+|---|---|---|
+| 219 | 2.5 s | 1.9 s |
+| 900 | — | 5.8 s |
+| 1,409 | **115 s** | 6.5–7.0 s |
+
+115 seconds is a hung tab, not a slow render. `fcose` (added as a dependency)
+seeds from a spectral draft and approximates repulsion with a quadtree —
+O(n log n) per iteration instead of O(n²) — for the same force-directed look and
+the same deterministic settling. `cose` is kept below 250 nodes because the
+neighbourhood view's appearance is tuned to it.
+
+Two things found while tuning, both by measuring rather than reasoning:
+
+- **`quality: "draft"` throws.** Draft skips the spectral seeding that
+  `randomize: false` then expects, and fcose dies on `Cannot read properties of
+  undefined (reading 'nodeIndexes')`. Determinism is worth more than the seconds
+  draft would have saved — a web that reshuffles every visit cannot be learned.
+- **The "laying out 1,409 nodes…" status never painted.** React 18 batches, so
+  neither `setTimeout(0)` nor a double `requestAnimationFrame` ran after the
+  commit. `flushSync` fixed it. Without it the operator stares at ~5 blocked
+  seconds with the previous message on screen.
+
+### The cap, and why it is 1,500
+
+The real corpus graph is an estimated **~19,000 nodes / ~22,000 edges** (9,184
+vessels plus identity intervals, flags, ports). No in-browser force layout will
+draw that, so the view shows the **most-connected core** up to a cap.
+
+1,500 rather than 900 because most of the cost is fixed overhead, not per-node:
+900 → 5.8 s against 1,409 → 7.0 s, so 66% more graph costs about a second.
+
+Degree-ranked rather than an arbitrary slice: a random cut is both incomplete
+*and* unrepresentative — scattered fragments implying the data is sparse when it
+is not.
+
+**The truncation is stated on screen**, with both totals: *"Showing 900 nodes and
+1,125 relationships of 1,409 and 1,634 in the graph — this is a partial picture,
+the most-connected core."* A partial web that looks whole is exactly how a
+viewer concludes the dataset is smaller than it is.
+
+### The focus, and what it does not claim
+
+Criteria, in order: **most-connected sanctioned vessel → most-connected vessel →
+most-connected node**. Sanctions designation comes first because it is the only
+finding-grade signal available at the node level — `_RANK` already treats it as
+evidence rather than something this view invented. Degree breaks the tie because
+the point of a web is structure.
+
+The camera frames the focus **neighbourhood**, not the whole web: opening fully
+zoomed out shows a grey mass and nothing legible; the web is still all there.
+The panel states the basis and refuses the stronger reading — *"That is where
+the camera starts, not a finding: it is the best-connected node, not the most
+suspicious one."* A test asserts the basis string never contains
+"suspicious"/"risky"/"dangerous"/"dark".
+
+### One defect found by building it
+
+`subgraph_by_degree` first filtered `t_end IS NOT NULL`, which **dropped 191 of
+344 edges** on the fixture graph — because `neighbourhood()` and
+`counts_by_synthetic()['edges_current']` both resolve latest-wins *without* that
+filter. The web would have silently disagreed with every other edge count in the
+product. Ended edges are now kept and **drawn dashed and dimmed**, carrying
+`is_current`, which satisfies invariant 3 without hiding them: it reads as "was
+true", which is what it is.
+
+### Labels
+
+The web holds up to 1,500 nodes and `syncLabelScale` pins label size to the
+*screen*, so zooming out stacks text rather than shrinking it away. The web view
+labels only what is worth naming at rest — the focus neighbourhood, every
+organisation and sanctions authority, anything designated, and the 40 best-
+connected hubs. Everything else reveals on hover, the interaction the view
+already had. The neighbourhood view still labels everything.
+
+### Status
+
+**Built + verified in sandbox and in a real browser** at 219 and 1,409 nodes,
+including the navigate-away-and-back case. 11 new tests (21 in that file); suite
+**594 passed / 4 skipped / 1 pre-existing failure**. `dist/` rebuilt.
+
+**New frontend dependency: `cytoscape-fcose`.** A `git pull` alone will not
+install it — `npm install` in `frontend/` is required before `npm run build`.
