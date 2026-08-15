@@ -294,3 +294,51 @@ attribution, the provenance chain, and a **"what this report does not establish"
 section. It opens in any browser and prints to PDF. A scenario vessel's report is
 labelled top and bottom and its filename starts `SCENARIO-`, because the label has
 to survive the file being forwarded to someone who was not here.
+
+**Imaging opportunity** — the answer to *"was anyone watching?"* for a vessel
+that went dark. A ship that switched its AIS off at a known place and switched
+it back on at another known place, hours later, cannot have been everywhere in
+between. Bounding its speed gives the patch of sea it **must** have been inside
+at the moment of each satellite pass; comparing that patch against the radar
+image's outline says whether a picture of it exists.
+
+Three grades: **confirmed** (an image exists whose outline necessarily contained
+the vessel), **partial** (the pass covered some fraction of the possible area),
+**none** (nobody was overhead — itself a finding about coverage). A fourth,
+**unknown**, means the gap could not be assessed at all, which is deliberately
+distinct from "we looked and found nothing".
+
+**The claim is only ever about where a satellite was pointed.** We hold scene
+metadata, not imagery, so no image has been examined and no vessel has been
+detected in one. Expect mostly `partial`: at 20 knots the area a ship could
+occupy grows past a single Sentinel-1 footprint about four hours into a gap.
+(ADR-026, `maritime_isr/overpass.py`.)
+
+**Reachable region** — that patch of sea. It is the overlap of a circle growing
+outward from where the ship vanished and a circle shrinking toward where it
+reappeared, evaluated at one instant — the uncertainty cone, measured at the
+moment of a satellite pass rather than swept over time. Narrow at both ends of
+a gap, widest in the middle.
+
+**Scene footprint** — the outline on the earth of what one satellite image
+covers, stored as a polygon. A Sentinel-1 IW scene is roughly 250 km square.
+Footprints and acquisition times are free and keyless to download; the pixels
+inside them are not, and we do not hold them.
+
+**Speed bound (`v_max`)** — the top speed a vessel is assumed capable of, 20
+knots by default. It is an **assumption, not a measurement**, and it is written
+onto every row that depends on it. Deliberately generous: a higher assumed speed
+makes the reachable region larger, which makes a `confirmed` containment harder
+to claim, so the error runs toward under-claiming.
+
+**Degree** — how many relationships a thing has in the graph. The whole-network
+view ranks by it, and shows it, because on this corpus "best connected" and
+"well connected" are very different: GFW ownership data covers roughly 1.3% of
+hulls, so the top of the list can still be a small cluster. **Degree is not
+risk** — a vessel with no edges is less connected, not less suspicious.
+
+**Ended relationship** — an edge whose time scope has closed: it *was* true and
+is not now (a ship's former name, a lapsed ownership). The graph draws these
+**dashed and dimmed** rather than hiding them, because they are real assertions
+with real evidence, and drawing one like a live edge would assert a stale fact
+as current — the thing invariant 3 exists to prevent.

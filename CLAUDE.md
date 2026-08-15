@@ -123,9 +123,9 @@ detail in `ARCHITECTURE.md`.
 
 5. **Every source is a connector, never a core change.**
    New data source = new module in `ingest/` that maps into the canonical schema.
-   The fusion core (`fuse/`) must never learn a source-specific hack. *Reason:*
+   The fusion core (`fusion/`) must never learn a source-specific hack. *Reason:*
    the whole commercial thesis is "paid/classified feeds slot in later without a
-   rewrite." Any connector that forces a change in `fuse/` is a Phase 3 design
+   rewrite." Any connector that forces a change in `fusion/` is a Phase 3 design
    bug — fix the core, don't special-case the connector.
 
 6. **Synthetic ≠ real. Never quote a synthetic number as if it were a real one.**
@@ -200,7 +200,8 @@ Package root is `maritime_isr/`. Module boundaries are firm:
 ```
 ingest/    one module per source; lands raw + normalizes to canonical schema
 process/   SAR preprocessing, detection, track building, features
-fuse/      association engine + dark-vessel logic (THE fusion core — keep it source-agnostic)
+fusion/    association engine + dark-vessel logic (THE fusion core — keep it source-agnostic)
+           (an empty `fuse/` package also exists, unused — do not put code there)
 graph/     ontology, edge store, event engine, confidence decay
 rules/     anomaly library, risk scoring
 eval/      the permanent evaluation harness

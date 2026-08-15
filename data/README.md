@@ -22,6 +22,9 @@ data/
 │   └── <table>/             One directory per logical table, e.g.
 │                            gfw_events/, gfw_vessels/, sanctions/, wpi_ports/,
 │                            s1_scenes/. Partitioned by day or hour.
+│                            Enrichment lands here too, same envelope and same
+│                            path: sanctioned_vessel_matches/ (ADR-016a) and
+│                            sar_imaging_opportunity/ (ADR-026).
 │
 ├── catalog.sqlite           Scene catalog: which Sentinel-1 scenes exist over
 │                            the AOI, their footprints and acquisition times.

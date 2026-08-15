@@ -1428,3 +1428,112 @@ labelled `forward_cone` / `backward_cone` on the row.
 - **Unverified on the real corpus.** Every number in this ADR is geometry or
   sandbox fixture. Nothing here has run against the 636 landed scenes or the 5
   flagged gaps, which live on Eshan's laptop.
+
+---
+
+## ADR-027 — What the operator sees first, and what it is allowed to imply *(Accepted)*
+**2026-08-13. Two demo defects and one operator request, taken together.**
+
+**Context.** Three reports arrived from the laptop demo in one session: the
+timeline player was invisible and came back only intermittently, the Graph view
+opened empty, and the Graph should default to showing the whole network. All
+three are about **what is on screen before the operator does anything**, and
+each was resolved by measurement rather than preference.
+
+**Decision — five parts.**
+
+**(a) A view-critical field gets its own cheap endpoint, requested first.** The
+map's time window came from `/stats`, which scans every event table, groups the
+sanctions matches, counts scenes, measures length coverage and walks the graph.
+It was the **eighth** of eight requests fired on mount, past the browser's ~6
+connections per origin, so it queued behind `/tracks` — **measured at 3.06 s**,
+40× the next slowest call. `/api/corpus-window` returns the same two aggregates
+alone, is requested first, and is cached for the session because a corpus window
+cannot change while the process is up.
+
+*The ordering was the fix; the cheaper endpoint was the smallest part of it.*
+Worth stating because the first diagnosis blamed the endpoint cost and the
+measurement contradicted it — `/stats` was 0.194 s, not the seconds assumed.
+
+**(b) A control that is loading is disabled, never absent.** The scrubber
+rendered only once its window existed, so it vanished on every navigation and
+reappeared seconds later. A control that comes and goes reads as a broken page;
+a disabled one reads as a loading page. It now stays mounted and fades.
+
+**(c) The Graph opens on the whole network, capped, with the cap stated.** The
+real corpus graph is an estimated ~19,000 nodes / ~22,000 edges, which no
+in-browser force layout will draw, so the view shows the most-connected core up
+to **1,500 nodes** and reports `total_nodes`, `total_edges` and `truncated`.
+
+Degree-ranked rather than an arbitrary slice: a random cut is both incomplete
+**and** unrepresentative — scattered fragments implying the data is sparse when
+it is not. 1,500 rather than 900 because most of the cost is fixed overhead
+(measured: 900 → 5.8 s, 1,409 → 7.0 s), so 66% more graph costs about a second.
+
+**A truncated web must never be described as the whole graph.** The panel names
+both totals whenever it truncates.
+
+**(d) The centred node is a camera position, not a verdict.** Criteria, in
+order: most-connected **sanctioned** vessel → most-connected vessel →
+most-connected node. Sanctions designation leads because it is the only
+finding-grade signal available at node level — `_RANK` already treats it as
+evidence rather than something this view invented; degree breaks the tie because
+the point of a web is structure.
+
+The payload carries a `focus_basis` sentence and the UI states it: *"that is
+where the camera starts, not a finding: it is the best-connected node, not the
+most suspicious one."* A test asserts the string never contains "suspicious",
+"risky", "dangerous" or "dark". **Degree is connectedness, not risk** — a vessel
+with no edges is less connected, not less suspicious, and on this corpus that
+distinction is large: GFW ownership covers ~1.3% of hulls.
+
+**(e) An ended relationship is drawn, and drawn as ended.** The first
+implementation filtered closed edges out, which **dropped 191 of 344** on the
+fixture graph — because `neighbourhood()` and
+`counts_by_synthetic()['edges_current']` both resolve latest-wins *without* that
+filter. The web would have silently disagreed with every other edge count in the
+product. Ended edges are kept, carry `is_current`, and render **dashed and
+dimmed**: that satisfies invariant 3 without hiding evidence, because dashed
+reads as "was true", which is what it is.
+
+**The layout engine changed, and that is the load-bearing part.** Cytoscape's
+built-in `cose` compares every pair of nodes on every iteration. Measured
+end-to-end in Chromium:
+
+| nodes | `cose` | `fcose` |
+|---|---|---|
+| 219 | 2.5 s | 1.9 s |
+| 900 | — | 5.8 s |
+| 1,409 | **115 s** | 6.5–7.0 s |
+
+115 s is a hung tab, not a slow render. `cytoscape-fcose` seeds from a spectral
+draft and approximates repulsion with a quadtree — O(n log n) per iteration
+instead of O(n²) — for the same look and the same deterministic settling.
+`cose` is retained below 250 nodes because the neighbourhood view is tuned to
+it. **This adds a frontend dependency: `npm install` is required after pulling,
+or the build fails.**
+
+**Alternatives rejected.** *Raise the `cose` iteration budget instead of
+changing engine* — rejected: the budget was already cut to 250 and it still took
+115 s; the cost is the pairwise comparison, not the iteration count. *Use
+fcose's `quality: "draft"` for speed* — rejected, and it does not work: draft
+skips the spectral seeding that `randomize: false` expects and fcose throws
+`Cannot read properties of undefined (reading 'nodeIndexes')`. Determinism is
+worth more than the seconds — a web that reshuffles every visit cannot be
+learned, and re-finding a cluster seen yesterday is most of the value. *Hide
+ended edges to reduce clutter* — rejected, see (e). *Let the imaging or
+connectivity signals rank a vessel on the Findings screen* — rejected: both
+describe how **resolvable** or how **connected** a hull is, not how suspicious,
+and blending those axes builds the number ADR-024 declined to build.
+
+**Consequences.**
+
+- On the real corpus the Graph will show a **stated subset**, not the whole
+  graph. "Every relationship as one web" is literally true only on corpora below
+  the cap.
+- The frontend now has a layout dependency that a `git pull` does not install.
+  A tab that locks for a minute means fcose did not load.
+- `flushSync` is required around the pre-layout status message: React 18 batches,
+  so neither `setTimeout(0)` nor a double `requestAnimationFrame` runs after the
+  commit, and the message was set and never painted while the thread blocked for
+  ~5 s. Verified in a browser, not reasoned about.

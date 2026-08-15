@@ -8,10 +8,18 @@ session. `CLAUDE.md`, `ARCHITECTURE.md`, `DECISIONS.md` are stable contracts;
 > between status buckets, record what was verified vs assumed, log anything now
 > broken, and set "Next up." If you don't update it, the next session starts blind.
 
-**Last updated:** 2026-08-13 — satellite imaging opportunities over AIS gaps
-(ADR-026): the first analytical claim this system makes on its own behalf
-rather than reproducing Global Fishing Watch's. See "Was anyone watching?" at
-the end of this file. Prior entry: 2026-08-10 — demo data-coverage session, two passes.
+**Last updated:** 2026-08-13 — three passes, all at the end of this file:
+
+1. **"Was anyone watching?"** (ADR-026) — satellite imaging opportunities over
+   AIS gaps. The first analytical claim this system makes on its own behalf
+   rather than reproducing Global Fishing Watch's.
+2. **The demo's two loading defects** — the timeline player was requested eighth
+   of eight and hidden until it arrived; the Graph opened empty.
+3. **The Graph opens on the whole network** — every relationship as one web,
+   centred on the most-connected sanctioned vessel. Needed a new layout engine:
+   `cose` took 115 s on 1,409 nodes, `fcose` takes ~6.5 s.
+
+Prior entry: 2026-08-10 — demo data-coverage session, two passes.
 ADR-025 (second): the one-click incident report, and the identity_changed
 events that were never written. ADR-024 (first): findings
 table, UN+EU sanctions matching, map density + truncation honesty, SAR contact
@@ -96,7 +104,8 @@ matching; it is not detection performance. Say that before anyone asks.
 | 0.4 | GFW + versioned OFAC/UN/EU/WPI registries | ✅ | **Ran live.** GFW events 27,172 rows; vessel identity 9,648 intervals / 9,184 summaries; OFAC 19,157 (1,516 vessels); UN 1,011; EU 6,017. WPI blocked by an NGA outage — optional per ADR-016. SAR clause amended (ADR-014). NOAA PARKED. |
 | 0.5 | Inspection dashboard v0 (AOI frame, AIS tracks, scene footprints) | 🟡 | Throwaway/ugly by design. Verifies once real AIS + scenes are landing. |
 | 1.0 → 6.3 | Phases 1–6 (synthetic prototype) | 🟡 | Implemented and green on the synthetic suites. Every metric is synthetic-only. |
-| 6.0 → 6.3 | Phase 6 product surface (API + UI + export) | 🟡 | **The M6 demo definition is now fully built** (ADR-024/025): map, ranked findings, plain-English reason, one-click incident report. Sandbox-green and browser-verified; **never run against the real corpus**. |
+| 6.0 → 6.3 | Phase 6 product surface (API + UI + export) | 🟡 | **The M6 demo definition is now fully built** (ADR-024/025): map, ranked findings, plain-English reason, one-click incident report. Sandbox-green and browser-verified; **never run against the real corpus**. Graph opens on the whole network and the scrubber no longer disappears (ADR-027). |
+| — | Imaging opportunities over AIS gaps (`overpass`) | 🟡 | **Not a spec unit** — ADR-026, outside the 0.0–6.3 numbering. The first determination that is ours rather than GFW's. Needs no pixels; joins the 636 landed scene footprints against flagged gaps. Sandbox-green; **never run against the real corpus**. |
 
 **Ingest rework detail (units 0.1 / 0.3 / 0.4), 2026-07-29:**
 
@@ -113,13 +122,30 @@ matching; it is not detection performance. Say that before anyone asks.
 | GFW SAR (gridded + portal CSV) | ⬜ | Upstream offline since 2026-07-03. Both paths degrade cleanly. |
 | Ingest report | ✅ | Prints real counts, date ranges, AOI checks and disk usage. |
 
-**Test tally: 573 passing / 4 skipped / 1 failing in-sandbox, with the scenario
+**Test tally: 594 passing / 4 skipped / 1 failing in-sandbox, with the scenario
 corpus *and* the Phase 1–6 fixtures generated** (was 525 on 2026-08-10). The
 one failure is **pre-existing and newly visible** — see "A latent defect the
 fixtures exposed" below. Sandbox-green ≠
-host-verified — do **not** report this as "525 tests prove it works on real
+host-verified — do **not** report this as "594 tests prove it works on real
 data." Every number the system has ever produced comes from synthetic fixtures
 or fixture-driven tests.
+
+**And the tally is only reproducible with the fixtures built.** A bare checkout
+needs the scenario corpus *and* an undocumented three-step chain before the
+Phase 1–6 tests will run at all:
+
+```
+python -m maritime_isr.cli scenario generate --seed 7
+python tools/run_scenario_pipeline.py
+python tools/make_synthetic_feed_phase2.py
+python tools/make_synthetic_scenes_phase3.py
+python tools/make_synthetic_orgworld_phase4.py
+python tools/run_phase2_synthetic.py   # then 3, 4, 5, and run_phase6_product.py
+```
+
+Each missing prerequisite surfaces as a bare `FileNotFoundError` naming a file,
+so the chain is discovered by walking it. Anyone quoting the tally should say
+which fixtures were present.
 
 *A caveat on that number that matters more than its size:* `test_api_exercise.py`
 and parts of `test_phase6.py` **skip themselves** when no corpus is landed. A
