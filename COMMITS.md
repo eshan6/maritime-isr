@@ -395,3 +395,36 @@ python -m maritime_isr.api                            # open /graph
 how much of the graph is on screen and on what basis the centre was chosen.
 *Failure:* a tab that locks for a minute means `fcose` did not load and it fell
 back to `cose` — check `npm install` ran.
+
+---
+
+## docs: bring every document up to ADR-026/027, and fix a path CLAUDE.md got wrong
+
+No code. An audit of all twelve `.md` files against the tree.
+
+```
+git add *.md data/README.md COMMITS.md
+git commit -m "docs: bring every document up to ADR-026/027"
+```
+
+**The one that mattered most:** CLAUDE.md named the fusion core `fuse/` in three
+places — twice in invariant 5 and once in the layout. The code is in `fusion/`;
+`maritime_isr/fuse/` is an **empty package with a 0-byte `__init__.py` that
+nothing imports**. CLAUDE.md is read on every invocation, so this was the
+highest-leverage inaccuracy in the repo. Corrected, with the dead package named
+so nobody puts code in it.
+
+Also landed: ADR-027 (what the operator sees first, and what it may imply);
+GLOSSARY entries for imaging opportunity, reachable region, scene footprint,
+speed bound, degree and ended relationship; ARCHITECTURE §5 derived-table list,
+§6 overpass in the layer chain, §6a the cheap-endpoint and two-graph-read-shapes
+rules; the stale test tally (525 → 594) plus the undocumented fixture chain the
+tally depends on; and a pointer in the execution spec to capability built
+outside its 0.0–6.3 numbering.
+
+Verify by reading, but the claims were checked against the tree:
+
+```
+wc -c maritime_isr/fuse/__init__.py                 # 0
+grep -rn "maritime_isr.fuse\b" maritime_isr/ tests/ # no importers
+```

@@ -47,7 +47,7 @@ production capability.
 maritime_isr/
   ingest/    connectors — one module per data source
   process/   SAR preprocessing, ship detection, track building, features
-  fuse/      association engine + dark-vessel logic (the fusion core)
+  fusion/    association engine + dark-vessel logic (the fusion core)
   graph/     object graph: ontology, edges, event engine, confidence decay
   rules/     anomaly library + risk scoring
   eval/      the permanent evaluation harness
@@ -194,6 +194,9 @@ token (`X-API-Token`, default `maritime-isr-dev`, override with `MISR_API_TOKEN`
 | `/api/events`, `/api/events/density` | event rows; per-H3-cell counts over the whole corpus |
 | `/api/detections` | SAR radar contacts |
 | `/api/tracks`, `/api/scenes`, `/api/ports`, `/api/stats` | map layers and headline figures |
+| `/api/corpus-window` | just the corpus time span — the map scrubber's only dependency, split out of `/stats` so it is not queued behind the slow calls |
+| `/api/graph/all` | every current relationship as one web, most-connected core first, with `truncated` + totals |
+| `/api/graph/seeds` | vessels worth opening the graph on, ranked by degree |
 
 Interactive docs at `/docs`. Every vessel/edge payload carries `is_synthetic`
 and the provenance envelope; every count returns `{real, synthetic}` separately.
@@ -213,8 +216,18 @@ The five views:
 - **Alerts** — a short, high-signal queue; each alert's evidence chain as
   labelled hops, with confirm/watch/dismiss that persist.
 - **Vessels** — a sortable, filterable table.
-- **Graph** — seed-and-expand from one vessel, one hop per click, never a
-  hairball.
+- **Graph** — opens on the **whole network**: every current relationship drawn
+  as one web, framed on the most-connected sanctioned vessel (falling back to
+  the most-connected vessel, then any node). The panel states how much of the
+  graph is on screen and on what basis the centre was chosen — *"that is where
+  the camera starts, not a finding"*. **Dashed links are relationships that have
+  ended**; solid ones are current. Seed a vessel to drop into the older
+  seed-and-expand mode, one hop per click.
+
+  The web is capped at 1,500 nodes and the panel says so with both totals when
+  it truncates. That is a **rendering** limit, not a data limit: the real corpus
+  graph is an estimated ~19,000 nodes and no in-browser force layout will draw
+  it. Ranking is by **degree**, which is connectedness and not risk.
 
 **The export** is on every findings row and every vessel panel. It downloads a
 **self-contained HTML incident report** — no external assets, so it reads the
@@ -235,6 +248,12 @@ cd frontend && npm install
 npm run dev            # localhost:5173, proxies /api to 127.0.0.1:8000
 npm run build          # rebuild dist/ — commit it so the Python-only path updates
 ```
+
+> ⚠ **`npm install` is not optional after pulling.** The Graph view depends on
+> `cytoscape-fcose`, added 2026-08-13. Cytoscape's built-in `cose` layout was
+> measured at **115 seconds** on 1,409 nodes — a hung tab, not a slow render —
+> against roughly 6.5 s for `fcose`. A `git pull` alone leaves the dependency
+> missing and `npm run build` fails.
 
 ### Verifying against real data
 

@@ -192,6 +192,22 @@ maritime_isr/
 
 ---
 
+## Built outside this numbering (read `STATE.md` for status, not this file)
+
+This spec is the build contract for units 0.0–6.3. Some capability has since
+been built that is **not a unit** and therefore has no exit test here. It is not
+undocumented — it is in `DECISIONS.md` and `STATE.md` — but a reader treating
+this file as the complete plan of record would miss it:
+
+- **Imaging opportunities over AIS gaps** (`maritime-isr overpass`, ADR-026) —
+  which flagged gaps a Sentinel-1 pass could have imaged, from the landed scene
+  catalogue and the gap endpoints. Needs no pixels, no SNAP and no detector, so
+  it sits outside the Phase 1 chain entirely.
+- **Direct sanctions matching** (ADR-016a) — replaced the roadmap's ownership
+  traversal on free data, and amends the Phase 4 exit criterion.
+- **The whole-network Graph view and the demo loading fixes** (ADR-027) — Phase
+  6 surface work past what 6.2 specifies.
+
 ## Deferred (stubs exist, no build until funded/justified)
 - Spire satellite AIS (connector interface from 2.2) — the one paid feed
 - VIIRS night-lights, Sentinel-2 optical (free — first Phase 7 connectors, prove the "connector not rewrite" claim)

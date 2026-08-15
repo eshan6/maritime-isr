@@ -273,6 +273,18 @@ pull — a few thousand scene records for 8 weeks over the AOI.
 to the actual satellite pass that produced it, which gives us (a) the *time* a
 patch of ocean was genuinely observed, and (b) the ability to distinguish "no
 detection because nothing was there" from "no detection because nothing looked."
+
+**It now has a consumer, and it needed no pixels** (ADR-026, 2026-08-13). The
+636 landed footprints are joined against GFW's flagged AIS gaps to answer *"was
+anyone watching?"* — for each gap, whether a Sentinel-1 pass covered the area
+the vessel must have been inside while it was dark. This is point (b) above,
+delivered: `maritime-isr overpass`, landing `sar_imaging_opportunity`.
+
+It also turns this catalog into a **shopping list**: every opportunity names a
+scene id whose download would resolve a concrete question about a specific hull,
+which is a far better argument for spending the disk budget than "SAR would be
+nice". Expect mostly *partial* coverage — at 20 kn a vessel's reachable area
+exceeds one ~250 km footprint about four hours into a gap.
 That distinction is the difference between a real dark-vessel finding and a
 coverage artefact.
 

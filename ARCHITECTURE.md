@@ -143,6 +143,21 @@ itself forbids an edge without provenance/confidence/time-scope.
 Partition scheme keys on time and AOI so DuckDB queries prune to the relevant
 files instead of scanning everything.
 
+**Two stores that are not Parquet, and both catch people out.** The Sentinel-1
+**scene catalog** is a real DuckDB table in `misr.duckdb`, not a Parquet view,
+because its `status` column is mutable (cataloged → raw → calibrated →
+detected). The **object graph** is SQLite (`graph.sqlite`). Anything reading
+either goes through `db.py` / `graph_service.py` rather than the conformed glob.
+
+**Derived tables landed by enrichment**, alongside the connector outputs, all
+carrying the full provenance envelope and landed through the same
+`landing.land_table` path:
+
+| Table | Written by | Natural key |
+|---|---|---|
+| `sanctioned_vessel_matches` | `ingest/sanctions_match.py` (ADR-016a) | vessel_id + registry + ent_num + tier |
+| `sar_imaging_opportunity` | `overpass.py` (ADR-026) | gap_event_id + scene_id |
+
 ---
 
 ## 6. How each layer consumes the previous one
@@ -168,6 +183,14 @@ files instead of scanning everything.
   self-building static-object layer (rigs, buoys, wrecks — accumulated from
   repeated same-position detections), (3) size above the detectability floor with
   margin. Survivors get a dark score and enter alerts.
+- **Overpass geometry consumes the scene catalog + AIS gaps** → imaging
+  opportunities (`sar_imaging_opportunity`). Sits outside the phase chain: it
+  joins two *landed* sources and needs no preprocessing, no detector and no
+  pixels. For each flagged gap it intersects the vessel's reachable region at
+  each satellite pass time with that scene's footprint, grading the result
+  `confirmed` / `partial` / `none` / `unknown`. **It is the only determination
+  in the product that is ours rather than a third party's**, and it claims
+  nothing beyond where a satellite was pointed — see ADR-026 and §7.
 - **Graph (4.x) consumes everything** → persistent Vessel/Organization/Port
   entities and the edges between them, each provenance- and time-stamped.
 - **Rules + risk (5.x) consume the graph** → anomaly alerts and a decomposable
@@ -198,6 +221,32 @@ Two things the serving layer must never do, both enforced by tests:
   gaps, the sanctions registries decided the designations, and *ours* is the
   identity match between them. Both the findings API and the exported report
   carry that attribution as a field, not as prose someone might drop.
+
+**Cheap endpoints exist because request order is a feature.** A browser opens
+about six connections per origin, so an eighth request waits. The map's time
+scrubber took its window from `/api/stats`, which scans every event table,
+groups the sanctions matches, counts scenes, measures length coverage *and*
+walks the graph — and it was requested last, behind `/api/tracks` at a measured
+3.06 s. `/api/corpus-window` returns the same two aggregates alone, is requested
+first, and is cached for the session because a corpus window cannot change while
+the process is up. **Any new view-critical field should get the same treatment
+rather than being folded into `/stats`.**
+
+**The graph has two read shapes and they are not interchangeable.**
+`/api/vessels/{id}/neighbourhood` is seed-and-expand for one hull.
+`/api/graph/all` is the whole web — every current relationship, most-connected
+core first, capped at `FULL_GRAPH_MAX_NODES` (1,500). The cap is a rendering
+limit, not a data limit: the real corpus graph is an estimated ~19,000 nodes,
+and cytoscape's built-in `cose` layout was measured at **115 s** on 1,409 nodes
+before the frontend moved to `fcose` (~6.5 s). Because the web is nearly always
+a subset, the payload carries `total_nodes`, `total_edges` and `truncated`, and
+**the UI is required to state them** — a partial web that looks whole is how a
+viewer concludes the dataset is sparser than it is.
+
+`/api/graph/all` and `/api/graph/seeds` both rank by **degree**, which is a
+presentation choice and changes no stored fact. The focus node it returns
+carries a `focus_basis` sentence for the same reason the findings table carries
+`basis`: a centred node must not read as a verdict.
 
 **Two read paths over the same events, deliberately.** `/api/events` returns
 rows and is capped — so it reports `truncated` per kind with the true total,
