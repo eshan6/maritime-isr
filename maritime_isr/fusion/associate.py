@@ -38,11 +38,35 @@ import pandas as pd
 from scipy.optimize import linear_sum_assignment
 
 from ..config import (ASSOC_AMBIGUITY_MARGIN, ASSOC_GATE_BUFFER_M,
-                      ASSOC_MAX_TRACK_AGE_H, ASSOC_SCORE_FLOOR)
+                      ASSOC_MAX_TRACK_AGE_H, ASSOC_SCORE_FLOOR,
+                      ASSOC_SIGMA_REF_M)
 from .. import h3util as tiling
 
-SIGMA_MEAS_M = 60.0        # SAR geolocation + smoothing residual
+SIGMA_MEAS_M = 60.0        # SAR geolocation + smoothing residual — the DEFAULT
 LENGTH_REL_SIGMA = 0.25    # SAR length estimate ~18% + registry slop
+
+
+def _sigma_of(contact: dict, default: float = SIGMA_MEAS_M) -> float:
+    """This contact's own 1-σ position error, if it reports one.
+
+    **A module constant was the right shape while SAR was the only contact
+    source and is the wrong shape now (ADR-028).** Sentinel-1 geolocation is
+    essentially uniform across a scene, so one number covered it. A coastal
+    radar plot's accuracy is dominated by cross-range error, which grows
+    linearly with range: the same target is good to ~45 m at 10 km and ~220 m at
+    50 km from the station. Gating both at 60 m throws away half the radar
+    picture at range and gates far too tightly at short range.
+
+    So the observation carries its accuracy and the gate reads it. A contact
+    that reports nothing gets the default, which is exactly the previous
+    behaviour — no existing SAR call site changes.
+    """
+    v = contact.get("position_sigma_m")
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return default
+    return v if v > 0.0 and math.isfinite(v) else default
 
 
 def _hav_m(lat1, lon1, lat2, lon2):
@@ -57,7 +81,14 @@ KN = 0.514444
 
 
 def _gate(contact, tracks, t_s: float):
-    """Candidate (track, predicted_state, distance, radius) tuples.
+    """Candidate (track, predicted_state, distance, radius, sigma_pos) tuples.
+
+    `sigma_pos` is the **physical** 1-σ on "where is this track right now" —
+    the capped uncertainty cone converted from a 95% radius, combined with the
+    contact's own measurement error. It is returned separately from the gate
+    radius because the two are used for different things and conflating them
+    was a defect (see `_score`): the gate says what is worth considering, the
+    sigma says how much a given agreement is worth.
 
     Gate radius = min(Kalman 95% radius, effective-speed cone) + buffer,
     where the effective-speed cone is 2.5× the vessel's recent smoothed
@@ -70,15 +101,16 @@ def _gate(contact, tracks, t_s: float):
         ocean and manufactures ambiguity. A merchant doing 12 kn does not
         teleport at 60; if it truly sprinted, the unmatched contact is the
         safer error under the precision-first posture."""
+    sigma = _sigma_of(contact)
     out = []
     for tr in tracks:
-        t_last = tr.points["ts"].max().timestamp()
-        t_first = tr.points["ts"].min().timestamp()
-        if t_s < t_first - 3600 or t_s - t_last > ASSOC_MAX_TRACK_AGE_H * 3600:
+        # `t_first`/`t_last` are cached on the track. They used to be
+        # `tr.points["ts"].max()` — a pandas reduction over the whole frame,
+        # evaluated once per (contact, track) pair. At SAR volumes that is
+        # invisible; a radar correlation run makes millions of these calls and
+        # it dominated everything else by two orders of magnitude.
+        if t_s < tr.t_first - 3600 or t_s - tr.t_last > ASSOC_MAX_TRACK_AGE_H * 3600:
             continue
-        if not hasattr(tr, "_pt_epochs"):
-            tr._pt_epochs = np.sort(
-                tr.points["ts"].map(pd.Timestamp.timestamp).to_numpy())
         k = int(np.searchsorted(tr._pt_epochs, t_s, side="right")) - 1
         dt_anchor = (t_s - tr._pt_epochs[k]) if k >= 0 \
             else (tr._pt_epochs[0] - t_s)
@@ -87,34 +119,104 @@ def _gate(contact, tracks, t_s: float):
         la, lo = st.latlon
         d = _hav_m(contact["lat"], contact["lon"], la, lo)
         v_eff = (2.5 * max(st.sog_kn, 2.0) + 5.0) * KN
-        r = min(st.uncertainty_radius_m(t_s), v_eff * dt_anchor) \
-            + 3 * SIGMA_MEAS_M + ASSOC_GATE_BUFFER_M
+        r95 = min(st.uncertainty_radius_m(t_s), v_eff * dt_anchor)
+        r = r95 + 3 * sigma + ASSOC_GATE_BUFFER_M
         if d <= r:
-            out.append((tr, st, d, r))
+            # The error budget for "where is this track now", in quadrature:
+            #
+            #   * r95/2.4477 — the prediction cone as a 1-σ. A 95% radius for a
+            #     2-D Gaussian is 2.4477σ.
+            #   * sigma      — the contact's own measurement error.
+            #   * BUFFER/2.4477 — everything neither of those models. The gate
+            #     has always added `ASSOC_GATE_BUFFER_M` for exactly this
+            #     reason: the Kalman covariance on a *smoothed* track is
+            #     optimistic, and a vessel does not follow the constant-velocity
+            #     model it was fitted with. Omitting it here made the score
+            #     demand agreement to ~60 m and rejected a legitimate 700 m
+            #     match in the Phase 3 regression suite — the term belongs in
+            #     the budget, not only in the gate.
+            sigma_pos = math.sqrt((r95 / 2.4477) ** 2 + sigma ** 2
+                                  + (ASSOC_GATE_BUFFER_M / 2.4477) ** 2)
+            out.append((tr, st, d, r, sigma_pos))
     return out
 
 
-def _length_compatible(contact, mmsi: int, registry: dict[int, float]) -> bool:
+def _length_rel_sigma(contact: dict, default: float = LENGTH_REL_SIGMA) -> float:
+    """How much to trust this contact's length estimate, relatively.
+
+    A SAR contact's length comes from its pixel extent and is good to ~18%. A
+    radar contact's comes from radar cross-section, which fluctuates several dB
+    look to look — a single plot is worth a size *class*, and a long track's
+    median is worth rather more because the fluctuation averages down. The
+    sensor is the one that knows which it has, so it says so on the row; the
+    gate reads it rather than assuming SAR.
+    """
+    v = contact.get("length_rel_sigma")
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return default
+    return v if v > 0.0 and math.isfinite(v) else default
+
+
+def _length_compatible(contact, mmsi: int | None,
+                       registry: dict[int, float]) -> bool:
     """HARD length gate: a 60 m contact is not a 200 m merchant, however
     close the positions. Soft penalties don't cut it — measured on the
     synthetic suite, rigs matched passing merchants because a -4 length
     penalty never reached the -8 floor. 2.5σ at 25% relative σ tolerates
-    the ~18% SAR length noise with room to spare."""
-    reg_len = registry.get(mmsi)
+    the ~18% SAR length noise with room to spare.
+
+    A track with no identity has no registry length, so this gate cannot fire
+    for it and returns True — the same answer it has always given for a vessel
+    the registry does not know. That is the correct conservative behaviour: an
+    unknown length disqualifies nothing.
+    """
+    reg_len = registry.get(mmsi) if mmsi is not None else None
     if not reg_len or not contact.get("length_m"):
         return True                      # unknown length can't disqualify
-    return abs(contact["length_m"] - reg_len) / reg_len <= 2.5 * LENGTH_REL_SIGMA
+    return (abs(contact["length_m"] - reg_len) / reg_len
+            <= 2.5 * _length_rel_sigma(contact))
 
 
-def _score(contact, tr, st, d: float, r_gate: float,
+def _score(contact, tr, st, d: float, sigma_pos: float,
            registry: dict[int, float], t_s: float) -> float:
-    # position: gaussian against the effective gate cone (σ = r/2.45, floored)
-    sigma = max(r_gate / 2.4477, 150.0)
-    s = -0.5 * (d / sigma) ** 2
+    """Log-likelihood-ratio of "this contact is this track" against "it isn't".
+
+    **The normalisation term was missing, and its absence was the single
+    largest defect this build found (ADR-028).** The score used to be
+    `-0.5·(d/σ)²` with `σ` taken from the *gate radius*. That makes the score
+    permissive in exact proportion to how little is known: a track whose last
+    AIS report is twelve hours old has an uncertainty cone ~900 km wide, so σ
+    came out at ~360 km, so a contact **186 km away** scored −0.13 — nowhere
+    near the −8 floor, and it matched. Measured on the radar picture: matches
+    at 36 km, 61 km, 77 km, 131 km and 187 km, every one of them a real dark
+    vessel being explained away by a transmitting ship on the other side of the
+    Gulf of Kachchh. The wider the ignorance, the more confident the match.
+    That is backwards, and it never showed on the SAR path because the entire
+    synthetic SAR corpus is six contacts placed beside fresh AIS tracks.
+
+    A proper 2-D Gaussian log-density is `−ln(2πσ²) − d²/2σ²`. The first term
+    is the *volume* normalisation — the price of searching a large area — and
+    dropping it makes a large search free. Restoring it, rescaled against a
+    reference precision so the numbers stay on the existing floor's scale:
+
+        s = −½(d/σ)² − 2·ln(σ / σ_ref)
+
+    At σ = σ_ref the second term vanishes and the behaviour is exactly what it
+    was, which is why the well-constrained SAR case is unchanged. At σ = 360 km
+    it is −15, below the −8 floor whatever the distance, so a twelve-hour-stale
+    track can no longer explain anything. That is the precision-first answer: a
+    hypothesis compatible with half the ocean is not evidence, and declining to
+    match is what leaves the contact available to be called dark.
+    """
+    sigma = max(sigma_pos, _sigma_of(contact))
+    s = -0.5 * (d / sigma) ** 2 - 2.0 * math.log(sigma / ASSOC_SIGMA_REF_M)
     # length: only when the registry knows this vessel
-    reg_len = registry.get(tr.mmsi)
+    reg_len = registry.get(tr.mmsi) if tr.mmsi is not None else None
     if reg_len and contact.get("length_m"):
-        rel = (contact["length_m"] - reg_len) / (LENGTH_REL_SIGMA * reg_len)
+        rel = (contact["length_m"] - reg_len) / (
+            _length_rel_sigma(contact) * reg_len)
         s += -0.5 * rel ** 2
     # historical presence: this vessel has been in this cell before
     cell = tiling.cell(contact["lat"], contact["lon"])
@@ -156,8 +258,8 @@ def associate_scene(scene: dict, tracks: list, registry: dict[int, float],
     cost = np.full((n_c, n_t + n_c), BIG)
     scores = {}
     for i, cs in enumerate(cand):
-        for tr, st, d, r in cs:
-            sc = _score(contacts[i], tr, st, d, r, registry, t_s)
+        for tr, st, d, r, sig in cs:
+            sc = _score(contacts[i], tr, st, d, sig, registry, t_s)
             scores[(i, tr.track_id)] = (sc, tr, st, d)
             cost[i, tix[tr.track_id]] = -sc
         cost[i, n_t + i] = -ASSOC_SCORE_FLOOR          # the "no match" option

@@ -323,6 +323,44 @@ where it reappeared, and how long it was silent, could a Sentinel-1 pass have
 photographed it?* Bounding vessel speed gives the area it must have been inside
 at the moment of each pass; that area is compared against the scene footprint.
 
+**3c. Coastal radar, and the first dark contacts (no download, ADR-028).**
+
+```bash
+maritime-isr scenario generate               # includes the simulated radar picture
+maritime-isr radar correlate                 # radar <-> AIS, then the dark contacts
+```
+
+A coastal radar station reports *where* and *how fast*, and never *who*. That
+absence is the point: a radar track that no AIS broadcast explains is a
+candidate dark vessel, and unlike the satellite path this needs no imagery.
+
+**We have no radar feed.** The Indian Coast Guard's Coastal Surveillance
+Network is theirs and nothing comparable is public for these waters, so the
+picture here is **simulated** — sixteen stations on real coastline, detection
+decided by signal-to-noise against the radar horizon, terrain shadows, an
+outage, sea clutter and four real fixed installations. Crucially it is generated
+from the *same vessel truth* the synthetic AIS is emitted from, so a hull that
+appears on radar and not on AIS is one ship with her transponder off rather than
+two separate fabrications. It lands through a real connector into the same
+table a real feed would use, flagged synthetic.
+
+Measured on that picture: **precision 100%, recall 50%** — four dark contacts,
+none of them wrong, four of eight findable dark episodes found. The number that
+is *not* flattering is reported too: radar-to-AIS correlation resolves about one
+radar track in nine, and the likely cause is how sparsely the generator lands
+AIS from anchored vessels rather than the matching itself (STATE.md,
+OQ-radar-1).
+
+One sentence this earns and one it does not, stated plainly: *"that contact is
+on radar and nothing is broadcasting there"* works. *"Here is where its
+transponder went quiet"* is computed for 77 tracks and reaches the alert queue
+for none of them — see ADR-028 and STATE.md for why, and what the next fix is.
+
+Building this tested the architecture's central claim — that a new sensor is a
+connector and not a rewrite — and found **four places the core silently assumed
+AIS**, plus one association defect that had been latent on the satellite path
+since Phase 3. ADR-028 has all five.
+
 It is the first determination in this system that is **ours** rather than a
 third party's — and it is strictly a statement about **where a satellite was
 pointed**. We hold scene metadata, not imagery, so nothing has been examined and

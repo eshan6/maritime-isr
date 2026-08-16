@@ -27,6 +27,14 @@ NODE_TYPES_V1 = [
     "vessel", "organization", "person", "port", "voyage", "encounter",
     "detection", "track", "alert", "sensor", "identity", "flag_state",
     "sanctions_authority",
+    # A sensed target with no broadcast identity — a coastal-radar track that
+    # nothing on AIS explains (ADR-028). Deliberately NOT a `vessel`: it is
+    # almost certainly one, but the graph's job is to record what is known, and
+    # what is known here is that something of roughly this size was at these
+    # positions. Promoting it to a vessel node the moment it appears would put
+    # an unnamed hull in the same keyspace as identified ships and let a
+    # neighbourhood query return it as if it had a registry entry.
+    "contact",
 ]
 
 # name -> dict(src=[...], dst=[...], half_life_days=float|None, kind=state|event)
@@ -37,12 +45,23 @@ EDGE_TYPES_V1: dict[str, dict] = {
                           half_life_days=270.0, kind="state"),
     "flagged-to":    dict(src=["vessel"], dst=["flag_state"],
                           half_life_days=730.0, kind="state"),
-    "docked-at":     dict(src=["vessel"], dst=["port"],
+    # `contact` appears on the source side of the three sensed-behaviour edges
+    # below. A radar contact demonstrably docks, meets and is detected; what it
+    # cannot do is own, be flagged, or be sanctioned, because all three of those
+    # are assertions about an identity it does not have.
+    "docked-at":     dict(src=["vessel", "contact"], dst=["port"],
                           half_life_days=2.0, kind="state"),
-    "met-with":      dict(src=["vessel"], dst=["vessel"],
+    "met-with":      dict(src=["vessel", "contact"], dst=["vessel", "contact"],
                           half_life_days=None, kind="event"),
-    "detected-by":   dict(src=["detection"], dst=["sensor"],
+    "detected-by":   dict(src=["detection", "contact"], dst=["sensor"],
                           half_life_days=None, kind="event"),
+    # The radar↔AIS correlation result (ADR-028): this sensed contact and this
+    # hull are the same object, for this interval, with this confidence. It is
+    # an *event* rather than a state because it is a per-interval finding —
+    # a contact correlated for six hours and then not is the whole point, and
+    # a state edge would flatten that into "these are the same ship".
+    "correlates-with": dict(src=["contact"], dst=["vessel"],
+                            half_life_days=None, kind="event"),
     "resolved-from": dict(src=["vessel"], dst=["track", "detection"],
                           half_life_days=None, kind="event"),
     "sanctioned-under": dict(src=["organization", "vessel", "person"],

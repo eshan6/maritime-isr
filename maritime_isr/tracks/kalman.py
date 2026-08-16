@@ -103,24 +103,45 @@ class TrackState:
 
 
 def filter_smooth(times: np.ndarray, lats: np.ndarray, lons: np.ndarray,
-                  noisy: np.ndarray | None = None
+                  noisy: np.ndarray | None = None,
+                  sigma_m: np.ndarray | None = None,
                   ) -> tuple[list[TrackState], np.ndarray]:
     """Forward Kalman filter + Rauch–Tung–Striebel smoother over one segment.
     Returns smoothed states and per-point 1-σ position uncertainty (m).
     `noisy[i]` inflates that report's measurement noise instead of dropping it —
-    raw is immutable, downweighting is the honest treatment."""
+    raw is immutable, downweighting is the honest treatment.
+
+    `sigma_m[i]` supplies the report's **own** 1-σ position error when the
+    sensor reports one. AIS does not — every fix is a GNSS solution of roughly
+    the same quality, which is why `SIGMA_MEAS_M` was a module constant. A
+    coastal radar does: its cross-range error grows linearly with range, so a
+    plot at 40 km is four times worse than the same target at 10 km, and
+    smoothing them as equals throws away the sensor's best information about
+    itself. When given, it overrides the constant; `noisy` still applies on top,
+    so a flagged report is downweighted relative to its own stated accuracy.
+    """
     n = len(times)
     lat0, lon0 = float(lats[0]), float(lons[0])
     zs = np.array([to_local(lats[i], lons[i], lat0, lon0) for i in range(n)])
     if noisy is None:
         noisy = np.zeros(n, bool)
+    if sigma_m is not None:
+        sigma_m = np.asarray(sigma_m, float)
+        # A sensor that reports zero or a NaN accuracy is reporting nothing
+        # useful; fall back rather than divide the filter by zero.
+        sigma_m = np.where(np.isfinite(sigma_m) & (sigma_m > 0.0),
+                           sigma_m, SIGMA_MEAS_M)
+
+    def _r(i: int) -> float:
+        base = SIGMA_MEAS_M if sigma_m is None else float(sigma_m[i])
+        return (base * 10.0 if noisy[i] else base) ** 2
 
     # init: position = first fix, velocity from first pair if available
     x = np.zeros(4)
     x[:2] = zs[0]
     if n > 1 and times[1] > times[0]:
         x[2:] = (zs[1] - zs[0]) / (times[1] - times[0])
-    P = np.diag([SIGMA_MEAS_M ** 2] * 2 + [(5 * KN_TO_MS) ** 2] * 2)
+    P = np.diag([_r(0)] * 2 + [(5 * KN_TO_MS) ** 2] * 2)
 
     xs_f, Ps_f, xs_p, Ps_p = [], [], [], []
     t_prev = times[0]
@@ -128,7 +149,7 @@ def filter_smooth(times: np.ndarray, lats: np.ndarray, lons: np.ndarray,
         dt = times[i] - t_prev
         F = _F(dt)
         xp, Pp = F @ x, F @ P @ F.T + _Q(dt)
-        r = (SIGMA_MEAS_NOISY_M if noisy[i] else SIGMA_MEAS_M) ** 2
+        r = _r(i)
         R = np.diag([r, r])
         S = _H @ Pp @ _H.T + R
         K = Pp @ _H.T @ np.linalg.inv(S)

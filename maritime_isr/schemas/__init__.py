@@ -63,9 +63,18 @@ SANCTIONS_ENTRY = pa.schema([
 
 # ---- Phase 2: track engine schemas ------------------------------------
 # TRACK is the memory the graph is built from (roadmap Phase 2 preamble).
+#
+# `track_source` and `track_key` are the two columns that make this table
+# source-agnostic (ADR-028). `mmsi` stays, and stays null on any track whose
+# sensor does not observe an identity — a radar track has a position and a
+# velocity and no name, and writing a track number into an MMSI column would be
+# a lie a downstream join would believe. `track_key` is the grouping key that
+# always exists: the MMSI for AIS, the station track number for radar.
 TRACK = pa.schema([
     pa.field("track_id", pa.string()),
-    pa.field("mmsi", pa.int64()),
+    pa.field("track_source", pa.string()),     # ais | radar — which sensor saw this
+    pa.field("track_key", pa.string()),        # the grouping key, whatever it is
+    pa.field("mmsi", pa.int64()),              # null unless the sensor observes identity
     pa.field("hypothesis", pa.int32()),        # >0 ⇒ born from duplicate-MMSI splitting
     pa.field("t_start", pa.timestamp("us", tz="UTC")),
     pa.field("t_end", pa.timestamp("us", tz="UTC")),
@@ -78,6 +87,8 @@ TRACK = pa.schema([
 
 TRACK_POINT = pa.schema([
     pa.field("track_id", pa.string()),
+    pa.field("track_source", pa.string()),
+    pa.field("track_key", pa.string()),
     pa.field("mmsi", pa.int64()),
     pa.field("ts", pa.timestamp("us", tz="UTC")),
     pa.field("lat", pa.float64()),             # RTS-smoothed
@@ -127,7 +138,8 @@ ENCOUNTER = pa.schema([
     pa.field("encounter_id", pa.string()),
     pa.field("track_id_a", pa.string()),
     pa.field("track_id_b", pa.string()),
-    pa.field("mmsi_a", pa.int64()),
+    pa.field("track_source", pa.string()),     # ais | radar | mixed
+    pa.field("mmsi_a", pa.int64()),            # null when the sensor has no identity
     pa.field("mmsi_b", pa.int64()),
     pa.field("t_start", pa.timestamp("us", tz="UTC")),
     pa.field("t_end", pa.timestamp("us", tz="UTC")),
@@ -183,6 +195,68 @@ DARK_CANDIDATE = pa.schema([
     *_PROV,
 ])
 
+# ---- Coastal radar (ADR-028) ------------------------------------------
+# One row per track report a coastal station forwards: where a target is, how
+# fast it is going, how big its echo is. There is no identity field and there
+# never will be — that absence is the whole reason radar is interesting, because
+# an unexplained radar track is a candidate dark vessel.
+#
+# `station_id` and the range/bearing pair are kept alongside lat/lon rather than
+# collapsed into it: the position error of a radar plot is a function of its
+# range from the station, and a consumer that only has lat/lon cannot recover
+# how good the position is. `position_sigma_m` is therefore computed at ingest
+# and travels with the row — the fusion gate reads it in preference to any
+# per-sensor default.
+RADAR_TRACK_REPORT = pa.schema([
+    pa.field("report_id", pa.string()),        # deterministic: station|track|ts
+    pa.field("station_id", pa.string()),
+    pa.field("radar_track_id", pa.string()),   # station-assigned, NOT an identity
+    pa.field("ts", pa.timestamp("us", tz="UTC")),
+    pa.field("lat", pa.float64()),
+    pa.field("lon", pa.float64()),
+    pa.field("sog_kn", pa.float64()),
+    pa.field("cog_deg", pa.float64()),
+    pa.field("range_km", pa.float64()),        # from the reporting station
+    pa.field("bearing_deg", pa.float64()),
+    pa.field("position_sigma_m", pa.float64()),# 1-σ at this range/bearing
+    pa.field("rcs_dbsm", pa.float64()),        # radar cross-section, dB m²
+    pa.field("length_est_m", pa.float64()),    # coarse size FROM RCS, not measured
+    pa.field("snr_db", pa.float64()),
+    pa.field("track_quality", pa.int32()),     # station's own 0-100 confidence
+    pa.field("h3_cell", pa.string()),
+    *_PROV,
+])
+
+# One row per radar track: did anything on AIS explain it, and if it stopped
+# being explained, when and where. This is the table the headline claim is read
+# from — "that contact is on radar and nothing is broadcasting there".
+RADAR_CORRELATION = pa.schema([
+    pa.field("correlation_id", pa.string()),
+    pa.field("radar_track_id", pa.string()),
+    pa.field("track_id", pa.string()),         # OUR radar track id (post track engine)
+    pa.field("station_ids", pa.string()),      # comma-joined contributing stations
+    pa.field("t_start", pa.timestamp("us", tz="UTC")),
+    pa.field("t_end", pa.timestamp("us", tz="UTC")),
+    pa.field("n_epochs", pa.int64()),          # correlation attempts made
+    pa.field("n_matched", pa.int64()),
+    pa.field("status", pa.string()),           # correlated | correlated_then_dark
+                                               # | dark | ambiguous | transient
+    pa.field("ais_track_id", pa.string()),     # the AIS track that explains it
+    pa.field("mmsi", pa.int64()),
+    pa.field("support", pa.float64()),         # fraction of epochs won by that track
+    pa.field("mean_position_error_m", pa.float64()),
+    pa.field("length_est_m", pa.float64()),    # median over the track's plots
+    pa.field("went_dark_at", pa.timestamp("us", tz="UTC")),  # null unless it did
+    pa.field("went_dark_lat", pa.float64()),
+    pa.field("went_dark_lon", pa.float64()),
+    pa.field("dark_from", pa.timestamp("us", tz="UTC")),     # start of unmatched run
+    pa.field("dark_to", pa.timestamp("us", tz="UTC")),
+    pa.field("lat", pa.float64()),             # representative dark position
+    pa.field("lon", pa.float64()),
+    pa.field("h3_cell", pa.string()),
+    *_PROV,
+])
+
 # Self-building layer of fixed installations (rigs, buoys, wrecks).
 STATIC_OBJECT = pa.schema([
     pa.field("object_id", pa.string()),
@@ -209,6 +283,8 @@ from .records import (
     Detection,
     DetectionMethod,
     PositionReport,
+    RadarTrackReport,
     SceneCatalogEntry,
     SceneStatus,
 )
+from .sources import AIS, RADAR, SOURCES, TrackSource, source_by_name

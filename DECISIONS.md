@@ -1537,3 +1537,203 @@ and blending those axes builds the number ADR-024 declined to build.
   so neither `setTimeout(0)` nor a double `requestAnimationFrame` runs after the
   commit, and the message was set and never painted while the thread blocked for
   ~5 s. Verified in a browser, not reasoned about.
+
+---
+
+## ADR-028 — Coastal radar is a second sensor, and it found four places the core assumed AIS *(Accepted)*
+**2026-08-16. The first source added since the connector claim was written down.**
+
+**Context.** CLAUDE.md §4.5 makes an architectural promise: *"Every source is a
+connector, never a core change. New data source = new module in `ingest/` that
+maps into the canonical schema. The fusion core must never learn a
+source-specific hack."* That promise had never been tested. Everything positional
+in this system arrived as AIS, and the fusion core, the track engine and the
+anomaly library were all written against it.
+
+Separately, the demo could not tell its own story. Of six detectors, two fired,
+producing one alert on the scenario corpus and zero on real data, because every
+detector reads the track engine and the real corpus contains no AIS position
+tracks. The headline claim — *a contact on radar with nothing broadcasting there
+is a dark vessel* — needed SAR imagery we cannot obtain for this AOI (ADR-017)
+and had never once fired.
+
+The Indian Coast Guard's primary sensor is coastal radar: roughly a hundred
+stations producing tracks with position, course and speed and **no identity**.
+No such feed is available to us. But a radar track is structurally an AIS
+position report minus the identity fields, which makes it the ideal test of the
+connector claim and, simultaneously, the only route to a dark-vessel finding
+that needs no imagery.
+
+**Decision — five parts.**
+
+**(a) Radar is a connector, and the simulated picture lands through it.**
+`ingest/radar.py` maps a station feed into a canonical `radar_track_report`
+table, validated by a pydantic `RadarTrackReport`, stamped with the provenance
+envelope and all five H3 resolutions by the shared helper. `scenario/radar.py`
+produces *feed records* and hands them to that connector, flagged synthetic, so
+the connector is exercised by every scenario run rather than bypassed. A
+parallel path for simulated radar would have proved only that the parallel path
+works (ADR-019's reasoning, applied to a second sensor).
+
+**(b) The picture is derived from the same vessel truth as the AIS.** The
+simulator invents no vessel and no position. It walks `world.tracks` — the
+integrated motion the scenarios already authored — and asks every five minutes
+which coastal station could see that hull and what it would report. Three
+populations fall out with no extra machinery: vessels on both sensors, vessels
+on AIS only (offshore, in shadow, below the horizon, too small), and vessels on
+**radar only** — the finding. Detection is decided by signal-to-noise against
+the radar horizon, so a 12 m dhow disappears at 9 km and a laden VLCC is held to
+48; nobody set those numbers. Sea clutter, terrain shadow sectors, a maintenance
+outage and four real fixed installations are generated too, because a picture
+with uniform circular coverage would make everything unexplained look dark and
+the hardest question in the product — *unexplained, or merely unobserved* —
+would never be asked.
+
+**(c) What the core assumed, stated as a descriptor rather than a branch.**
+`schemas/sources.py` holds a `TrackSource`: the grouping key, whether that key
+is an *identity*, whether the sensor observes *transmission*, its position
+accuracy, its reuse-guard interval. Nothing downstream may say
+`if source == "radar"`; it may ask `if not source.key_is_identity`, which is a
+question about meaning and stays correct when the third sensor arrives.
+
+**(d) Correlation reuses the association engine, epoch by epoch.** The radar
+picture is sliced into 15-minute epochs and each is handed to `associate_scene`
+unmodified — same Hungarian global assignment, same uncertainty-cone gate, same
+score floor. Per-epoch verdicts aggregate onto whole radar tracks, so the answer
+is a *time series* and the transition in it is the product: a track that
+correlates and then stops is a transponder being switched off with a witness.
+Survivors go through the existing `dark_cascade`.
+
+**(e) The claim is enforced by counting, not by association.** "Nothing is
+broadcasting there" is checked as an H3 census: in the contact's own res-7 cell
+and ring, how many radar contacts were seen against how many distinct AIS
+identities were *heard*. More contacts than broadcasters means at least one is
+unexplained whichever way the assignment ran; otherwise none is. This is the
+join CLAUDE.md §3 says the architecture exists to make cheap.
+
+**The findings about the architecture — the point of the exercise.** Four places
+in the core assumed AIS. All four are fixed source-agnostically, and all four
+would have failed *silently*:
+
+1. **`detect_encounters` compared `mmsi_a == mmsi_b` to reject self-pairs.**
+   On radar both are `None`, `None == None` is `True`, so **every radar-to-radar
+   pair was discarded** and the encounter detector could not fire on radar at
+   all. It would have read as "radar sees no rendezvous" — a conclusion, not a
+   bug report. Now keyed on `track_key`, which is always populated; AIS
+   behaviour is unchanged because for AIS the key *is* the MMSI.
+
+2. **The anomaly library resolved every track's subject with
+   `resolve_mmsi(store, tr.mmsi)`.** With `None` that mints `vessel:mmsi:None` —
+   a node that resolves, passes a presence check, and is a different fiction for
+   every radar track. Now `graph.identity.track_subject_id` returns the hull for
+   an identity-bearing track and a `contact:radar:<station>:<n>` node otherwise.
+   A contact is deliberately **not** a vessel node: it is almost certainly one,
+   but what is *known* is that something of roughly this size was at these
+   positions.
+
+3. **`classify_gaps` would have labelled radar dropouts `INTENTIONAL_SILENCE`.**
+   Every label in that taxonomy is a statement about a *broadcast*; a radar gap
+   is the sensor losing contact. It now refuses a non-transmitting source
+   outright, because the failure would have been quiet — the rows would look
+   perfectly ordinary.
+
+4. **The reuse guard was seven days.** Right for an MMSI welded to a hull;
+   catastrophic for a track number a station recycles in minutes. Measured:
+   single "tracks" of **11,829 plots spanning six weeks**, built by merging
+   every target issued the same recycled number, with two vessels 20 km apart
+   fifteen minutes apart implying 52 knots and slipping under the 60-knot
+   hypothesis gate. Now per-source.
+
+**And one defect that was not about radar at all.** The association score was
+`−½(d/σ)²` with `σ` taken from the **gate radius**. A track whose last AIS
+report is twelve hours old has a cone ~900 km wide, so σ came out at ~360 km and
+a contact **186 km away** scored −0.13 — nowhere near the −8 floor. The score was
+permissive in exact proportion to how little was known. Measured on the radar
+picture before the fix: matches at 36, 61, 77, 131 and 187 km, every one of them
+a real dark vessel explained away by a transmitting ship on the other side of
+the Gulf of Kachchh. A 2-D Gaussian log-density is `−ln(2πσ²) − d²/2σ²`; the
+first term is the volume normalisation, dropping it makes a large search free,
+and restoring it (rescaled against `ASSOC_SIGMA_REF_M`, so the well-constrained
+case is numerically unchanged) makes the floor mean something again. **This was
+latent on the SAR path and invisible there**, because the entire synthetic SAR
+corpus is six contacts placed beside fresh AIS tracks.
+
+**Three constants were tuned to SAR and are now parameters**, all defaulting to
+the SAR value so no existing call site changes: the static-object clustering
+radius and resolution (200 m / res 8 is narrower than a coastal radar's own
+error at range, so every fixed installation would have been promoted to a dark
+vessel); the recurrence threshold (3 scenes is right for a six-day revisit and
+produced **58** "installations" on radar, of which 54 were shipping lanes); and
+detection persistence (`min_looks`, a no-op for a single-look sensor).
+
+**Alternatives rejected.** *A `radar/` package parallel to `fusion/`* — rejected:
+it would have made the connector claim unfalsifiable, which is the opposite of
+the point. *Branching on the source name inside the core* — rejected; a `==` on a
+name is a source-specific hack wearing a parameter's clothes. *Moving the
+station network offshore so the existing deep-basin dark scenarios would be
+seen* — rejected: coastal radar is coastal, the offshore transfer basins are 350
+to 450 km out, and generating that away would have measured an easier problem
+than the one claimed. Group R exists instead, inside the belt where a shore
+station can actually see. *Treating a missing AIS gap row as evidence of
+coverage* — rejected: on this corpus the gap classifier emits 26,778 gaps and
+**every one is `COVERAGE_GAP`**, because `INTENTIONAL_SILENCE` needs two
+completed satellite passes and there is no satellite-AIS schedule at all (a
+defect predating this work, recorded in STATE.md). Treating `None` as
+suppressing would have made the check a pure suppressor, able to hide a real
+shutdown and unable ever to confirm one.
+
+**Consequences.**
+
+- **Measured through the landed pipeline: precision 100%, recall 50%** — four
+  of eight findable dark episodes, zero false positives. Above the ADR-004
+  gate. Run in memory against the full vessel registry it is five of eight; the
+  landed figure is lower because `gfw_vessel_identity` carries a usable
+  `length_m` on only 11 of 224 rows after null-masking, so the association's
+  length term is mostly unavailable. **The landed number is the one quoted**,
+  because it is the one the pipeline produces. Every number is synthetic and
+  says nothing about a real CSN feed, which this system has never seen.
+- **Radar↔AIS correlation resolves about one radar track in nine** (108 of 938
+  tracks whose vessel was demonstrably on AIS). This is the weakest number in
+  the build and the honest cause is AIS *receipt* sparsity rather than the
+  algorithm: `primitives/ais.py` thins an anchored vessel's 3-minute transmit
+  interval to roughly one landed report every fifty minutes, and the prediction
+  cone between receipts opens to kilometres. Whether that thinning model is
+  right for a shore receiver is an OPEN QUESTION, not something to retune
+  quietly.
+- Four of the eight findable episodes are missed, and each miss has a name:
+  one to `suppressed_coverage` (the empirical AIS coverage model has no evidence
+  of reception off Diu), three to `suppressed_not_isolated` (the Gulf of
+  Kachchh has as many broadcasters as contacts). Two of the four are second and
+  third episodes of vessels detected on another station's track, so three of
+  the five dark *vessels* in group R are found; `coast_dark_party` is the one
+  missed outright.
+- **A scenario whose finding is a dark contact reads as MISSED in the
+  scenario-level table**, because that table attributes alerts by vessel and a
+  dark contact has no identity to attribute — which is the whole point of it.
+  R1, R2 and R3 are scored in the dark-contact results instead, by position and
+  time. Both tables now say so rather than leaving a reader to reconcile them.
+- **DX7 fires on radar and that is correct.** The naval decoy transits into
+  Mumbai's cover with AIS off; radar sees an unexplained contact and cannot know
+  she is a warship. The radar answer key inherits the product policy that she
+  must never be flagged, marks her `unavoidable_false_positive`, and the
+  measurement reports the class by name — which is the argument for a
+  known-units layer, with a number attached.
+- **The build earns one of its two sentences, not both.** *"That contact is on
+  radar and nothing is broadcasting there"* is delivered: four contacts, all
+  correct. *"Here is where its transponder went quiet"* is **computed and
+  stored and does not reach the queue.** 77 radar tracks come back
+  `correlated_then_dark`, 48 of them carry a `went_dark_at` position and time —
+  and **all 77 are suppressed by the census**, because a track that correlated
+  for most of its life is by construction in water where AIS is heard, so
+  something is broadcasting in its neighbourhood. The two checks are in tension
+  and the census currently wins every time. The obvious next move is to stop
+  counting a track's *own* prior identity as a broadcaster once it has stopped
+  transmitting; that is a change with its own failure modes and it is not being
+  made in passing at the end of a session.
+- The graph gains a `contact` node type and a `correlates-with` edge. A contact
+  may dock, meet and be detected; it may not own, be flagged or be sanctioned,
+  because all three are assertions about an identity it does not have.
+- Two boundaries are now stated with numbers rather than shrugged at: a 12 m
+  hull is detected to about 9 km and works at 25 (R4), and 100 km offshore of
+  the 215 km Mumbai–Ratnagiri stretch nothing has cover at all (R5). The second
+  is an argument for a station, and the system can say where.

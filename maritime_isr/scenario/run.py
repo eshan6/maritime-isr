@@ -26,10 +26,12 @@ import pyarrow.parquet as pq
 from ..config import DATA_ROOT, GRAPH_DB_NAME
 from ..ingest.landing import (conformed_dir, read_table, split_real_synthetic,
                               table_day_partitions)
-from .cast import FISHING_FLEET_SIZE, PRINCIPALS, build_cast
+from .cast import (FISHING_FLEET_SIZE, PRINCIPALS, RADAR_PRINCIPALS,
+                   build_cast)
 from .identifiers import assert_no_collisions
 from .land import ALL_TABLES, land_world
 from .profile import CorpusProfile
+from .radar import format_report as format_radar, generate_radar_picture
 from .scenarios import run_all
 from .truth import TABLE as TRUTH_TABLE
 from .validate import validate_world
@@ -49,7 +51,7 @@ class GenerationResult:
         return self.validation.ok
 
 
-def generate(seed: int = 7, *, land: bool = True,
+def generate(seed: int = 7, *, land: bool = True, radar: bool = True,
              profile_path=None) -> GenerationResult:
     """Build the world, validate it, land it, and re-read what landed.
 
@@ -68,6 +70,15 @@ def generate(seed: int = 7, *, land: bool = True,
     build_cast(world)
     ran = run_all(world)
     world.identity.close_window(world.t1)
+
+    # The radar picture is generated LAST and from nothing but the tracks the
+    # scenarios wrote (ADR-028). It has to be last: it walks every vessel's
+    # completed motion and asks which station could have seen her, so a scenario
+    # that had not run yet would be invisible to it. And it has to be derived
+    # rather than authored, because that is what makes a radar-only contact and
+    # an AIS-only track two views of one ship rather than two fabrications.
+    if radar:
+        world.radar = generate_radar_picture(world)
 
     # Identifier collisions are fatal before anything touches disk. Landing a
     # colliding hull and cleaning up afterwards is not equivalent: the row would
@@ -186,13 +197,18 @@ def format_generation(res: GenerationResult) -> str:
     lines.append(f"  expected to fire: {s['expected_to_fire']}")
     lines.append("")
     lines.append(f"cast          : {len(PRINCIPALS)} principal vessel(s) + "
-                 f"{FISHING_FLEET_SIZE} fishing-fleet vessel(s) "
+                 f"{FISHING_FLEET_SIZE} fishing-fleet vessel(s) + "
+                 f"{len(RADAR_PRINCIPALS)} coastal-radar vessel(s) "
                  f"= {len(w.vessels)} total")
     lines.append("")
 
     lines.append("BUILT (in memory)")
     for k, v in sorted(res.built.items()):
         lines.append(f"  {k:<28}{v:>10,}")
+
+    if w.radar is not None:
+        lines.append("")
+        lines.append(format_radar(w.radar))
 
     lines.append("")
     lines.append("LANDED (read back from disk — this is the real number)")

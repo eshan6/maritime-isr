@@ -38,6 +38,8 @@ from maritime_isr.ingest.landing import (read_table,            # noqa: E402
                                          split_real_synthetic)
 from maritime_isr.scenario.measure import (format_measurement,  # noqa: E402
                                            measure)
+from maritime_isr.scenario.measure_radar import (  # noqa: E402
+    format_radar_measurement, measure_radar)
 
 
 def _hdr(title: str) -> None:
@@ -158,6 +160,106 @@ def run_fusion_stage(df: pd.DataFrame, tracks_out: dict) -> dict:
     return dict(associations=assoc, verdicts=verdicts, statics=statics)
 
 
+def run_radar_stage(tracks_out: dict) -> dict:
+    """Coastal radar: the same track engine, the same fusion core (ADR-028).
+
+    Nothing here is a radar-specific pipeline. `build_tracks` is called with the
+    RADAR source descriptor instead of the AIS one; `correlate_radar` slices the
+    picture into epochs and hands each to `associate_scene`, unmodified; the
+    survivors go through `dark_cascade`, unmodified, with the sensor's own
+    parameters. If any of that had needed a fork, the connector claim in
+    CLAUDE.md §4.5 would be false and this stage would be the proof.
+
+    The coverage model handed to the cascade is the one fitted on **AIS**. That
+    is not an oversight: the question the cascade asks is "would we have heard a
+    transmitter here", and a model fitted on radar answers "does our radar reach
+    here" — same shape, different question, and confusing them would let the
+    radar's own coverage vouch for the AIS network's.
+    """
+    from maritime_isr.fusion.radar_ais import correlate_radar, format_correlation
+    from maritime_isr.schemas.sources import RADAR
+    from maritime_isr.tracks import build_tracks
+
+    rows = read_table("radar_track_report")
+    if not rows:
+        print("  no landed radar_track_report data — the radar picture has not "
+              "been generated, and the dark-contact path has nothing to run on")
+        return dict(correlations=[], verdicts=[], statics=[], radar_tracks=[])
+    real, syn = split_real_synthetic(rows)
+    print(f"  radar_track_report: {len(real):,} real + {len(syn):,} synthetic plot(s)")
+
+    df = pd.DataFrame(rows)
+    df["ts"] = pd.to_datetime(df["ts"], utc=True)
+    df = df.sort_values("ts").reset_index(drop=True)
+
+    t0 = time.time()
+    radar_tracks, radar_spoofs = build_tracks(df, source=RADAR)
+    print(f"  radar tracks : {len(radar_tracks):,} "
+          f"({df['radar_track_id'].nunique():,} station track number(s))")
+    if radar_spoofs:                       # must be empty — see ADR-028
+        print(f"  WARNING: {len(radar_spoofs)} identity spoof event(s) from a "
+              f"sensor that observes no identity — this is a bug")
+
+    registry: dict[int, float] = {}
+    for r in read_table("gfw_vessel_identity"):
+        mmsi, length = r.get("mmsi"), r.get("length_m")
+        if mmsi in (None, "") or length in (None, ""):
+            continue
+        try:
+            registry[int(float(mmsi))] = float(length)
+        except (TypeError, ValueError):
+            continue
+
+    out = correlate_radar(radar_tracks, tracks_out["tracks"],
+                          tracks_out["coverage_model"], registry,
+                          spoof_events=tracks_out["spoof_events"],
+                          ais_gaps=tracks_out["gaps"])
+    print(f"  ({time.time() - t0:.0f}s)")
+    print(format_correlation(out))
+    return dict(correlations=out.correlations, verdicts=out.verdicts,
+                statics=out.statics, radar_tracks=radar_tracks)
+
+
+def run_radar_behaviour(store, radar_tracks: list) -> dict:
+    """Every behavioural detector, over radar-sourced tracks.
+
+    This is the architectural claim under test, and it is the reason the stage
+    exists separately from the alert run: the anomaly library was written
+    against AIS tracks and had never seen a track without an identity. What it
+    must NOT do is crash, invent a hull, or silently produce nothing.
+
+    Alerts land on `contact:radar:<station>:<n>` nodes rather than on vessels,
+    because that is what is known — see `graph.identity.track_subject_id`.
+    """
+    from collections import Counter as _C
+
+    from maritime_isr.anomaly.library import (detect_port_risk,
+                                              detect_sensitive_loitering)
+    from maritime_isr.tracks.features import detect_encounters, extract_features
+
+    if not radar_tracks:
+        print("  (no radar tracks)")
+        return {}
+    feats = [extract_features(tr) for tr in radar_tracks]
+    n_loiter = sum(f["n_loiter_episodes"] for f in feats)
+    n_calls = sum(len(f["port_calls"]) for f in feats)
+    encounters = detect_encounters(radar_tracks)
+    print(f"  extract_features   : {len(feats):,} track(s), "
+          f"{n_loiter:,} loiter episode(s), {n_calls:,} port call(s)")
+    print(f"  detect_encounters  : {len(encounters):,} radar-only encounter(s)")
+
+    loiter = detect_sensitive_loitering(store, radar_tracks,
+                                        source_ref="radar-combined")
+    risk = detect_port_risk(store, radar_tracks, source_ref="radar-combined")
+    print(f"  loitering_sensitive: {len(loiter):,} alert(s)")
+    print(f"  port_risk_propagat.: {len(risk):,} alert(s)")
+    subjects = _C(a["subject"].split(":")[0] for a in store.alerts()
+                  if a["subject"].startswith("contact:"))
+    print(f"  alert subjects that are contacts (not hulls): {dict(subjects)}")
+    return dict(features=feats, encounters=encounters,
+                loitering=loiter, port_risk=risk)
+
+
 def populate_graph() -> tuple[GraphStore, dict]:
     """Phase 4 over the combined corpus — `from_landed.populate`, unmodified."""
     # cfg.data_root, not the hardcoded DATA_ROOT constant — so with
@@ -267,8 +369,14 @@ def main() -> int:
     _hdr("3. Phase 3 — fusion core over the combined corpus")
     fusion_out = run_fusion_stage(df, tracks_out)
 
+    _hdr("3b. coastal radar — the same core, a second sensor (ADR-028)")
+    radar_out = run_radar_stage(tracks_out)
+
     _hdr("4. Phase 4 — graph populated from the landed tables")
     store, _ = populate_graph()
+
+    _hdr("4b. every behavioural detector, over radar-sourced tracks")
+    run_radar_behaviour(store, radar_out["radar_tracks"])
 
     _hdr("5. graph, split real vs synthetic")
     report_graph_split(store)
@@ -278,6 +386,12 @@ def main() -> int:
     connectivity(store)
 
     _hdr("7. Phase 5 — anomaly library")
+    # Radar's dark verdicts join the SAR ones. `detect_dark_vessels` reads a
+    # list of verdict rows and does not ask which sensor produced them, which
+    # is the connector claim holding at the last stage as well as the first.
+    fusion_out = dict(
+        fusion_out,
+        verdicts=[*fusion_out["verdicts"], *radar_out["verdicts"]])
     run_anomalies(store, tracks_out, fusion_out)
 
     _hdr("8. decay over the combined graph")
@@ -300,6 +414,16 @@ def main() -> int:
         print("  (no vessels scored)")
 
     print(format_measurement(measure(store), store=store))
+
+    # The dark-contact measurement is separate from the scenario one and both
+    # are needed: one asks whether the product raised the right alerts about the
+    # right vessels, the other whether the sensor fusion found the unexplained
+    # targets. A system can pass either while failing the other.
+    if radar_out["verdicts"] or radar_out["correlations"]:
+        print()
+        print(format_radar_measurement(
+            measure_radar(radar_out["verdicts"], radar_out["correlations"])))
+
     store.close()
     return 0
 

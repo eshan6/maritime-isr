@@ -221,16 +221,30 @@ def unattributed(store, outcomes: list[ScenarioOutcome]) -> dict:
     per_type: dict[str, int] = {}
     per_vessel: dict[str, int] = {}
     total = 0
+    unnameable = 0
     for a in store.alerts():
         eid = aliases.get(a["subject"], a["subject"])
         if eid in truth_entities:
+            continue
+        # **An alert on a thing with no identity is not a false positive.**
+        # A dark contact is, by construction, a target nobody can name — that
+        # is what makes it a finding. This function attributes alerts to
+        # scenarios *by vessel*, so it cannot see one, and counting it as
+        # "background traffic an analyst would open for nothing" reads as the
+        # opposite of what happened: on the run this was written for, four of
+        # the five were correct detections of genuinely dark vessels.
+        #
+        # They are counted separately and scored properly by
+        # `measure_radar`, against position and time rather than identity.
+        if str(a["subject"]).startswith(("detection:", "contact:")):
+            unnameable += 1
             continue
         total += 1
         atype = a.get("anomaly_type") or "?"
         per_type[atype] = per_type.get(atype, 0) + 1
         per_vessel[eid] = per_vessel.get(eid, 0) + 1
     return dict(total=total, by_type=per_type,
-                n_vessels=len(per_vessel),
+                n_vessels=len(per_vessel), unnameable=unnameable,
                 worst=sorted(per_vessel.items(), key=lambda kv: -kv[1])[:5])
 
 
@@ -318,6 +332,12 @@ def format_measurement(outcomes: list[ScenarioOutcome], store=None) -> str:
                      f"{d['tp']:>5}{d['fn']:>5}{d['fp']:>5}{d['tn']:>5}")
 
     lines.append("")
+    lines.append("A scenario whose finding is a DARK CONTACT reads as MISSED "
+                 "here and may not be: this table")
+    lines.append("attributes alerts by vessel, and a dark contact has no "
+                 "identity to attribute. See the dark-contact")
+    lines.append("results for those — R1, R2 and R3 are scored there.")
+    lines.append("")
     lines.append(f"{'id':<7}{'class':<17}{'outcome':<26}{'alerts':>7}  fired")
     for o in outcomes:
         lines.append(f"{o.scenario_id:<7}{o.truth_class:<17}"
@@ -345,6 +365,14 @@ def format_measurement(outcomes: list[ScenarioOutcome], store=None) -> str:
         lines.append("  Scenario-level precision cannot see these: there is no "
                      "decoy to score them against. An analyst would still open "
                      "every one.")
+        if u.get("unnameable"):
+            lines.append("")
+            lines.append(
+                f"  {u['unnameable']} further alert(s) landed on a contact or "
+                f"detection with NO identity. Those are NOT counted above: a "
+                f"dark contact is a target nobody can name, which is what makes "
+                f"it a finding, and attribution here is by vessel. They are "
+                f"scored by position and time in the dark-contact results.")
 
     lines.append("")
     lines.append("These are SYNTHETIC-SUITE numbers. They say nothing about "

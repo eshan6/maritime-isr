@@ -211,6 +211,100 @@ def cmd_dark_vessels(args):
               f"{r.status}  scene={r.scene_id}")
 
 
+def cmd_radar(args):
+    """Coastal radar: correlate the picture against AIS, and report.
+
+    `maritime-isr radar correlate` runs the whole radar path over whatever is
+    landed and prints the correlation and dark-contact summary. It writes
+    nothing: this is a measurement over a corpus that already exists, and
+    publishing fusion outputs would put derived rows in the conformed layer
+    that the next run would read back.
+    """
+    import pandas as pd
+
+    from .fusion.radar_ais import correlate_radar, format_correlation
+    from .ingest.landing import read_table, split_real_synthetic
+    from .ingest.radar import TABLE as RADAR_TABLE
+    from .schemas.sources import AIS, RADAR
+    from .tracks import build_tracks
+    from .tracks.coverage import CoverageModel, classify_gaps
+
+    rad = read_table(RADAR_TABLE)
+    if not rad:
+        print(f"no landed {RADAR_TABLE} data — generate the scenario corpus "
+              f"(`maritime-isr scenario generate`) or land a station feed "
+              f"(`maritime-isr ingest radar --path <file>`)", file=sys.stderr)
+        return 1
+    pos = read_table("ais_position")
+    if not pos:
+        print("no landed ais_position data — radar cannot be correlated "
+              "against nothing, and every contact would be 'dark' by "
+              "construction", file=sys.stderr)
+        return 1
+
+    real_r, syn_r = split_real_synthetic(rad)
+    real_a, syn_a = split_real_synthetic(pos)
+    print(f"radar_track_report : {len(real_r):,} real + {len(syn_r):,} synthetic")
+    print(f"ais_position       : {len(real_a):,} real + {len(syn_a):,} synthetic")
+
+    dfa = pd.DataFrame(pos)
+    dfa["ts"] = pd.to_datetime(dfa["ts"], utc=True)
+    for col, default in (("sog_kn", 0.0), ("cog_deg", 0.0), ("receiver", "")):
+        if col not in dfa.columns:
+            dfa[col] = default
+    dfa = dfa.sort_values("ts").reset_index(drop=True)
+    dfr = pd.DataFrame(rad)
+    dfr["ts"] = pd.to_datetime(dfr["ts"], utc=True)
+    dfr = dfr.sort_values("ts").reset_index(drop=True)
+
+    ais_tracks, spoofs = build_tracks(dfa, source=AIS)
+    radar_tracks, _ = build_tracks(dfr, source=RADAR)
+    model = CoverageModel(dfa["ts"].min().timestamp()).fit(dfa)
+    spoof_win: dict[int, list] = {}
+    for s_ in spoofs:
+        if s_["event_type"] == "DUPLICATE_MMSI":
+            spoof_win.setdefault(s_["mmsi"], []).append(
+                (s_["t_start"].timestamp(), s_["t_end"].timestamp()))
+    gaps = []
+    for tr in ais_tracks:
+        gaps.extend(classify_gaps(tr, model, spoof_win.get(tr.mmsi)))
+
+    registry: dict[int, float] = {}
+    for r in read_table("gfw_vessel_identity"):
+        m, L = r.get("mmsi"), r.get("length_m")
+        if m in (None, "") or L in (None, ""):
+            continue
+        try:
+            registry[int(float(m))] = float(L)
+        except (TypeError, ValueError):
+            continue
+
+    out = correlate_radar(radar_tracks, ais_tracks, model, registry,
+                          spoof_events=spoofs, ais_gaps=gaps)
+    print()
+    print(format_correlation(out))
+
+    darks = [v for v in out.verdicts if v["status"] == "dark_candidate"]
+    if darks:
+        print()
+        print(f"{len(darks)} dark contact(s):")
+        for v in sorted(darks, key=lambda v: -v["dark_score"]):
+            c = next((c for c in out.correlations
+                      if c["correlation_id"] == v.get("correlation_id")), {})
+            print(f"  {v['ts']:%Y-%m-%d %H:%M}Z  ({v['lat']:7.3f},{v['lon']:8.3f})  "
+                  f"len≈{v['length_m'] or 0:5.1f} m  score={v['dark_score']:.2f}  "
+                  f"{c.get('dark_minutes', 0):.0f} min unexplained  "
+                  f"[{c.get('station_ids', '?')}]")
+            if c.get("went_dark_at") is not None:
+                print(f"      last explained by MMSI {c.get('mmsi')} at "
+                      f"{c['went_dark_at']:%Y-%m-%d %H:%M}Z "
+                      f"({c['went_dark_lat']}, {c['went_dark_lon']})")
+    print()
+    print("SYNTHETIC unless the split above says otherwise. No Coastal "
+          "Surveillance Network feed has ever been seen by this system.")
+    return 0
+
+
 def cmd_graph_query(args):
     """Vessel neighborhood dump: identity history, ownership, sanctions
     proximity, evidence edges — the entity page in text form."""
@@ -458,6 +552,9 @@ def cmd_live_ingest(args):
     if args.source == "noaa":
         from .ingest.noaa_ais import run
         return run(month=args.month)
+    if args.source == "radar":
+        from .ingest.radar import run
+        return run(args.path, station_id=args.station)
     raise SystemExit(f"unknown ingest source {args.source!r}")
 
 def main():
@@ -526,6 +623,15 @@ def main():
                       help="import a hand-downloaded file instead of fetching "
                            "(WPI only, for when NGA is down)")
     pnoaa = ing.add_parser("noaa"); pnoaa.add_argument("--month", required=True)
+
+    prad = ing.add_parser(
+        "radar",
+        help="land a coastal-radar track feed (CSV or newline JSON). "
+             "UNTESTED against any real system — no such feed is available to "
+             "this project; see ingest/radar.py")
+    prad.add_argument("--path", required=True)
+    prad.add_argument("--station", default=None,
+                      help="station id, when the feed omits it")
     p.set_defaults(fn=cmd_live_ingest)
 
 
@@ -568,6 +674,14 @@ def main():
     p.add_argument("--all", action="store_true",
                    help="include suppressed verdicts (why-not-dark view)")
     p.set_defaults(fn=cmd_dark_vessels)
+
+    p = sub.add_parser(
+        "radar",
+        help="coastal radar: correlate the picture against AIS and report "
+             "the dark contacts (ADR-028)")
+    p.add_argument("action", choices=["correlate"], nargs="?",
+                   default="correlate")
+    p.set_defaults(fn=cmd_radar)
 
     p = sub.add_parser("graph-query")
     p.add_argument("--mmsi", type=int, required=True)

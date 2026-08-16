@@ -139,6 +139,12 @@ class ScenarioWorld:
     #: Set by `land_world`; carries the achieved-vs-real null rates.
     null_mask: object = None
 
+    #: The simulated coastal-radar picture, once `scenario.radar` has run over
+    #: this world (ADR-028). It is not a scenario output: it is *derived from*
+    #: the tracks the scenarios already wrote, which is the whole point — one
+    #: vessel truth, two sensors that disagree about it. `None` until generated.
+    radar: object = None
+
     # ---- construction ----
     @classmethod
     def new(cls, seed: int, profile) -> "ScenarioWorld":
@@ -273,7 +279,8 @@ class ScenarioWorld:
         by_kind: dict[str, int] = {}
         for e in self.events:
             by_kind[e.kind] = by_kind.get(e.kind, 0) + 1
-        return dict(
+        radar = self.radar.counts() if self.radar is not None else {}
+        return dict(**radar, **dict(
             vessels=len(self.vessels),
             organizations=len(self.corporate.orgs),
             ownership_edges=len(self.corporate.edges),
@@ -285,7 +292,7 @@ class ScenarioWorld:
             sanctions_entries=len(self.sanctions),
             scenarios=len(self.truth),
             **{f"events_{k}": v for k, v in sorted(by_kind.items())},
-        )
+        ))
 
     def all_identifiers(self) -> tuple[list, list, list]:
         """(imos, mmsis, sanctions refs) actually used — for the collision guard.

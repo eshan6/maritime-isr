@@ -13,7 +13,7 @@ choreography, then decoys and misses.
 from __future__ import annotations
 
 from . import background, commercial_traffic, decoys, group_a, group_b
-from . import group_c, group_d, group_e
+from . import group_c, group_d, group_e, group_r
 from . import misses
 
 #: Execution order. Background first, then the spine's early identity events,
@@ -26,6 +26,10 @@ ALL = (
     *group_c.SCENARIOS,
     *group_d.SCENARIOS,
     *group_e.SCENARIOS,
+    # The coastal-radar group runs after the offshore groups because several of
+    # its hulls are new and none of them is shared — placement is unconstrained,
+    # and running it last keeps the existing choreography exactly as it was.
+    *group_r.SCENARIOS,
     *decoys.SCENARIOS,
     *misses.SCENARIOS,
 )

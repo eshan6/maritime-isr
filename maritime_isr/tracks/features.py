@@ -90,8 +90,21 @@ def detect_encounters(tracks: list) -> list[dict]:
                 a, b = members[i], cand[j]
                 if a[0] >= b[0]:
                     continue
-                if by_track[a[0]].mmsi == by_track[b[0]].mmsi:
-                    continue  # duplicate-MMSI pairs are spoof events, not meetings
+                # Two hypotheses of the SAME target are not a meeting.
+                #
+                # **Keyed on `track_key`, not on `mmsi`, and the difference is a
+                # real defect this found (ADR-028).** `mmsi` is None on a radar
+                # track, and `None == None` is True — so with the old test every
+                # radar-to-radar pair in the picture was discarded as a
+                # duplicate-identity artefact and the encounter detector could
+                # not fire on radar at all. It would have looked like "radar
+                # sees no rendezvous", which is a conclusion, not a bug report.
+                #
+                # `track_key` is always populated and always means the same
+                # thing: the sensor's own idea of which target this is. For AIS
+                # it is the MMSI, so the duplicate-MMSI behaviour is unchanged.
+                if by_track[a[0]].track_key == by_track[b[0]].track_key:
+                    continue  # duplicate-key pairs are spoof events, not meetings
                 d = _hav_m(a[1], a[2], b[1], b[2])
                 if (d <= ENCOUNTER_RADIUS_M
                         and a[3] <= ENCOUNTER_MAX_SOG_KN
@@ -122,8 +135,12 @@ def detect_encounters(tracks: list) -> list[dict]:
             lon = float(np.mean([s[4] for s in run]))
             conf = min(1.0, (len(run) / need) * (1 - dmin / (2 * ENCOUNTER_RADIUS_M)))
             eid = "enc_" + hashlib.sha1(f"{ta}|{tb}|{t0:.0f}".encode()).hexdigest()[:12]
+            sa, sb = by_track[ta].source.name, by_track[tb].source.name
             out.append(dict(
                 encounter_id=eid, track_id_a=ta, track_id_b=tb,
+                track_source=sa if sa == sb else "mixed",
+                track_key_a=by_track[ta].track_key,
+                track_key_b=by_track[tb].track_key,
                 mmsi_a=by_track[ta].mmsi, mmsi_b=by_track[tb].mmsi,
                 t_start=pd.Timestamp(t0, unit="s", tz="UTC"),
                 t_end=pd.Timestamp(t1, unit="s", tz="UTC"),
@@ -140,6 +157,7 @@ def extract_features(track) -> dict:
     sog = pts["sog_kn"].to_numpy()
     cog = pts["cog_deg"].to_numpy()
     feats = dict(track_id=track.track_id, mmsi=track.mmsi,
+                 track_key=track.track_key, track_source=track.source.name,
                  sog_mean=float(np.mean(sog)), sog_p90=float(np.percentile(sog, 90)),
                  heading_change_rate_deg_min=float(np.mean(
                      np.abs((np.diff(cog) + 180) % 360 - 180)

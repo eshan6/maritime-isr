@@ -1,7 +1,7 @@
-"""Track builder (roadmap 2.1): segment raw position reports into per-MMSI
+"""Track builder (roadmap 2.1): segment raw position reports into per-target
 tracks and survive the real-world filth.
 
-Mechanism: multi-hypothesis assignment per MMSI, not filtering.
+Mechanism: multi-hypothesis assignment per grouping key, not filtering.
   - Each report joins the live hypothesis it can physically belong to
     (implied speed ≤ HYPOTHESIS_SPEED_GATE_KN against the hypothesis's
     predicted position), else it spawns a new hypothesis.
@@ -10,10 +10,24 @@ Mechanism: multi-hypothesis assignment per MMSI, not filtering.
   - A lone impossible jump becomes a singleton hypothesis; hypotheses that
     never accumulate MIN_REAL_POINTS are demoted to outlier points and
     attached (quality='outlier') to the main track. Nothing is dropped.
-  - Silence > TRACK_BREAK_DAYS closes the track; the next report under the
-    same MMSI starts a new track_id with `fragmented_from` lineage — the
+  - Silence past the source's reuse guard closes the track; the next report under the
+    same key starts a new track_id with `fragmented_from` lineage — the
     MMSI-reuse guard. Identity continuity across breaks is a Phase 4 call,
     not a Phase 2 assumption.
+
+**The grouping key is a parameter now, and the spoof rule is gated on what it
+means (ADR-028).** This module was written against AIS and said so in the only
+way that matters: it grouped on a column literally named `mmsi` and treated a
+collision on it as evidence about a vessel. Coastal radar produces the same
+shape of data — position, course, speed, at a cadence — keyed by a station's
+track number, which is a *slot in a track table* and not a name. Two radar
+tracks sharing a number is a station reusing a slot; calling that a spoofing
+tell would manufacture an identity finding out of a housekeeping detail.
+
+So the key comes from a `TrackSource` descriptor, and DUPLICATE_MMSI is emitted
+only when `key_is_identity`. Nothing here branches on the source's *name*: the
+question asked is what the key means, which stays answerable when the third
+sensor arrives.
 """
 from __future__ import annotations
 
@@ -24,9 +38,9 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from ..config import (HYPOTHESIS_SPEED_GATE_KN, PIPELINE_VERSION,
-                      TRACK_BREAK_DAYS)
+from ..config import HYPOTHESIS_SPEED_GATE_KN, PIPELINE_VERSION
 from .. import h3util as tiling
+from ..schemas.sources import AIS, TrackSource
 from .kalman import KN_TO_MS, TrackState, epoch_s, filter_smooth
 
 MIN_REAL_POINTS = 3
@@ -64,7 +78,16 @@ class _Hypothesis:
 @dataclass
 class BuiltTrack:
     track_id: str
-    mmsi: int
+    #: The sensor's own grouping key as text — MMSI for AIS, station track
+    #: number for radar. **Always present.** Anything that needs "is this the
+    #: same target?" must use this and not `mmsi`, which is null for a sensor
+    #: that observes no identity.
+    track_key: str
+    #: Which sensor produced this track. Carried so a downstream consumer can
+    #: ask the descriptor what the data means rather than guess.
+    source: TrackSource
+    #: The broadcast identity, when there is one. `None` on radar tracks.
+    mmsi: int | None
     hypothesis: int
     points: pd.DataFrame          # smoothed, with sigma_m + quality
     states: list[TrackState]
@@ -72,37 +95,102 @@ class BuiltTrack:
     n_outliers: int
     fragmented_from: str | None = None
 
+    def __post_init__(self) -> None:
+        # Caches. Recomputed nowhere else, because every one of these was being
+        # recomputed per gate call: `associate_scene` asks `_gate` for every
+        # (contact, track) pair, and a radar correlation run makes millions of
+        # those. `tr.points["ts"].max()` is a pandas reduction over the whole
+        # frame and `state_at` was rebuilding an array over every state on each
+        # call — together they dominated the runtime by two orders of magnitude.
+        # Tracks are immutable after construction, so caching is safe; the one
+        # place that mutates `points` afterwards (outlier attachment, below)
+        # calls `refresh_cache`.
+        self.refresh_cache()
+
+    def refresh_cache(self) -> None:
+        ts = self.points["ts"]
+        self._t_first = float(pd.Timestamp(ts.min()).timestamp())
+        self._t_last = float(pd.Timestamp(ts.max()).timestamp())
+        self._state_epochs = np.array([s.t for s in self.states], float)
+        self._pt_epochs = np.sort(epoch_s(ts))
+
+    @property
+    def t_first(self) -> float:
+        return self._t_first
+
+    @property
+    def t_last(self) -> float:
+        return self._t_last
+
+    @property
+    def has_identity(self) -> bool:
+        """Does this track claim to know who it is? Radar tracks do not."""
+        return self.source.key_is_identity and self.mmsi is not None
+
     def state_at(self, t_epoch: float) -> TrackState:
         """Nearest-preceding smoothed state, predicted forward — the query
         Phase 3 gating will hammer."""
-        ts = np.array([s.t for s in self.states])
-        i = int(np.searchsorted(ts, t_epoch, side="right")) - 1
+        i = int(np.searchsorted(self._state_epochs, t_epoch, side="right")) - 1
         i = max(0, min(i, len(self.states) - 1))
         return self.states[i].predict(max(t_epoch, self.states[i].t))
 
 
-def _track_id(mmsi: int, hid: int, t0: float) -> str:
-    return "trk_" + hashlib.sha1(f"{mmsi}|{hid}|{t0:.0f}".encode()).hexdigest()[:12]
+def _track_id(key, hid: int, t0: float, source_name: str = AIS.name) -> str:
+    """Deterministic track id.
+
+    The source name is folded in so an AIS track and a radar track can never
+    collide on a numerically equal key — station `MUM-1` numbering a track `7`
+    and MMSI `7` are different things and a shared id would silently merge them.
+    **AIS ids are left byte-identical to what they were**: including the source
+    unconditionally would have changed every existing track id in the corpus and
+    broken determinism comparisons for no benefit.
+    """
+    prefix = "" if source_name == AIS.name else f"{source_name}|"
+    return "trk_" + hashlib.sha1(
+        f"{prefix}{key}|{hid}|{t0:.0f}".encode()).hexdigest()[:12]
 
 
-def build_tracks(df: pd.DataFrame) -> tuple[list[BuiltTrack], list[dict]]:
-    """df: conformed ais_position rows (mmsi, lat, lon, sog_kn, cog_deg, ts, ...).
-    Returns (tracks, spoof_events)."""
+def build_tracks(df: pd.DataFrame, *, source: TrackSource = AIS
+                 ) -> tuple[list[BuiltTrack], list[dict]]:
+    """df: conformed position rows for one sensor.
+
+    For AIS: `ais_position` rows (mmsi, lat, lon, sog_kn, cog_deg, ts, ...).
+    For radar: `radar_track_report` rows (radar_track_id, lat, lon, sog_kn,
+    cog_deg, ts, position_sigma_m, ...).
+
+    Returns (tracks, spoof_events). `spoof_events` is always empty for a source
+    whose key is not an identity — see the module docstring.
+    """
     tracks: list[BuiltTrack] = []
     spoof_events: list[dict] = []
+    key_field = source.key_field
+    if key_field not in df.columns:
+        raise KeyError(
+            f"{source.name} tracks are grouped on {key_field!r}, which is not "
+            f"in the frame (columns: {sorted(df.columns)[:12]}...). A source's "
+            f"key column is declared in schemas.sources, not guessed here.")
     df = df.copy()
     df["t"] = epoch_s(df["ts"])
+    # The reuse guard, in seconds, from the sensor rather than from a constant.
+    # See TrackSource.track_break_s for what happens when AIS's seven days are
+    # applied to a track number a station recycles every few minutes.
+    break_s = source.track_break_s
 
-    for mmsi, g in df.sort_values("t").groupby("mmsi"):
+    for key, g in df.sort_values("t").groupby(key_field):
+        # The broadcast identity, when the key IS one. A radar track keeps
+        # mmsi=None all the way through, and every consumer is required to cope
+        # (schemas.sources explains why that is not an omission).
+        mmsi = int(key) if source.key_is_identity else None
         hyps: list[_Hypothesis] = []
         next_hid = 0
         cols = ["t", "lat", "lon", "sog_kn", "cog_deg", "ts"]
-        if "receiver" in g.columns:
-            cols.append("receiver")
+        for extra in ("receiver", "position_sigma_m", *source.carry_columns):
+            if extra in g.columns and extra not in cols:
+                cols.append(extra)
         for row in g[cols].to_dict("records"):
             # close hypotheses silent past the reuse guard
             live = [h for h in hyps
-                    if row["t"] - h.t_last < TRACK_BREAK_DAYS * 86400]
+                    if row["t"] - h.t_last < break_s]
             best, best_v = None, float("inf")
             for h in live:
                 v = h.implied_speed_kn(row["t"], row["lat"], row["lon"])
@@ -116,23 +204,32 @@ def build_tracks(df: pd.DataFrame) -> tuple[list[BuiltTrack], list[dict]]:
                 hyps.append(h)
 
         # --- spoof detection: hypotheses that co-lived ---
+        #
+        # **Only for a key that is an identity.** Two co-living hypotheses under
+        # one MMSI means two transmitters claiming to be one ship. Two co-living
+        # hypotheses under one radar track number means a station reused a slot,
+        # or two stations' numbering happened to meet — a fact about the sensor,
+        # not about any vessel. Emitting DUPLICATE_MMSI there would put an
+        # identity finding in the alert queue for a housekeeping detail, and the
+        # `mmsi` column of the row would have to hold a track number to do it.
         real = [h for h in hyps if len(h.rows) >= MIN_REAL_POINTS]
-        for i in range(len(real)):
-            for j in range(i + 1, len(real)):
-                a, b = real[i], real[j]
-                ov0, ov1 = max(a.t_first, b.t_first), min(a.t_last, b.t_last)
-                if ov1 - ov0 >= OVERLAP_SPOOF_MIN_S:
-                    sep = _haversine_m(a.rows[-1]["lat"], a.rows[-1]["lon"],
-                                       b.rows[-1]["lat"], b.rows[-1]["lon"]) / 1000
-                    spoof_events.append(dict(
-                        mmsi=int(mmsi), event_type="DUPLICATE_MMSI",
-                        t_start=pd.Timestamp(ov0, unit="s", tz="UTC"),
-                        t_end=pd.Timestamp(ov1, unit="s", tz="UTC"),
-                        track_ids=f"{_track_id(mmsi, a.hid, a.t_first)},"
-                                  f"{_track_id(mmsi, b.hid, b.t_first)}",
-                        max_separation_km=float(sep),
-                        detail=f"one MMSI, two kinematically incompatible "
-                               f"broadcasters, {sep:.0f} km apart"))
+        if source.key_is_identity:
+            for i in range(len(real)):
+                for j in range(i + 1, len(real)):
+                    a, b = real[i], real[j]
+                    ov0, ov1 = max(a.t_first, b.t_first), min(a.t_last, b.t_last)
+                    if ov1 - ov0 >= OVERLAP_SPOOF_MIN_S:
+                        sep = _haversine_m(a.rows[-1]["lat"], a.rows[-1]["lon"],
+                                           b.rows[-1]["lat"], b.rows[-1]["lon"]) / 1000
+                        spoof_events.append(dict(
+                            mmsi=int(mmsi), event_type="DUPLICATE_MMSI",
+                            t_start=pd.Timestamp(ov0, unit="s", tz="UTC"),
+                            t_end=pd.Timestamp(ov1, unit="s", tz="UTC"),
+                            track_ids=f"{_track_id(key, a.hid, a.t_first, source.name)},"
+                                      f"{_track_id(key, b.hid, b.t_first, source.name)}",
+                            max_separation_km=float(sep),
+                            detail=f"one MMSI, two kinematically incompatible "
+                                   f"broadcasters, {sep:.0f} km apart"))
 
         # --- demote singleton hypotheses to outlier points on the main track ---
         main = max(real, key=lambda h: len(h.rows)) if real else None
@@ -142,12 +239,13 @@ def build_tracks(df: pd.DataFrame) -> tuple[list[BuiltTrack], list[dict]]:
                 for r in h.rows:
                     r["quality"] = "outlier"
                     outlier_rows.append(r)
-                    if main is not None:
+                    if main is not None and source.key_is_identity:
                         spoof_events.append(dict(
                             mmsi=int(mmsi), event_type="IMPOSSIBLE_KINEMATICS",
                             t_start=pd.Timestamp(r["t"], unit="s", tz="UTC"),
                             t_end=pd.Timestamp(r["t"], unit="s", tz="UTC"),
-                            track_ids=_track_id(mmsi, main.hid, main.t_first),
+                            track_ids=_track_id(key, main.hid, main.t_first,
+                                                source.name),
                             max_separation_km=float(_haversine_m(
                                 r["lat"], r["lon"], main.lat, main.lon) / 1000),
                             detail="isolated report kinematically incompatible "
@@ -158,7 +256,7 @@ def build_tracks(df: pd.DataFrame) -> tuple[list[BuiltTrack], list[dict]]:
             rows = sorted(h.rows, key=lambda r: r["t"])
             t = np.array([r["t"] for r in rows])
             # split at reuse-guard breaks inside the hypothesis
-            breaks = np.where(np.diff(t) > TRACK_BREAK_DAYS * 86400)[0]
+            breaks = np.where(np.diff(t) > break_s)[0]
             segs, prev_tid = np.split(np.arange(len(rows)), breaks + 1), None
             for seg in segs:
                 if len(seg) < MIN_REAL_POINTS:
@@ -167,7 +265,14 @@ def build_tracks(df: pd.DataFrame) -> tuple[list[BuiltTrack], list[dict]]:
                 st = np.array([r["t"] for r in srows])
                 lats = np.array([r["lat"] for r in srows])
                 lons = np.array([r["lon"] for r in srows])
-                states, sigma = filter_smooth(st, lats, lons)
+                # The sensor's own per-report accuracy when it publishes one.
+                # A radar plot at 40 km is genuinely four times worse than the
+                # same target at 10 km and the smoother should know that.
+                sig_in = None
+                if "position_sigma_m" in srows[0]:
+                    sig_in = np.array([r.get("position_sigma_m") or np.nan
+                                       for r in srows], float)
+                states, sigma = filter_smooth(st, lats, lons, sigma_m=sig_in)
                 pts = pd.DataFrame({
                     "ts": [r["ts"] for r in srows],
                     "receiver": [r.get("receiver", "") for r in srows],
@@ -178,14 +283,25 @@ def build_tracks(df: pd.DataFrame) -> tuple[list[BuiltTrack], list[dict]]:
                     "sigma_m": sigma,
                     "quality": "ok",
                 })
-                # flag noisy: raw-vs-smoothed residual beyond 3× measurement σ
+                # Sensor-specific per-report columns, carried through as they
+                # came in. Declared on the source rather than sniffed off the
+                # frame — see TrackSource.carry_columns.
+                for col in source.carry_columns:
+                    if col in srows[0]:
+                        pts[col] = [r.get(col) for r in srows]
+                # Flag noisy: raw-vs-smoothed residual beyond ~3× measurement σ.
+                # The threshold follows the sensor rather than sitting at the
+                # AIS figure: at 60 m, essentially every radar plot beyond
+                # 15 km is "noisy", which is not a finding about the data.
+                noisy_m = max(60.0, 3.0 * source.position_sigma_m)
                 res = np.array([_haversine_m(lats[k], lons[k],
                                              pts.lat.iloc[k], pts.lon.iloc[k])
                                 for k in range(len(srows))])
-                pts.loc[res > 60.0, "quality"] = "noisy"
-                tid = _track_id(mmsi, h.hid, st[0])
+                pts.loc[res > noisy_m, "quality"] = "noisy"
+                tid = _track_id(key, h.hid, st[0], source.name)
                 med = float(np.median(np.diff(st))) if len(st) > 1 else 0.0
-                trk = BuiltTrack(track_id=tid, mmsi=int(mmsi), hypothesis=h.hid,
+                trk = BuiltTrack(track_id=tid, track_key=str(key), source=source,
+                                 mmsi=mmsi, hypothesis=h.hid,
                                  points=pts, states=states, median_report_s=med,
                                  n_outliers=0, fragmented_from=prev_tid)
                 prev_tid = tid
@@ -193,35 +309,43 @@ def build_tracks(df: pd.DataFrame) -> tuple[list[BuiltTrack], list[dict]]:
 
         # attach outliers to the main track's point set (kept, flagged)
         if main is not None and outlier_rows:
-            mt = next(t_ for t_ in tracks
-                      if t_.mmsi == mmsi and t_.hypothesis == main.hid)
-            extra = pd.DataFrame({
-                "ts": [r["ts"] for r in outlier_rows],
-                "receiver": [r.get("receiver", "") for r in outlier_rows],
-                "lat": [r["lat"] for r in outlier_rows],
-                "lon": [r["lon"] for r in outlier_rows],
-                "sog_kn": [r["sog_kn"] for r in outlier_rows],
-                "cog_deg": [r["cog_deg"] for r in outlier_rows],
-                "sigma_m": 1e6, "quality": "outlier"})
-            mt.points = (pd.concat([mt.points, extra])
-                         .sort_values("ts").reset_index(drop=True))
-            mt.n_outliers = len(outlier_rows)
+            mt = next((t_ for t_ in tracks
+                       if t_.track_key == str(key)
+                       and t_.hypothesis == main.hid), None)
+            if mt is not None:
+                extra = pd.DataFrame({
+                    "ts": [r["ts"] for r in outlier_rows],
+                    "receiver": [r.get("receiver", "") for r in outlier_rows],
+                    "lat": [r["lat"] for r in outlier_rows],
+                    "lon": [r["lon"] for r in outlier_rows],
+                    "sog_kn": [r["sog_kn"] for r in outlier_rows],
+                    "cog_deg": [r["cog_deg"] for r in outlier_rows],
+                    "sigma_m": 1e6, "quality": "outlier"})
+                for col in source.carry_columns:
+                    if col in outlier_rows[0]:
+                        extra[col] = [r.get(col) for r in outlier_rows]
+                mt.points = (pd.concat([mt.points, extra])
+                             .sort_values("ts").reset_index(drop=True))
+                mt.n_outliers = len(outlier_rows)
+                mt.refresh_cache()
 
-    # --- lineage across MMSI-reuse breaks -------------------------------
+    # --- lineage across key-reuse breaks --------------------------------
     # A reuse break usually spawns a NEW hypothesis (the stale one was
     # retired by the guard), so within-hypothesis splitting never sees it.
-    # Link consecutive non-overlapping tracks of the same MMSI separated by
+    # Link consecutive non-overlapping tracks of the same key separated by
     # more than the break threshold: identity continuity stays a Phase 4
-    # decision; the lineage edge is just recorded evidence.
-    by_mmsi: dict[int, list[BuiltTrack]] = {}
+    # decision; the lineage edge is just recorded evidence. For radar this is
+    # exactly the same mechanism doing a different job — a station reusing a
+    # track number gets a lineage edge rather than a merged track.
+    by_key: dict[str, list[BuiltTrack]] = {}
     for tr in tracks:
-        by_mmsi.setdefault(tr.mmsi, []).append(tr)
-    for mmsi, trs in by_mmsi.items():
+        by_key.setdefault(tr.track_key, []).append(tr)
+    for _key, trs in by_key.items():
         trs.sort(key=lambda tr: tr.points["ts"].min())
         for prev, nxt in zip(trs, trs[1:]):
             gap_s = (nxt.points["ts"].min()
                      - prev.points["ts"].max()).total_seconds()
-            if gap_s > TRACK_BREAK_DAYS * 86400 and nxt.fragmented_from is None:
+            if gap_s > break_s and nxt.fragmented_from is None:
                 nxt.fragmented_from = prev.track_id
 
     # merge pairwise DUPLICATE_MMSI events into episodes per MMSI —
