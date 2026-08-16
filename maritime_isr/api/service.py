@@ -1425,3 +1425,334 @@ def _epoch(v) -> int:
         return int(d.timestamp())
     except Exception:                                            # noqa: BLE001
         return 0
+
+
+# --------------------------------------------------------------------------
+# the maritime zone layer (ADR-030)
+#
+# Three things the API is required to preserve and one it is required to admit:
+#   * a zone's `authority`, `method` and `confidence` travel with it, so a
+#     consumer can tell a published boundary from a working circle;
+#   * an operator-drawn geofence is the same object as a standing zone, with
+#     the same fields and the same query surface;
+#   * a zone whose kind is missing entirely is reported as missing, by name.
+# --------------------------------------------------------------------------
+
+def list_zones(kinds: Optional[list[str]] = None) -> dict:
+    """The zone layer, ordered back to front for drawing.
+
+    `missing_kinds` is not decoration. The statutory limits are absent from
+    this system unless somebody has run the connector against a real file, and
+    a map that simply does not draw an EEZ looks identical to a map whose EEZ
+    is empty. Naming the gap is the difference.
+    """
+    from maritime_isr.zones import STATUTORY_KINDS, load_zones
+    from maritime_isr.zones.geometry import geom_from_wkt, geom_to_geojson
+    from maritime_isr.zones.model import kind_is_line, kind_render_order
+
+    zones = load_zones(kinds)
+    items = []
+    for z in zones:
+        geom = geom_from_wkt(z.wkt)
+        items.append({
+            "zone_id": z.zone_id, "kind": z.kind, "name": z.name,
+            "facility": z.facility,
+            "authority": z.authority, "method": z.method, "note": z.note,
+            "confidence": z.confidence,
+            "is_line": kind_is_line(z.kind),
+            "render_order": kind_render_order(z.kind),
+            "n_cells": len(z.cells),
+            "geometry": geom_to_geojson(geom),
+            "is_synthetic": bool(z.is_synthetic),
+        })
+    items.sort(key=lambda d: (d["render_order"], d["name"]))
+    present = {z.kind for z in zones}
+    return {
+        "count": {"real": sum(1 for i in items if not i["is_synthetic"]),
+                  "synthetic": sum(1 for i in items if i["is_synthetic"])},
+        "items": items,
+        "missing_kinds": sorted(STATUTORY_KINDS - present),
+        "note": _zone_note(sorted(STATUTORY_KINDS - present)),
+    }
+
+
+def _zone_note(missing: list[str]) -> Optional[str]:
+    if not missing:
+        return None
+    return ("Not loaded: " + ", ".join(missing) + ". These are statutory "
+            "limits and this system will not derive or transcribe them — load "
+            "a published file with `maritime-isr ingest zones`. Until then any "
+            "analysis that needs them is idle, not clean.")
+
+
+def zone_vessels(zone_id: str, start: Optional[str] = None,
+                 end: Optional[str] = None, limit: int = 500) -> dict:
+    """Who was inside this zone, when, entering from where and leaving to where.
+
+    Served from landed `zone_transition` rows. A zone drawn since the last
+    pipeline run has none, and the answer says `basis: none` rather than
+    `nobody` — the difference between "we looked and found no one" and "we have
+    not looked yet" is the whole reason the field exists.
+    """
+    from maritime_isr.ingest.landing import read_table
+    from maritime_isr.zones import zone_by_id
+    from maritime_isr.zones.transitions import ZONE_TRANSITION_TABLE
+
+    z = zone_by_id(zone_id)
+    if z is None:
+        return {"error": "no such zone", "zone_id": zone_id}
+    try:
+        rows = [r for r in read_table(ZONE_TRANSITION_TABLE)
+                if r.get("zone_id") == zone_id]
+    except Exception:                                            # noqa: BLE001
+        rows = []
+    if rows:
+        basis = "landed"
+    else:
+        # **A box drawn ninety seconds ago has no landed transitions, and
+        # "nobody was here" would be a lie.** This is the sentence the whole
+        # layer exists to earn — draw anything, get an answer — so the answer is
+        # computed on demand instead.
+        #
+        # It is affordable because of the cell index: the zone's res-6 covering
+        # is a hash join against the `h3_r6` already stamped on every position
+        # at ingest, which reduces two hundred thousand rows to the handful of
+        # vessels that were anywhere near, and only those vessels' full position
+        # series are then walked. That is the CLAUDE.md §3 join doing exactly
+        # the job it was put there for.
+        rows = _compute_zone_presence(z)
+        basis = "computed" if rows else "computed-empty"
+    t0 = _ts_or_none(start)
+    t1 = _ts_or_none(end)
+    out = []
+    for r in rows:
+        enter = _epoch(r.get("t_enter"))
+        exit_ = _epoch(r.get("t_exit")) if r.get("t_exit") is not None else None
+        # Overlap, not containment: a vessel that entered on Monday and left on
+        # Friday was in the zone on Tuesday.
+        if t1 is not None and enter > t1:
+            continue
+        if t0 is not None and exit_ is not None and exit_ < t0:
+            continue
+        out.append({
+            "track_id": r.get("track_id"), "track_key": r.get("track_key"),
+            "track_source": r.get("track_source"),
+            "mmsi": (int(r["mmsi"]) if r.get("mmsi") is not None else None),
+            "t_enter": _s(r.get("t_enter")), "t_exit": _s(r.get("t_exit")),
+            "dwell_min": r.get("dwell_min"),
+            "entry_lat": r.get("entry_lat"), "entry_lon": r.get("entry_lon"),
+            "entry_bearing_deg": r.get("entry_bearing_deg"),
+            "exit_lat": r.get("exit_lat"), "exit_lon": r.get("exit_lon"),
+            "exit_bearing_deg": r.get("exit_bearing_deg"),
+            "entry_censored": bool(r.get("entry_censored")),
+            "exit_censored": bool(r.get("exit_censored")),
+            "min_sog_kn": r.get("min_sog_kn"),
+            "mean_sog_kn": r.get("mean_sog_kn"),
+            "n_fixes": r.get("n_fixes"),
+            "is_synthetic": bool(r.get("is_synthetic")),
+        })
+    out.sort(key=lambda d: str(d["t_enter"] or ""))
+    censored = sum(1 for d in out if d["entry_censored"])
+    note = None
+    if basis.startswith("computed"):
+        note = ("Computed on demand from landed positions — this zone has no "
+                "precomputed transitions yet, so the answer covers AIS tracks "
+                "only and does not include radar-only contacts.")
+        if censored:
+            note += (f" {censored} of {len(out)} were already inside when their "
+                     f"track began.")
+    elif censored:
+        note = (f"{censored} of {len(out)} were already inside when their track "
+                f"began — the entry position is where we picked them up, not "
+                f"where they crossed.")
+    hulls = {d["mmsi"] or d["track_key"] for d in out}
+    return {"zone": {"zone_id": z.zone_id, "kind": z.kind, "name": z.name,
+                     "authority": z.authority, "confidence": z.confidence},
+            "basis": basis, "n_vessels": len(hulls),
+            "count": {"real": sum(1 for d in out if not d["is_synthetic"]),
+                      "synthetic": sum(1 for d in out if d["is_synthetic"])},
+            "note": note, "items": out[:limit]}
+
+
+def create_geofence(name: str, geometry: dict, note: str = "") -> dict:
+    """Save an operator-drawn area as a zone like any other.
+
+    **Same table, same schema, same query surface as a statutory boundary** —
+    which is the requirement, stated as "a drawn area and a statutory boundary
+    should be the same kind of object as far as the rest of the system is
+    concerned". The only things that distinguish it are `authority: operator`
+    and `confidence: 1.0`, and the second of those is not flattery: the
+    operator's box is exactly where the operator says it is, which is more than
+    can be said for anything else in this layer.
+    """
+    from shapely.geometry import shape
+
+    from maritime_isr.zones.geometry import cells_covering, geom_to_wkt
+    from maritime_isr.zones.model import Zone
+    from maritime_isr.zones.store import OPERATOR_AUTHORITY, land_zones
+
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("a geofence needs a name — it is how it is re-run")
+    try:
+        geom = shape(geometry)
+    except Exception as e:                                       # noqa: BLE001
+        raise ValueError(f"unreadable geometry: {e}") from e
+    if geom.is_empty:
+        raise ValueError("empty geometry")
+    if not geom.is_valid:
+        geom = geom.buffer(0)
+        if geom.is_empty or not geom.is_valid:
+            raise ValueError("invalid geometry — a self-crossing outline?")
+
+    import hashlib
+    zid = "zone:geofence:" + hashlib.sha1(name.encode()).hexdigest()[:10]
+    z = Zone(zone_id=zid, kind="geofence", name=name, wkt=geom_to_wkt(geom),
+             authority=OPERATOR_AUTHORITY,
+             method="drawn by the operator", confidence=1.0,
+             cells=cells_covering(geom), note=note)
+    land_zones([z], source_id="operator", source_ref="geofence")
+    return {"zone_id": zid, "name": name, "kind": "geofence",
+            "n_cells": len(z.cells)}
+
+
+def delete_geofence(zone_id: str) -> dict:
+    """Remove an operator-drawn area. Operator-drawn ONLY.
+
+    A standing zone cannot be deleted through this route, and the refusal is
+    the point: the conformed layer is a landed, provenance-carrying store, and
+    letting a UI button erase a boundary that an analysis depends on would make
+    a stored transition point at nothing. Drawn areas are the operator's own
+    and are theirs to remove.
+    """
+    from maritime_isr.zones import zone_by_id
+    from maritime_isr.zones.store import (CELL_TABLE, OPERATOR_AUTHORITY,
+                                          ZONE_TABLE)
+
+    z = zone_by_id(zone_id)
+    if z is None:
+        return {"deleted": 0, "note": "no such zone"}
+    if z.authority != OPERATOR_AUTHORITY:
+        raise PermissionError(
+            f"{z.name!r} is a {z.authority} zone, not an operator-drawn one. "
+            f"Standing zones are landed data and are not deleted from the UI.")
+    n = _delete_rows(ZONE_TABLE, "zone_id", zone_id)
+    n += _delete_rows(CELL_TABLE, "zone_id", zone_id)
+    return {"deleted": n, "zone_id": zone_id}
+
+
+def _delete_rows(table: str, field: str, value) -> int:
+    """Rewrite a table's day partitions without the matching rows.
+
+    Crude and deliberate: the landing layer is append/merge-only by design, so
+    deletion is a rewrite rather than a supported operation. It is confined to
+    this one function, used only for operator geofences, and it rewrites whole
+    partitions rather than editing them in place so a crash leaves the previous
+    file intact.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from maritime_isr.ingest.landing import conformed_dir
+
+    root = conformed_dir(table)
+    if not root.exists():
+        return 0
+    removed = 0
+    for part in sorted(root.glob("day=*")):
+        for f in sorted(part.glob("*.parquet")):
+            tbl = pq.read_table(f)
+            if field not in tbl.column_names:
+                continue
+            mask = pa.compute.not_equal(tbl[field], pa.scalar(value))
+            kept = tbl.filter(mask)
+            if kept.num_rows == tbl.num_rows:
+                continue
+            removed += tbl.num_rows - kept.num_rows
+            tmp = f.with_suffix(".parquet.tmp")
+            pq.write_table(kept, tmp)
+            tmp.replace(f)
+    return removed
+
+
+def _ts_or_none(v):
+    if not v:
+        return None
+    return _epoch(v)
+
+
+def _compute_zone_presence(zone, *, max_vessels: int = 400) -> list[dict]:
+    """Transitions for one zone, computed now, from landed positions.
+
+    Two stages, and the first is what makes the second affordable:
+
+    1. **Hash join on the cell index.** Every AIS position carries `h3_r6` from
+       ingest and every zone carries a res-6 covering, so the vessels that were
+       anywhere near this zone fall out of a set membership test over the whole
+       corpus rather than a containment test against a polygon.
+    2. **Walk only those vessels**, through the *same* `transitions_for_track`
+       the pipeline uses — not a second implementation. A drawn box and a
+       standing zone are answered by one piece of code, which is the only way
+       the claim that they are the same kind of object stays true.
+
+    AIS only. Radar tracks are built by the track engine from a different table
+    and reconstructing them here would take minutes; the note on the response
+    says so rather than letting a watchkeeper assume the radar picture was
+    included.
+    """
+    import pandas as pd
+
+    from maritime_isr.ingest.landing import read_table
+    from maritime_isr.schemas.sources import AIS
+    from maritime_isr.zones.store import ZoneIndex
+    from maritime_isr.zones.transitions import transitions_for_track
+
+    try:
+        rows = read_table("ais_position")
+    except Exception:                                            # noqa: BLE001
+        return []
+    if not rows:
+        return []
+    cells = set(zone.cells)
+    near = {r.get("mmsi") for r in rows
+            if r.get("h3_r6") in cells and r.get("mmsi") is not None}
+    if not near:
+        return []
+    near = set(list(near)[:max_vessels])
+
+    by_mmsi: dict[int, list[dict]] = {}
+    for r in rows:
+        m = r.get("mmsi")
+        if m in near:
+            by_mmsi.setdefault(int(m), []).append(r)
+
+    index = ZoneIndex([zone])
+    out: list[dict] = []
+    for mmsi, pts in by_mmsi.items():
+        df = pd.DataFrame(pts)
+        df["ts"] = pd.to_datetime(df["ts"], utc=True)
+        df = df.sort_values("ts").reset_index(drop=True)
+        if "sog_kn" not in df.columns:
+            df["sog_kn"] = 0.0
+        track = _AdHocTrack(track_id=f"ondemand:{mmsi}", track_key=str(mmsi),
+                            mmsi=mmsi, source=AIS, points=df)
+        out.extend(transitions_for_track(track, index))
+    return out
+
+
+class _AdHocTrack:
+    """The minimum a track has to look like for `transitions_for_track`.
+
+    Deliberately not a `BuiltTrack`: building one runs the Kalman filter and the
+    smoother, which is minutes over the whole corpus and buys nothing here —
+    zone membership is a question about *reported positions*, not about a
+    filtered estimate, and using raw fixes is if anything the more honest
+    answer to "was she inside your box".
+    """
+
+    def __init__(self, *, track_id, track_key, mmsi, source, points):
+        self.track_id = track_id
+        self.track_key = track_key
+        self.mmsi = mmsi
+        self.source = source
+        self.points = points

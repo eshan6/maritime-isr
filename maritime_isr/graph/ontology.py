@@ -35,6 +35,13 @@ NODE_TYPES_V1 = [
     # an unnamed hull in the same keyspace as identified ships and let a
     # neighbourhood query return it as if it had a registry entry.
     "contact",
+    # A maritime zone (ADR-030): a statutory limit, a facility area, a lane,
+    # or an area the operator drew. Deliberately ONE node type for all of them —
+    # the requirement is that a drawn box and a declared boundary are the same
+    # kind of object as far as the rest of the system is concerned, and giving
+    # the operator's polygon its own type would make that false in the one
+    # place it is easiest to check.
+    "zone",
 ]
 
 # name -> dict(src=[...], dst=[...], half_life_days=float|None, kind=state|event)
@@ -72,6 +79,24 @@ EDGE_TYPES_V1: dict[str, dict] = {
     # t_end has been closed by an identity-change event.
     "identified-as": dict(src=["vessel"], dst=["identity"],
                           half_life_days=None, kind="state"),
+    # --- the zone layer (ADR-030) ----------------------------------------
+    # A crossing HAPPENED, so these are events and do not decay. A `contact`
+    # may enter a zone — a radar track has a position history and needs no
+    # identity to be somewhere — but only a `vessel` can be the subject of a
+    # maiden-visit claim, because "she has never been here before" is an
+    # assertion about a hull and a station track number is not one.
+    "entered-zone":  dict(src=["vessel", "contact"], dst=["zone"],
+                          half_life_days=None, kind="event"),
+    "deviated-from-lane": dict(src=["vessel", "contact"], dst=["zone"],
+                               half_life_days=None, kind="event"),
+    "anchored-outside-limits": dict(src=["vessel", "contact"], dst=["zone"],
+                                    half_life_days=None, kind="event"),
+    # The pre-existing loitering edge, which had no registration at all: the
+    # anomaly library has emitted `loiter-in-zone` since Phase 5 against a
+    # `zone:<name>` destination that was never a node type. It validated only
+    # because nothing checked. Now both halves exist.
+    "loiter-in-zone": dict(src=["vessel", "contact"], dst=["zone"],
+                           half_life_days=None, kind="event"),
 }
 
 

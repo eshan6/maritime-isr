@@ -297,6 +297,30 @@ RADAR_PRINCIPALS: tuple[CastEntry, ...] = (
               ais_expected=False, size=0.5),
 )
 
+#: The zone-layer principals (ADR-030). Appended after the radar cast for the
+#: same reason that was appended after the commercial fleet: a new group must
+#: not renumber a single existing serial, or every scenario referencing a hull
+#: by serial silently moves and the determinism test fails for the wrong reason.
+ZONE_PRINCIPALS: tuple[CastEntry, ...] = (
+    CastEntry("zone_newcomer", "general_cargo", "true_anomaly",
+              "Z1: four weeks of Gujarat work, then a first-ever call 900 km "
+              "south", size=0.4),
+    CastEntry("off_lane_runner", "bulker", "true_anomaly",
+              "Z2: a day-long passage between the coastal and deep-sea routes",
+              size=0.6),
+    CastEntry("outside_limits", "product_tanker", "true_anomaly",
+              "Z3: nine hours stopped inside territorial waters, clear of "
+              "every facility", size=0.35),
+    CastEntry("settled_liner", "general_cargo", "decoy",
+              "Z4: works the same four ports she always works", size=0.5),
+    CastEntry("anchorage_waiter", "bulker", "decoy",
+              "Z5: eleven hours in the Kandla designated anchorage — lawful",
+              size=0.7),
+    CastEntry("makran_holder", "product_tanker", "decoy",
+              "Z6: stopped 40 nm offshore — outside any territorial sea, and "
+              "lawful", size=0.45),
+)
+
 #: The fishing-fleet-aggregation decoy. Sized to the phenomenon, not to the
 #: headline cast count — see the module docstring.
 FISHING_FLEET_SIZE = 40
@@ -349,7 +373,8 @@ def build_vessels(world: ScenarioWorld) -> None:
 
     # ...and the radar cast after even that, so adding it left every serial in
     # the corpus exactly where it was. See RADAR_PRINCIPALS.
-    for entry in RADAR_PRINCIPALS:
+    # ...and the zone cast after even that, for the same reason again.
+    for entry in (*RADAR_PRINCIPALS, *ZONE_PRINCIPALS):
         serial = world.take_serial()
         v = make_vessel(
             world.rng, world.profile, entry.vessel_class,

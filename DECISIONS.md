@@ -1946,3 +1946,156 @@ every number in ADR-028, and will not change by being written more confidently.
   A seventh covers `_epoch` reading a tz-naive Parquet timestamp as UTC — the
   host's local zone would otherwise slide every radar track on the map, silently,
   and differently on Eshan's laptop than in the sandbox.
+
+---
+
+## ADR-030 — The maritime zone layer, and the boundaries this project refuses to invent *(Accepted)*
+**2026-08-16. Build 2 of the Tier-1 brief.**
+
+**Context.** The system understood four hardcoded circles. The requirement asks
+for maritime geography: exclusive economic zone, contiguous zone, territorial
+sea, the international maritime boundary line, port limits, anchorages, oil
+terminals and single point moorings, and established shipping lanes. Five named
+analyses are unbuildable without it and straightforward once it exists. It is
+the highest coverage-per-effort item in the whole requirement.
+
+**Decision — six parts.**
+
+**(a) A zone is a queryable object, not a picture.** The requirement is not
+"draw the EEZ", it is "tell me who was inside it, when, where they came in and
+where they went out". So a zone carries geometry *and* a res-6 H3 covering, and
+membership is a two-stage test: a cell lookup that over-selects, then an exact
+containment test on the handful of candidates. That is the CLAUDE.md §3 hash
+join applied to geography, and it is what makes the layer affordable over a
+corpus of two hundred thousand positions.
+
+The covering is **dilated by one ring on purpose**. A res-6 cell is ~7 km
+across and a working port area is 8-15 km, so a 2 km single point mooring
+contains no cell centre at all and `geo_to_cells` returns the empty set. A zone
+indexed by the empty set is a zone no vessel is ever inside — the silent-failure
+shape this project keeps rediscovering. `test_a_zone_smaller_than_a_cell_is_
+still_indexed` fails if the dilation is removed, and asserts the fixture still
+exercises the case.
+
+**(b) The statutory limits are NOT derived, and that was a deliberate choice
+against a working implementation.** Deriving the 12/24/200 nm limits from a
+public coastline mask was built, measured and **discarded**. It works
+arithmetically and is wrong in ways a reader cannot see:
+
+* UNCLOS measures from **declared straight baselines**, not from the low-water
+  line, and India has declared them across the Gulf of Kachchh and the Gulf of
+  Khambhat — so a coastline-derived territorial sea sits inside the real one
+  exactly where the traffic is densest;
+* there is **no median line** with Pakistan, Oman, the Maldives or Sri Lanka, so
+  a 200 nm envelope runs straight through four other states' waters;
+* the resolution is ~7 km.
+
+Transcribing them from memory is worse: the India–Pakistan IMBL is *disputed* —
+the Sir Creek terminus is unresolved and the maritime boundary seaward of it has
+never been delimited by agreement — and a plausible-looking polyline for a
+contested boundary is the exact overclaim this project exists to engineer
+against. Natural Earth's "maritime boundary indicator" lines are reachable and
+are cartographic indicators at 1:10,000,000, which would look official and would
+not be.
+
+So EEZ, contiguous zone, territorial sea and IMBL arrive through
+`ingest/zones.py` from a published file, or they do not arrive. **The kinds
+exist, the analyses that need them are built and tested, and the pipeline names
+the gap out loud.** Marine Regions (VLIZ) publishes all of them as GeoJSON;
+`maritime-isr ingest zones --path <file> --kind territorial_sea` lands them with
+no code change.
+
+**(c) An analysis that cannot run says so, by name.** "Anchored outside port
+limits" asks whether a vessel is stopped *inside* territorial waters, so with no
+territorial sea loaded it is idle. `anchoring_analysis_status` returns
+`(False, "IDLE — no territorial_sea zone is loaded … load a real one with …")`,
+the pipeline prints it, the API returns it and the UI greys the layer with the
+reason attached. Returning an empty list would be indistinguishable from having
+looked and found nothing, which is the same defect this codebase has now found
+under six different names.
+
+**(d) A drawn area and a statutory boundary are the same object.** An operator
+geofence lands in the same table, with the same schema, and is answered by the
+same query route. The only things that distinguish it are `authority: operator`
+and `confidence: 1.0` — and the second is not flattery: the operator's box is
+exactly where the operator says it is, which is more than can be said for
+anything else in the layer.
+
+**"Draw a box anywhere. I'll tell you who was in it" is answered in about eight
+seconds, on demand.** A box drawn ninety seconds ago has no precomputed
+transitions, and `nobody was here` would be a lie, so the query falls back to
+computing from landed positions — the zone's cell covering hash-joins against
+the `h3_r6` already stamped on every position at ingest, reducing 209,000 rows
+to the vessels that were anywhere near, and only those are walked. Through the
+**same** `transitions_for_track` the pipeline uses, because a drawn box answered
+by a second implementation is not the same kind of object.
+
+**(e) Zone entry and exit are first-class events.** `zone_transition` is a
+landed table on the same footing as encounters and gaps, and the crossings carry
+bearings so "entering from where, leaving to where" survives into the rules and
+the graph. Two things are handled explicitly because getting them wrong is
+invisible:
+
+* **the crossing is interpolated onto the boundary** between the last outside
+  fix and the first inside one. A vessel at 15 knots covers 4.6 km between
+  ten-minute fixes, so snapping to a fix puts the crossing kilometres inside the
+  zone and every bearing computed from it is a bearing from the wrong place;
+* **a track that starts inside was not seen entering.** `entry_censored` says
+  so, and the bearing is `None` rather than a fabricated direction. On the
+  corpus, **1,543 of 5,518 transitions are censored** — 28% — which is far too
+  many to leave implicit.
+
+**(f) The four hardcoded circles became data.** `SENSITIVE_ZONES` is now a view
+over `zones.derive.SENSITIVE_AREAS`, the geometry is a landed row, and
+`detect_sensitive_loitering` takes an optional `ZoneIndex`. With one it watches
+every `sensitive_area` **and every operator `geofence`** — which is what turns
+geofencing from a stub into a feature, at the one place it is easiest to fake.
+Without one it tests the same four circles it always did, so the migration
+cannot be blamed for a behaviour change.
+
+**The port gazetteer gap, closed and measured.** Twenty-five west-coast
+facilities the gazetteer did not know — Mormugao, Okha, Dwarka, Ratnagiri, New
+Mangalore, Dahej, Veraval, Diu, Karwar, Beypore, Vizhinjam and fifteen more. A
+stop at any of them produced no port call, no `docked-at` edge and no port-risk
+signal: the vessel simply appeared to stop in empty water. `ports.gazetteer_
+recall()` measures the effect on the same corpus with the same code path by
+re-deriving with the old sixteen-name list and the new one, and
+`GAZETTEER_V1_NAMES` is recorded in the source so the before/after figure does
+not depend on which commit is checked out.
+
+**Alternatives rejected.** *Deriving the limits and labelling them* — rejected;
+see (b), and note that a label on a map layer is read by nobody at 0300. *A
+`geofence/` module separate from the standing zones* — rejected: it would have
+made "the same kind of object" false in the one place it is easiest to check.
+*Storing zones as H3 cell sets alone* — rejected: the cells are an index, and a
+7 km-resolution answer to "which side of the line" is not an answer. *Deriving
+shipping lanes from the generated corpus* — rejected outright; that is fitting
+the detector to the test set. The lanes are customary centrelines and say so.
+
+**Consequences.**
+
+- **Lane deviation measured on synthetic data is optimistic by construction, and
+  the scenario says so in its own truth row.** The generator routes its vessels
+  with the same land-avoiding router the lane centrelines were drawn from, so
+  generated traffic sits on the lanes almost by definition and only a vessel a
+  scenario deliberately sends off-route deviates. This number says very little
+  about real traffic.
+- **Maiden visit needs a history qualifier or it is a list of the fleet.** Over
+  eight weeks, a vessel's first appearance anywhere is her first appearance in
+  every zone she passes through. Unqualified, the rule fires once per hull.
+  `MAIDEN_MIN_PRIOR_ZONES = 3` means the subject is a hull we have watched work
+  this coast, now somewhere she has never been.
+- The three new detectors carry **higher thresholds** (0.60-0.65) than the older
+  rules, because they run over geometry whose own confidence is 0.35-0.55 —
+  working circles standing in for declared limits, customary routes standing in
+  for adopted ones. A finding built on weaker ground clears a higher bar.
+- The graph gains a `zone` node type and four edges. One of them,
+  `loiter-in-zone`, has been emitted since Phase 5 against a `zone:<name>`
+  destination **that was never a registered node type**; it validated only
+  because nothing checked. Both halves now exist.
+- Group Z adds six scenarios: three true anomalies and three decoys, one decoy
+  per condition of the anchoring rule. There is deliberately **no scenario
+  asserting that crossing the IMBL is an offence** — the line is disputed, and a
+  generated corpus that treated a crossing as ground-truth wrongdoing would bake
+  a contested legal claim into the answer key, where the measurement would then
+  reward a detector for making it.

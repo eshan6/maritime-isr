@@ -34,16 +34,24 @@ from ..config import (ANOMALY_THRESHOLDS, GEOFENCE_LOITER_MIN_HOURS,
 from ..graph.identity import (ensure_contact_node, resolve_mmsi,
                               track_subject_id)
 from ..ports import PORTS as _PORTS
+from ..zones.derive import SENSITIVE_AREAS as _SENSITIVE_AREAS
 
 # --- sensitive geometry (geofence layer, roadmap 5.2 #4) ------------------
-# Cables, pipelines, exercise areas, port approaches. Minimal AOI seed; the
-# deploy host folds in real charted infrastructure.
+# Cables, pipelines, exercise areas, port approaches.
+#: The four sensitive areas, as (name, lat, lon, radius_km) → the dict shape
+#: this rule has always used.
+#:
+#: **They are no longer defined here.** ADR-030 moved the geometry into the
+#: zone layer, where it is a landed row with provenance, is renderable, is
+#: toggleable, and sits beside the areas an operator draws. This view exists so
+#: the rule behaves identically when no zone index is supplied — a migration
+#: that changed detection behaviour at the same time as it moved the data would
+#: make any regression impossible to attribute.
 SENSITIVE_ZONES = [
-    dict(name="Mumbai High oil field", lat=19.30, lon=71.30, radius_km=40),
-    dict(name="SW approaches cable", lat=15.50, lon=68.00, radius_km=35),
-    dict(name="Naval exercise area W", lat=17.00, lon=69.50, radius_km=50),
-    dict(name="Kandla pipeline corridor", lat=22.90, lon=69.90, radius_km=25),
+    dict(name=name, lat=lat, lon=lon, radius_km=r)
+    for name, (lat, lon, r) in sorted(_SENSITIVE_AREAS.items())
 ]
+
 #: Risk weight per port. **A judgement about a place, not a fact about it**, so
 #: it stays here rather than in the shared gazetteer (ADR-023) — `ports.PORTS`
 #: says where a port is, this says what we think of it, and the two have
@@ -267,7 +275,8 @@ def detect_dark_rendezvous(store, encounters: list[dict],
 
 # ---------------- 4. loitering near sensitive geometry ----------------
 
-def detect_sensitive_loitering(store, tracks: list, *, source_ref: str) -> list[str]:
+def detect_sensitive_loitering(store, tracks: list, *, source_ref: str,
+                               index=None) -> list[str]:
     """Sustained low speed inside sensitive geometry, from any positional sensor.
 
     **The subject comes from `track_subject_id`, not from `resolve_mmsi`
@@ -277,35 +286,83 @@ def detect_sensitive_loitering(store, tracks: list, *, source_ref: str) -> list[
     to call `resolve_mmsi(store, tr.mmsi)`, which on an identity-less track
     resolves `None` into a fresh provisional hull node per track — the alert
     would have landed on a stub that says nothing.
+
+    **`index` is what turns geofencing from a stub into a feature (ADR-030).**
+    Without it the rule tests the four circles it has always tested. With a
+    `zones.ZoneIndex` it tests every `sensitive_area` AND every `geofence` in
+    the layer — so an area the operator drew ten minutes ago is watched by the
+    same rule, with the same threshold, as the four that were compiled in. That
+    is the requirement's "a drawn area and a statutory boundary should be the
+    same kind of object", made true at the one place it is easiest to fake.
+
+    The alert lands on the zone's real node id either way, so the evidence chain
+    points at something the graph holds rather than at a string built from a
+    name (`zone:Mumbai High oil field`, which was never a node).
     """
     from ..tracks.features import extract_features
+    from ..zones.geometry import contains as _in_zone
     out = []
+    if index is not None:
+        watched = [(z.zone_id, z.name, index.geometry(z.zone_id), z.kind)
+                   for k in ("sensitive_area", "geofence")
+                   for z in index.of_kind(k)]
+    else:
+        watched = []
     for tr in tracks:
         f = extract_features(tr)
         for ep in f.get("loiter_episodes", []):
             dur_h = (ep["t_end"] - ep["t_start"]) / 3600.0
             if dur_h < GEOFENCE_LOITER_MIN_HOURS:
                 continue
-            for z in SENSITIVE_ZONES:
-                d = _hav_km(ep["lat"], ep["lon"], z["lat"], z["lon"])
-                if d > z["radius_km"]:
-                    continue
+            hits: list[tuple[str, str, float, str]] = []
+            if index is not None:
+                for zid, zname, geom, kind in watched:
+                    if _in_zone(geom, ep["lat"], ep["lon"]):
+                        # Depth from the centroid, as before — the score has to
+                        # keep meaning the same thing across the migration.
+                        c = geom.centroid
+                        d = _hav_km(ep["lat"], ep["lon"], c.y, c.x)
+                        hits.append((zid, zname, d, kind))
+            else:
+                for z in SENSITIVE_ZONES:
+                    d = _hav_km(ep["lat"], ep["lon"], z["lat"], z["lon"])
+                    if d <= z["radius_km"]:
+                        hits.append((f"zone:{z['name']}", z["name"], d,
+                                     "sensitive_area"))
+            for zid, zname, d, kind in hits:
                 vid = track_subject_id(store, tr, at=ep["t_start"])
-                # score: deeper inside the zone + longer loiter = higher
-                depth = 1.0 - d / z["radius_km"]
+                radius = _radius_of(zname)
+                depth = max(0.0, 1.0 - d / radius) if radius else 0.5
                 score = min(1.0, 0.5 + 0.3 * depth + 0.1 * min(dur_h / 6, 1))
-                ev = [dict(edge="loiter-in-zone", src=vid, dst=f"zone:{z['name']}",
+                ev = [dict(edge="loiter-in-zone", src=vid, dst=zid,
                            confidence=round(score, 3), source="track_engine",
                            source_ref=source_ref,
                            props=dict(hours=round(dur_h, 1),
-                                      dist_km=round(d, 1), zone=z["name"],
+                                      dist_km=round(d, 1), zone=zname,
+                                      zone_kind=kind,
                                       sensor=tr.source.name))]
                 _emit(out, store, "loitering_sensitive", vid, ep["t_start"],
-                      score, ev, props=dict(zone=z["name"], hours=round(dur_h, 1),
+                      score, ev, props=dict(zone=zname, zone_id=zid,
+                                            zone_kind=kind,
+                                            hours=round(dur_h, 1),
                                             lat=ep["lat"], lon=ep["lon"],
                                             sensor=tr.source.name,
                                             track_id=tr.track_id))
     return out
+
+
+def _radius_of(zone_name: str) -> float:
+    """The scoring radius for a named sensitive area, or 0 for anything else.
+
+    The depth term needs a scale. For the four migrated circles that scale is
+    their own radius and is known; for an operator-drawn polygon there is no
+    such thing, so `depth` falls back to a flat 0.5 rather than inventing one.
+    A drawn area therefore scores on duration alone, which is the honest
+    reading — we know she loitered inside the box the operator cares about, and
+    nothing about how central that was.
+    """
+    hit = _SENSITIVE_AREAS.get(zone_name)
+    return float(hit[2]) if hit else 0.0
 
 
 # ---------------- 5. identity change then anomaly ----------------

@@ -211,6 +211,53 @@ def cmd_dark_vessels(args):
               f"{r.status}  scene={r.scene_id}")
 
 
+def cmd_zones(args):
+    """Build and land the operational zone layer, and report what is missing.
+
+    `build` is idempotent — the zone ids are derived from kind and name, not
+    from geometry, so re-running after a coordinate is corrected updates the
+    row in place and every stored transition still points at the same zone.
+    """
+    from .zones import (STATUTORY_KINDS, ZoneIndex, build_operational_zones,
+                        land_zones, load_zones)
+    from .zones.analyses import anchoring_analysis_status
+
+    if args.action == "build":
+        zones = build_operational_zones()
+        written = land_zones(zones)
+        for table, days in sorted(written.items()):
+            print(f"  landed {sum(days.values()):,} row(s) into {table}")
+
+    zones = load_zones()
+    if not zones:
+        print("no landed zone layer — run `maritime-isr zones build`",
+              file=sys.stderr)
+        return 1
+    from collections import Counter
+    counts = Counter(z.kind for z in zones)
+    print()
+    print(f"maritime zone layer — {len(zones)} zone(s)")
+    for kind, n in sorted(counts.items()):
+        print(f"  {kind:<18}{n:>5}")
+
+    missing = sorted(STATUTORY_KINDS - set(counts))
+    if missing:
+        print()
+        print("NOT PRESENT, and not derived on purpose:")
+        for kind in missing:
+            print(f"  {kind}")
+        print("  These are statutory limits. This project will not compute or "
+              "transcribe them\n  (zones/derive.py explains why). Load a real "
+              "file:\n"
+              "    maritime-isr ingest zones --path <file.geojson> --kind "
+              "territorial_sea")
+    ok, why = anchoring_analysis_status(ZoneIndex(zones))
+    if not ok:
+        print()
+        print(f"  anchored_outside_limits: {why}")
+    return 0
+
+
 def cmd_radar(args):
     """Coastal radar: correlate the picture against AIS, and report.
 
@@ -567,6 +614,10 @@ def cmd_live_ingest(args):
     if args.source == "radar":
         from .ingest.radar import run
         return run(args.path, station_id=args.station)
+    if args.source == "zones":
+        from .ingest.zones import run
+        return run(args.path, kind=args.kind, authority=args.authority,
+                   clip_to_aoi=not args.no_clip)
     raise SystemExit(f"unknown ingest source {args.source!r}")
 
 def main():
@@ -644,6 +695,20 @@ def main():
     prad.add_argument("--path", required=True)
     prad.add_argument("--station", default=None,
                       help="station id, when the feed omits it")
+
+    pzon = ing.add_parser(
+        "zones",
+        help="land maritime boundary geometry from a GeoJSON file. THE ONLY "
+             "way an EEZ, contiguous zone, territorial sea or IMBL enters "
+             "this system — see zones/derive.py for why they are not derived")
+    pzon.add_argument("--path", required=True, help="a .geojson file")
+    pzon.add_argument("--kind", default=None,
+                      help="force a kind for features that do not declare one "
+                           "(eez, contiguous_zone, territorial_sea, imbl, ...)")
+    pzon.add_argument("--authority", default=None,
+                      help="who published it; defaults to the filename")
+    pzon.add_argument("--no-clip", action="store_true",
+                      help="keep geometry outside AOI v1 (default clips)")
     p.set_defaults(fn=cmd_live_ingest)
 
 
@@ -697,6 +762,13 @@ def main():
                    help="land the correlation and the contacts, so the API and "
                         "the map can show them without re-running it")
     p.set_defaults(fn=cmd_radar)
+
+    p = sub.add_parser(
+        "zones",
+        help="build/inspect the maritime zone layer (ADR-030)")
+    p.add_argument("action", choices=["build", "status"], nargs="?",
+                   default="status")
+    p.set_defaults(fn=cmd_zones)
 
     p = sub.add_parser("graph-query")
     p.add_argument("--mmsi", type=int, required=True)

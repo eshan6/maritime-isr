@@ -34,7 +34,8 @@ import pandas as pd                                             # noqa: E402
 from maritime_isr.config import GRAPH_DB_NAME, cfg             # noqa: E402
 from maritime_isr.graph import GraphStore                       # noqa: E402
 from maritime_isr.graph import from_landed                      # noqa: E402
-from maritime_isr.ingest.landing import (read_table,            # noqa: E402
+from maritime_isr.ingest.landing import (SYNTHETIC_SOURCE_ID,     # noqa: E402
+                                         read_table,
                                          split_real_synthetic)
 from maritime_isr.scenario.measure import (format_measurement,  # noqa: E402
                                            measure)
@@ -265,6 +266,152 @@ def run_radar_behaviour(store, radar_tracks: list) -> dict:
                 loitering=loiter, port_risk=risk)
 
 
+def run_zone_stage(all_tracks: list) -> dict:
+    """Phase 2.5 — the maritime zone layer (ADR-030).
+
+    Transitions are computed over **every** track, AIS and radar alike: a zone
+    crossing is a fact about a position history, and a radar contact nobody can
+    name crossing into territorial waters is exactly as interesting as a named
+    hull doing it. The transitions land like any other event.
+    """
+    from maritime_isr.ports import gazetteer_recall
+    from maritime_isr.zones import (STATUTORY_KINDS, ZoneIndex,
+                                    anchoring_analysis_status, load_zones)
+    from maritime_isr.zones.transitions import (land_transitions,
+                                                transitions_for_tracks)
+
+    zones = load_zones()
+    if not zones:
+        print("  no landed zone layer — run `maritime-isr zones build`")
+        return {}
+    index = ZoneIndex(zones)
+    from collections import Counter as _C
+    print(f"  zone layer         : {len(zones)} zone(s) "
+          f"{dict(sorted(_C(z.kind for z in zones).items()))}")
+
+    missing = sorted(STATUTORY_KINDS - {z.kind for z in zones})
+    if missing:
+        print(f"  NOT LOADED         : {', '.join(missing)} — statutory limits, "
+              f"not derived on purpose (zones/derive.py)")
+
+    t0 = time.time()
+    trans = transitions_for_tracks(all_tracks, index)
+    print(f"  transitions        : {len(trans):,} in {time.time() - t0:.0f}s "
+          f"over {len(all_tracks):,} track(s)")
+    by_kind = _C(r["zone_kind"] for r in trans)
+    for kind, n in sorted(by_kind.items()):
+        print(f"    {kind:<20}{n:>8,}")
+    censored = sum(1 for r in trans if r["entry_censored"])
+    print(f"    {'entry censored':<20}{censored:>8,}  (already inside when the "
+          f"track began — the entry position is where we picked them up)")
+
+    written = land_transitions(trans, source_id=SYNTHETIC_SOURCE_ID,
+                               is_synthetic=True)
+    for table, n in sorted(written.items()):
+        print(f"  landed {n:,} row(s) into {table}")
+
+    # --- the gazetteer gap, measured on this corpus rather than asserted ----
+    #
+    # **The unit is a stopped vessel-hour, not a loiter episode.** The first
+    # version of this measurement used `loiter_episodes`, which are the strict
+    # sustained-drift definition and number nine in the whole corpus — a
+    # denominator that small makes any before/after figure noise. What the
+    # gazetteer is actually for is naming the place a vessel has stopped, so
+    # the population is every hour in which a vessel was essentially stationary.
+    STOP_SOG_KN = 1.0
+    stops = []
+    for tr in all_tracks:
+        pts = tr.points
+        if hasattr(pts, "quality"):
+            pts = pts[pts.quality != "outlier"]
+        if "sog_kn" not in pts.columns or len(pts) == 0:
+            continue
+        slow = pts[pts["sog_kn"] <= STOP_SOG_KN]
+        if len(slow) == 0:
+            continue
+        # One sample per vessel-hour, so a ship sitting still for two days does
+        # not dominate the denominator with a thousand identical fixes.
+        hourly = pd.to_datetime(slow["ts"], utc=True).dt.floor("h")
+        seen = set()
+        for h, la, lo in zip(hourly, slow["lat"], slow["lon"]):
+            if h in seen:
+                continue
+            seen.add(h)
+            stops.append((float(la), float(lo)))
+    rec = gazetteer_recall(stops)
+    print()
+    print(f"  port gazetteer, before and after ADR-030 "
+          f"({rec['n_ports_before']} -> {rec['n_ports_after']} ports):")
+    print(f"    stopped vessel-hours           {rec['positions']:>8,}")
+    print(f"    nameable BEFORE                {rec['named_before']:>8,}  "
+          f"({(rec['recall_before'] or 0) * 100:.1f}%)")
+    print(f"    nameable AFTER                 {rec['named_after']:>8,}  "
+          f"({(rec['recall_after'] or 0) * 100:.1f}%)")
+    print(f"    newly nameable                 {rec['gained']:>8,}")
+    print(f"    nameable by neither            {rec['named_by_neither']:>8,}  "
+          f"(open water — not a miss)")
+    if rec["by_new_port"]:
+        top = list(rec["by_new_port"].items())[:6]
+        print("    biggest gains: "
+              + ", ".join(f"{k} x{v}" for k, v in top))
+    # **This measurement has a ceiling it cannot see past, and saying so is the
+    # whole point of printing it.** The corpus is GENERATED FROM the gazetteer:
+    # the scenario places vessels at ports the gazetteer knows, so a port that
+    # was missing had no synthetic traffic to name and closing the gap can only
+    # ever move this number by the handful of stops that happened to land near a
+    # newly-added facility by coincidence. The gain on REAL traffic — where
+    # ships call at Mormugao and Ratnagiri regardless of what our list contains —
+    # is not observable here and must not be inferred from this figure.
+    print("    NOTE: this corpus is generated FROM the gazetteer, so it cannot")
+    print("          show what closing the gap is worth. Vessels are placed at")
+    print("          ports the old list already knew; a port it lacked had no")
+    print("          traffic to name. The directly countable fact is that 25")
+    print("          real west-coast facilities were absent and now are not.")
+    print("          A valid before/after needs REAL port-visit positions")
+    print("          (`maritime-isr ingest gfw`), which are not landed here.")
+
+    ok, why = anchoring_analysis_status(index)
+    if not ok:
+        print()
+        print(f"  anchored_outside_limits: {why}")
+    return dict(index=index, zones=zones, transitions=trans,
+                gazetteer=rec, anchoring_ok=ok, anchoring_why=why)
+
+
+def run_zone_analyses(store, all_tracks: list, zone_out: dict) -> dict:
+    """The four analyses the zone layer unlocks (ADR-030).
+
+    Area visit is a query and emits no alerts by design; the other three are
+    precision-gated detectors like every other rule in the library.
+    """
+    from maritime_isr.zones.analyses import (
+        detect_anchored_outside_port_limits, detect_area_visits,
+        detect_lane_deviation, detect_maiden_visit)
+    if not zone_out:
+        print("  (no zone layer)")
+        return {}
+    index, trans = zone_out["index"], zone_out["transitions"]
+
+    visits = detect_area_visits(trans)
+    print(f"  area_visit         : {len(visits):,} presence row(s) "
+          f"(a query, not an alert)")
+
+    maiden = detect_maiden_visit(store, trans, source_ref="zones-combined")
+    print(f"  maiden_zone_visit  : {len(maiden):,} alert(s)")
+
+    lane = detect_lane_deviation(store, all_tracks, index,
+                                 source_ref="zones-combined")
+    print(f"  lane_deviation     : {len(lane):,} alert(s)")
+
+    anch = detect_anchored_outside_port_limits(store, all_tracks, index,
+                                               source_ref="zones-combined")
+    if zone_out.get("anchoring_ok"):
+        print(f"  anchored_outside_l.: {len(anch):,} alert(s)")
+    else:
+        print(f"  anchored_outside_l.: IDLE — {zone_out['anchoring_why']}")
+    return dict(area_visits=visits, maiden=maiden, lane=lane, anchored=anch)
+
+
 def populate_graph() -> tuple[GraphStore, dict]:
     """Phase 4 over the combined corpus — `from_landed.populate`, unmodified."""
     # cfg.data_root, not the hardcoded DATA_ROOT constant — so with
@@ -393,6 +540,10 @@ def main() -> int:
     _hdr("3b. coastal radar — the same core, a second sensor (ADR-028)")
     radar_out = run_radar_stage(tracks_out)
 
+    _hdr("3c. Phase 2.5 — the maritime zone layer (ADR-030)")
+    zone_tracks = [*tracks_out["tracks"], *radar_out.get("radar_tracks", [])]
+    zone_out = run_zone_stage(zone_tracks)
+
     _hdr("4. Phase 4 — graph populated from the landed tables")
     store, _ = populate_graph()
 
@@ -426,6 +577,9 @@ def main() -> int:
         tracks=[*tracks_out["tracks"], *radar_out["radar_tracks"]],
         encounters=[*tracks_out["encounters"], *radar_out["encounters"]])
     run_anomalies(store, tracks_out, fusion_out)
+
+    _hdr("7b. Phase 5 — the four analyses the zone layer unlocks (ADR-030)")
+    run_zone_analyses(store, zone_tracks, zone_out)
 
     _hdr("8. decay over the combined graph")
     dec = from_landed.decay_summary(store)
