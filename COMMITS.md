@@ -428,3 +428,78 @@ Verify by reading, but the claims were checked against the tree:
 wc -c maritime_isr/fuse/__init__.py                 # 0
 grep -rn "maritime_isr.fuse\b" maritime_isr/ tests/ # no importers
 ```
+
+---
+
+## feat: coastal radar as a second sensor, and the four places the core assumed AIS (ADR-028)
+
+**2026-08-16.** The first source added since CLAUDE.md §4.5 wrote down the
+connector claim — *"every source is a connector, never a core change"* — and the
+first test of whether it was true. It was not, in four places, all of which
+failed silently and all of which are now fixed source-agnostically.
+
+**Why radar.** The demo could not tell its own story: of six detectors two fired,
+because every detector reads the track engine and the real corpus has no AIS
+position tracks. The headline claim — a contact on radar with nothing
+broadcasting there — needed SAR imagery this AOI cannot get (ADR-017). Coastal
+radar is the Coast Guard's primary sensor, is structurally an AIS position report
+minus the identity fields, and needs no imagery. **The dark-vessel path fires for
+the first time in this project's history.**
+
+**What landed.**
+
+- `schemas/sources.py` — a `TrackSource` descriptor. The grouping key, whether it
+  is an identity, whether the sensor observes transmission, its accuracy, its
+  reuse-guard. Nothing downstream branches on a source *name*.
+- `schemas/records.py` + `schemas/__init__.py` — `RadarTrackReport`,
+  `RADAR_TRACK_REPORT`, `RADAR_CORRELATION`; `track_source`/`track_key` on
+  `TRACK`, `TRACK_POINT`, `ENCOUNTER`.
+- `ingest/radar.py` — the connector, with the sensor physics (RCS↔length,
+  range-dependent position accuracy) shared with the simulator so a bug in one
+  is a bug in both.
+- `scenario/radar_network.py`, `scenario/radar.py`, `scenario/radar_truth.py`,
+  `scenario/scenarios/group_r.py` — 16 stations on real coastline, detection by
+  signal-to-noise against the radar horizon, shadow sectors, a maintenance
+  outage, sea clutter, four fixed installations, and six scenarios inside the
+  coastal belt. The picture is derived from `world.tracks`, so a radar-only
+  contact and an AIS-only track are two views of **one ship**.
+- `fusion/radar_ais.py` — correlation by handing 15-minute epochs to
+  `associate_scene` unmodified, aggregated into a time series so "she was
+  explained, then she was not" is expressible.
+- `scenario/measure_radar.py` — precision and recall against a second quarantined
+  truth table, with the false positives broken down by cause.
+- `tests/test_radar.py` — 27 tests, every one of which **runs** the thing.
+
+**The findings, which are worth more than the feature.**
+
+1. `detect_encounters` rejected self-pairs on `mmsi_a == mmsi_b`; both are `None`
+   on radar, so every radar-to-radar pair was discarded and the detector could
+   not fire at all.
+2. The anomaly library resolved subjects with `resolve_mmsi(store, tr.mmsi)`,
+   minting `vessel:mmsi:None` — a node that resolves and says nothing.
+3. `classify_gaps` would have called radar dropouts `INTENTIONAL_SILENCE`.
+4. The reuse guard was seven days, which on recycled station track numbers built
+   single 11,829-plot "tracks" out of hundreds of unrelated targets.
+
+**And one that was not about radar:** the association score normalised by the
+gate radius, so it grew *more* confident the less was known — a 12-hour-stale
+track matched a contact 186 km away. Restoring the volume-normalisation term of
+a 2-D Gaussian log-density fixes it; the well-constrained case is numerically
+unchanged, which is why the SAR regression suite still passes untouched.
+
+**Measured, synthetic, through the landed pipeline: precision 100%, recall 50%.**
+Zero false positives; zero fires on the three out-of-coverage episodes or on the
+naval decoy. The weakest number is stated too: correlation resolves about one
+radar track in nine, and the honest cause is AIS receipt sparsity in the
+generator rather than the algorithm — logged as an OPEN QUESTION rather than
+retuned.
+
+Verify:
+
+```
+python -m maritime_isr.cli scenario generate     # ~272,000 radar plots landed
+python -m pytest -q tests/test_radar.py          # 27 passed
+python tools/run_scenario_pipeline.py            # stages 3b and 4b, then the
+                                                 # dark-contact results block
+python -m maritime_isr.cli radar correlate
+```

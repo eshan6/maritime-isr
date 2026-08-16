@@ -120,6 +120,31 @@ A "contact" is a radar blip that looks ship-like. It is **not** yet a known ship
 boundaries, and `gap_labels` (see §6). The uncertainty cone is Phase 3's core
 input: it defines where a ship *could* be now given where it last was.
 
+### 4.4b Radar track report — `schemas/RADAR_TRACK_REPORT` (ADR-028)
+
+One row per track report a coastal station forwards. **There is no identity
+field and there never will be** — that absence is why radar is interesting, and
+it is the reason `TRACK` and `TRACK_POINT` gained `track_source` and `track_key`
+alongside `mmsi`, which is now null on any track whose sensor observes no
+identity.
+
+`station_id` and the range/bearing pair are kept beside lat/lon rather than
+collapsed into it: a radar plot's position error is a function of its range from
+the station (constant in range, growing linearly in cross-range), so a consumer
+holding only lat/lon cannot recover how good the position is.
+`position_sigma_m` is therefore computed at ingest and travels with the row —
+the fusion gate reads it in preference to any per-sensor default.
+
+`RADAR_CORRELATION` holds the verdict per radar track: which AIS track explains
+it, how strongly, and — when it stopped being explained — when and where.
+
+**What makes a sensor a sensor, rather than a special case**, is
+`schemas/sources.py`: a `TrackSource` descriptor carrying the grouping key,
+whether that key is an *identity*, whether the sensor observes *transmission*,
+its position accuracy and its reuse-guard interval. Nothing downstream may ask
+which source it is; it asks what the data means. See ADR-028 for the four places
+that were asking the wrong question.
+
 ### 4.5 Graph edges — `schemas/graph_v1` (Phase 4)
 Edge tables in DuckDB. Every edge row: `src`, `dst`, `edge_type`, `provenance`,
 `confidence`, `valid_from`, `valid_to`. Object types and edge types listed in

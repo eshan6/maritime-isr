@@ -167,7 +167,27 @@ def classify_gaps(track, model: CoverageModel,
     `spoof_windows`: [(t0,t1)] epochs of active DUPLICATE_MMSI episodes for
     this MMSI — while identity is compromised, silence attribution is
     meaningless, so INTENTIONAL_SILENCE is never assigned inside them
-    (precision-first policy)."""
+    (precision-first policy).
+
+    **Refuses any track from a sensor that does not observe transmission
+    (ADR-028).** Every label in the taxonomy above is a statement about a
+    *broadcast*: the vessel stopped transmitting, and here is whether we would
+    have heard it. A coastal-radar track ending means the radar lost contact —
+    the target went out of range, into a shadow sector, or below the sea-clutter
+    threshold. Feeding one in here would silently produce INTENTIONAL_SILENCE
+    rows about vessels whose transponders were never in question, which is the
+    "asserting intentional silence where we have no coverage" anti-pattern
+    (CLAUDE.md §6) arriving through a different sensor. The refusal is loud
+    because the failure would be quiet: the rows would look perfectly ordinary.
+    """
+    if not track.source.observes_transmission:
+        raise ValueError(
+            f"classify_gaps was handed a {track.source.name!r} track "
+            f"({track.track_id}). This function labels gaps in a vessel's own "
+            f"BROADCAST — a gap in a {track.source.name} track is the sensor "
+            f"losing contact, and calling that INTENTIONAL_SILENCE would "
+            f"convict a vessel of going dark on evidence about our own "
+            f"receiver. Classify gaps on the AIS side and correlate.")
     pts = track.points[track.points.quality != "outlier"]
     if len(pts) < 2:
         return []

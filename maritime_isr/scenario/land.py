@@ -28,9 +28,11 @@ import hashlib
 from datetime import timezone
 
 from ..ingest.landing import land_table, stamp_envelope, stamp_h3
+from ..ingest.radar import TABLE as T_RADAR
 from ..ingest.sanctions_match import MATCH_TABLE
 from .identifiers import SYNTHETIC_SOURCE_ID
 from .nulls import NullMask, _draw as _draw01
+from .radar_truth import TABLE as RADAR_TRUTH_TABLE
 from .truth import TABLE as TRUTH_TABLE
 from .world import ScenarioWorld
 
@@ -62,7 +64,8 @@ EVENT_TABLES = {
 #: table would leave orphan synthetic rows behind and quietly poison the next
 #: real-vs-synthetic split.
 ALL_TABLES = (T_IDENTITY, *EVENT_TABLES.values(), T_POSITIONS, T_DETECTIONS,
-              T_SANCTIONS, T_ORGS, T_OWNERSHIP, MATCH_TABLE, TRUTH_TABLE)
+              T_SANCTIONS, T_ORGS, T_OWNERSHIP, MATCH_TABLE, T_RADAR,
+              TRUTH_TABLE, RADAR_TRUTH_TABLE)
 
 
 #: Anchorage ids a "different exit anchorage" can land on. Real places in the
@@ -506,6 +509,26 @@ def land_world(world: ScenarioWorld) -> dict[str, int]:
     land(own_rows, T_OWNERSHIP, ("edge_kind", "src", "dst", "valid_from"),
          day_field="acquired_at")
 
+    # ---- coastal radar ----
+    #
+    # **Landed through `ingest.radar`, not written here.** Every other block in
+    # this function builds rows and hands them to `land`, because the GFW-shaped
+    # tables have no connector of their own in this codebase — the scenario
+    # generator IS their producer. Radar does have a connector, and routing
+    # scenario plots around it would have left the connector untested while
+    # claiming radar was "a connector, not a core change". So the simulator
+    # produces feed records and the connector conforms, validates, stamps and
+    # lands them, exactly as it would for a real station feed.
+    if world.radar is not None and world.radar.plots:
+        from ..ingest.radar import land_plots
+        w = land_plots((p.as_feed_record() for p in world.radar.plots),
+                       source_id=SYNTHETIC_SOURCE_ID,
+                       source_ref="synthetic-radar-network",
+                       is_synthetic=True)
+        written[T_RADAR] = sum(w.values())
+    else:
+        written.setdefault(T_RADAR, 0)
+
     # ---- ground truth, quarantined ----
     truth_rows = []
     for t in world.truth:
@@ -513,5 +536,14 @@ def land_world(world: ScenarioWorld) -> dict[str, int]:
         truth_rows.append(_stamp(row, source_ref=t.scenario_id,
                                  acquired_at=t.t_start))
     land(truth_rows, TRUTH_TABLE, ("scenario_id",), day_field="t_start")
+
+    radar_truth_rows = []
+    if world.radar is not None:
+        for ep in world.radar.truth:
+            row = ep.as_row()
+            radar_truth_rows.append(_stamp(row, source_ref=ep.episode_id,
+                                           acquired_at=ep.t_start))
+    land(radar_truth_rows, RADAR_TRUTH_TABLE, ("episode_id",),
+         day_field="t_start")
 
     return written

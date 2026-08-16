@@ -29,7 +29,7 @@ import math
 import pandas as pd
 
 from ..config import ANOMALY_THRESHOLDS, GEOFENCE_LOITER_MIN_HOURS
-from ..graph.identity import resolve_mmsi
+from ..graph.identity import resolve_mmsi, track_subject_id
 from ..ports import PORTS as _PORTS
 
 # --- sensitive geometry (geofence layer, roadmap 5.2 #4) ------------------
@@ -180,6 +180,16 @@ def detect_dark_rendezvous(store, encounters: list[dict],
 # ---------------- 4. loitering near sensitive geometry ----------------
 
 def detect_sensitive_loitering(store, tracks: list, *, source_ref: str) -> list[str]:
+    """Sustained low speed inside sensitive geometry, from any positional sensor.
+
+    **The subject comes from `track_subject_id`, not from `resolve_mmsi`
+    (ADR-028).** This rule reasons about *behaviour in a place* and needs no
+    identity to do it: a contact holding station over a cable approach for six
+    hours is the finding whether or not anything is broadcasting there. It used
+    to call `resolve_mmsi(store, tr.mmsi)`, which on an identity-less track
+    resolves `None` into a fresh provisional hull node per track — the alert
+    would have landed on a stub that says nothing.
+    """
     from ..tracks.features import extract_features
     out = []
     for tr in tracks:
@@ -192,7 +202,7 @@ def detect_sensitive_loitering(store, tracks: list, *, source_ref: str) -> list[
                 d = _hav_km(ep["lat"], ep["lon"], z["lat"], z["lon"])
                 if d > z["radius_km"]:
                     continue
-                vid = resolve_mmsi(store, tr.mmsi, at=ep["t_start"])
+                vid = track_subject_id(store, tr, at=ep["t_start"])
                 # score: deeper inside the zone + longer loiter = higher
                 depth = 1.0 - d / z["radius_km"]
                 score = min(1.0, 0.5 + 0.3 * depth + 0.1 * min(dur_h / 6, 1))
@@ -200,10 +210,13 @@ def detect_sensitive_loitering(store, tracks: list, *, source_ref: str) -> list[
                            confidence=round(score, 3), source="track_engine",
                            source_ref=source_ref,
                            props=dict(hours=round(dur_h, 1),
-                                      dist_km=round(d, 1), zone=z["name"]))]
+                                      dist_km=round(d, 1), zone=z["name"],
+                                      sensor=tr.source.name))]
                 _emit(out, store, "loitering_sensitive", vid, ep["t_start"],
                       score, ev, props=dict(zone=z["name"], hours=round(dur_h, 1),
-                                            lat=ep["lat"], lon=ep["lon"]))
+                                            lat=ep["lat"], lon=ep["lon"],
+                                            sensor=tr.source.name,
+                                            track_id=tr.track_id))
     return out
 
 
@@ -266,7 +279,11 @@ def detect_port_risk(store, tracks: list, *, source_ref: str) -> list[str]:
         if not risky:
             continue
         t = tr.points["ts"].max().timestamp()
-        vid = resolve_mmsi(store, tr.mmsi, at=t)
+        # Source-agnostic subject — see `detect_sensitive_loitering`. A radar
+        # track calling at Karachi is the same observation as an AIS one; what
+        # differs is that we cannot say which hull made the call, and the
+        # contact node says exactly that rather than inventing a hull.
+        vid = track_subject_id(store, tr, at=t)
 
         # Score is the max single-port risk, lightly boosted by **breadth** —
         # how many *different* high-risk ports the hull touched.
@@ -297,10 +314,12 @@ def detect_port_risk(store, tracks: list, *, source_ref: str) -> list[str]:
         ev = [dict(edge="docked-at", src=vid, dst=f"port:{p}",
                    confidence=round(HIGH_RISK_PORTS[p], 3),
                    source="track_engine", source_ref=source_ref,
-                   props=dict(port_risk=HIGH_RISK_PORTS[p], calls=n))
+                   props=dict(port_risk=HIGH_RISK_PORTS[p], calls=n,
+                              sensor=tr.source.name))
               for p, n in sorted(counts.items())]
         _emit(out, store, "port_risk_propagation", vid, t, score, ev,
-              props=dict(ports=sorted(counts), calls=counts))
+              props=dict(ports=sorted(counts), calls=counts,
+                         sensor=tr.source.name, track_id=tr.track_id))
     return out
 
 

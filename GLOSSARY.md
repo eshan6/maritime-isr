@@ -342,3 +342,76 @@ is not now (a ship's former name, a lapsed ownership). The graph draws these
 **dashed and dimmed** rather than hiding them, because they are real assertions
 with real evidence, and drawing one like a live edge would assert a stale fact
 as current — the thing invariant 3 exists to prevent.
+
+## Coastal radar (ADR-028)
+
+**Coastal surveillance radar.** A radar set on a tower on the shore, sweeping
+the sea in front of it. It measures **range** (how far) and **bearing** (which
+direction) to anything that reflects, and by watching the same reflection over
+time works out course and speed. It is the Indian Coast Guard's primary sensor
+and the backbone of their Coastal Surveillance Network. We have no access to
+theirs; the picture in this project is simulated over real coastline.
+
+**The thing to hold on to: radar has no idea who anything is.** AIS tells you a
+ship's name and number because the ship broadcasts them. Radar tells you a shape
+is at a place. That absence is not a shortcoming — it is exactly why radar is
+useful here, because a radar track that no AIS broadcast explains is a candidate
+**dark vessel**.
+
+**Plot.** One radar report about one target at one moment: a position, a speed, a
+course, an echo strength. The raw unit, the way an AIS position report is.
+
+**Radar track / track number.** A station stitches successive plots of the same
+target into a track and gives it a number. **A track number is not a name.** It
+is a slot in the station's track table; when the station loses a target the
+number goes back in the pool and the next target may get it. Two tracks sharing
+a number means the station recycled a slot, not that anything is impersonating
+anything — unlike two vessels sharing an MMSI, which is a spoofing tell.
+
+**RCS — radar cross-section.** How big a target looks *to radar*, in square
+metres, usually quoted in decibels (dBsm). Roughly proportional to real size,
+but it swings by a factor of two or three depending on which way the ship is
+pointing and how the sea is behaving. So one plot's size estimate is worth a
+rough **class** — small craft, coaster, tanker — and no more. The median over a
+long track is worth much more, because the swings average out: **persistence
+buys size accuracy**, which is the one thing a radar has that a single satellite
+image does not.
+
+**Radar horizon.** Radar travels in roughly straight lines, so the curve of the
+earth eventually hides a target. A 35 m tower sees a 30 m superstructure at
+about 47 km and a 3 m dhow at about 31 km — before any question of whether the
+echo is strong enough. This is why a coastal network is *coastal*: it cannot see
+the deep-water transfer basins 400 km offshore where the classic dark
+ship-to-ship transfer happens.
+
+**Shadow sector.** An arc where terrain — a headland, an island, the town behind
+the tower — blocks the beam. Real installations have them, which is why radar
+coverage is not a set of neat circles.
+
+**Sea clutter.** Reflections from waves. Mostly weak and short-lived, but a rough
+sea throws up returns that look briefly like small boats. Since an unexplained
+radar track is a candidate dark vessel, clutter is the main source of false
+alarms in this whole build, and the simulated picture generates it deliberately
+rather than pretending it away.
+
+**Correlation (radar↔AIS).** Deciding which AIS-broadcasting vessel a radar track
+*is*. The same matching problem as SAR↔AIS and solved by the same code: gate on
+where the vessel could plausibly be, score the agreement, and assign the whole
+picture at once rather than each contact to its nearest neighbour.
+
+**Dark contact.** A radar track that survived every filter — nothing on AIS
+explains it, it is not a known fixed installation, it is big enough to be a
+vessel, it lasted long enough to be real, and nothing was broadcasting nearby.
+The plain-English claim: *something ship-sized is there and it is not telling
+anyone.*
+
+**Contact node.** How the graph records a dark contact. Deliberately **not** a
+vessel node: it is almost certainly a vessel, but what is *known* is that
+something of roughly this size was at these positions, and putting an unnamed
+hull in the same keyspace as identified ships would let a lookup return it as
+though it had a registry entry.
+
+**Fixed installation / static object.** A single point mooring, a platform, a
+light float. Permanently there, never on AIS, and the right size to look like a
+ship — so the system learns them by noticing the same unexplained contact in the
+same spot on most days, and then stops reporting them.

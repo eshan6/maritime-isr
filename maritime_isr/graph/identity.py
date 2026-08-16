@@ -158,6 +158,69 @@ def resolve_mmsi(store, mmsi: int, at: float | None = None) -> str:
     return vid
 
 
+#: Node type and prefix for a track whose sensor knows no identity.
+CONTACT_PREFIX = "contact"
+
+#: Station-id prefix the scenario radar network uses. Kept beside the
+#: reserved-MMSI constants for the same reason: it is a fact about an
+#: *identifier space*, not about ground truth, and it is what lets a contact
+#: node inherit the right `is_synthetic` flag without anything consulting the
+#: answer key.
+_SYNTHETIC_STATION_PREFIX = "SYN-"
+
+
+def contact_node_id(track_key: str, *, source: str) -> str:
+    """The graph node for a target we can see but cannot name.
+
+    Namespaced by sensor because the key spaces are unrelated: station `MUM-1`
+    numbering a track `7` has nothing to do with MMSI 7.
+    """
+    return f"{CONTACT_PREFIX}:{source}:{track_key}"
+
+
+def track_subject_id(store, track, at: float | None = None) -> str:
+    """The graph node an alert about this track should land on. ADR-028.
+
+    **Every detector in the anomaly library called `resolve_mmsi(store,
+    tr.mmsi)` and that is where the identity assumption actually lived.** It
+    reads perfectly until a sensor arrives whose tracks have no MMSI, at which
+    point `resolve_mmsi(store, None)` mints `vessel:mmsi:None` — a node that
+    resolves, passes every presence check, and is a different fiction for every
+    radar track in the picture. The loitering and port-risk rules would have
+    "worked" on radar and produced garbage subjects.
+
+    So the question is asked of the track rather than assumed of the column:
+
+      * a track whose key IS an identity resolves through `resolve_mmsi` exactly
+        as before, landing on the hull that was broadcasting it at time `t`;
+      * a track whose key is not an identity gets a **contact** node —
+        `contact:radar:<station>:<n>`. That is an honest object: something is
+        there, it has a position history, and we do not know who it is. It can
+        later be joined to a hull by the correlation stage, which is a
+        conclusion with evidence rather than an assumption baked into a node id.
+
+    The contact node is created on demand so an alert always has a subject that
+    exists, with `named=False` on it, because a UI that cannot tell an anonymous
+    contact from an identified vessel will render one as the other.
+    """
+    if getattr(track, "has_identity", False):
+        return resolve_mmsi(store, track.mmsi, at=at)
+
+    nid = contact_node_id(track.track_key, source=track.source.name)
+    if store.node(nid) is None:
+        # Same reserved-block reasoning as `resolve_mmsi`: the scenario radar
+        # stations are named with a reserved prefix, so a contact minted from
+        # one is scenario data. No ground truth is consulted.
+        synthetic = str(track.track_key).startswith(_SYNTHETIC_STATION_PREFIX)
+        store.upsert_node(
+            nid, CONTACT_PREFIX,
+            dict(sensor=track.source.name, track_key=track.track_key,
+                 named=False,
+                 note="a sensed target with no broadcast identity"),
+            is_synthetic=synthetic)
+    return nid
+
+
 def current_mmsi(store, vid: str, at: float | None = None) -> int | None:
     """The MMSI this hull was broadcasting at time t (identified-as edges,
     time-scoped) — the inverse of resolve_mmsi."""

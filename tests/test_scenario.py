@@ -105,23 +105,29 @@ def _truth_references(path: Path) -> list[str]:
     hits = []
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module:
-            if node.module.split(".")[-1] == "truth":
+            if node.module.split(".")[-1] in ("truth", "radar_truth"):
                 hits.append(f"line {node.lineno}: from {node.module} import ...")
             for a in node.names:
-                if a.name in ("ScenarioTruth", "TruthLedger"):
+                if a.name in ("ScenarioTruth", "TruthLedger",
+                              "RadarDarkEpisode", "RadarTruthLedger"):
                     hits.append(f"line {node.lineno}: imports {a.name}")
         elif isinstance(node, ast.Import):
             for a in node.names:
                 if a.name.endswith(".truth"):
                     hits.append(f"line {node.lineno}: import {a.name}")
-        elif isinstance(node, ast.Name) and node.id in ("ScenarioTruth",
-                                                        "TruthLedger"):
+        elif isinstance(node, ast.Name) and node.id in (
+                "ScenarioTruth", "TruthLedger", "RadarDarkEpisode",
+                "RadarTruthLedger"):
             hits.append(f"line {node.lineno}: uses {node.id}")
         elif isinstance(node, ast.Constant) and isinstance(node.value, str):
             if id(node) in docstrings:
                 continue
-            if "scenario_truth" in node.value:
-                hits.append(f"line {node.lineno}: string {node.value!r}")
+            # Both quarantined tables. `radar_dark_truth` (ADR-028) is the
+            # second one: a radar detector holding the answer key measures
+            # nothing, exactly as an AIS one would not.
+            for table in ("scenario_truth", "radar_dark_truth"):
+                if table in node.value:
+                    hits.append(f"line {node.lineno}: string {node.value!r}")
     return hits
 
 
@@ -143,8 +149,12 @@ def test_no_detection_code_reads_scenario_truth():
 
 def test_measure_is_the_only_truth_consumer():
     """Inside `scenario/`, only the harness and the writers touch truth."""
+    # `radar.py` writes radar truth the way Layer 2 writes scenario truth;
+    # `radar_truth.py` defines it; `measure_radar.py` is its one reader, and it
+    # runs after the pipeline has finished. Same discipline, second table.
     allowed = {"truth.py", "land.py", "measure.py", "run.py", "validate.py",
-               "world.py", "__init__.py"}
+               "world.py", "__init__.py",
+               "radar.py", "radar_truth.py", "measure_radar.py"}
     offenders = []
     for path in (REPO / "maritime_isr" / "scenario").rglob("*.py"):
         if path.name in allowed or "scenarios" in path.parts:
@@ -165,6 +175,12 @@ def test_the_isolation_check_can_actually_fail(tmp_path):
     bad.write_text('"""A docstring mentioning scenario_truth is fine."""\n'
                    'rows = read_table("scenario_truth")\n')
     assert _truth_references(bad), "the isolation check failed to catch a read"
+
+    # The second quarantined table must be caught the same way (ADR-028).
+    bad_radar = tmp_path / "bad_radar.py"
+    bad_radar.write_text('rows = read_table("radar_dark_truth")\n')
+    assert _truth_references(bad_radar), (
+        "the isolation check does not know about radar_dark_truth")
 
     good = tmp_path / "good.py"
     good.write_text('"""The cause lives only in scenario_truth, never here."""\n'
@@ -550,11 +566,20 @@ def test_catalogue_covers_every_required_group(world):
                      "C1", "C2", "C3", "C4",
                      "D1", "D2", "D3", "D4",
                      "E1", "E2", "E3", "E4", "E5", "E6", "E7",
-                     "M1", "M2"):
+                     "M1", "M2",
+                     # Coastal radar (ADR-028). R4 and R5 are the two new
+                     # boundaries: a hull under the radar's reach, and a hull
+                     # in the coverage hole between Mumbai and Ratnagiri.
+                     "R1", "R2", "R3", "R4", "R5", "R6"):
         assert required in ids, f"scenario {required} missing from the catalogue"
     assert sum(1 for t in world.truth if t.truth_class == DECOY) >= 12
+    # `>=`, not `==`. The count was pinned at 2 when M1 and M2 were the only
+    # capability boundaries in the corpus; adding a sensor adds its own, and a
+    # test that forbids that is testing the catalogue's size rather than its
+    # coverage. What must not drift is that the named boundaries are all here,
+    # which the loop above checks.
     assert sum(1 for t in world.truth
-               if t.truth_class == DELIBERATE_MISS) == 2
+               if t.truth_class == DELIBERATE_MISS) >= 4
 
 
 def test_decoy_to_true_positive_ratio_is_meaningful(world):
@@ -671,6 +696,11 @@ def test_generation_is_robust_across_seeds():
     from the end could run past it. Seed 7 happened to fit. Several seeds are
     checked so a seed-dependent overrun cannot pass again.
     """
+    # The catalogue is whatever `scenarios.ALL` builds; what must hold is that
+    # **every seed builds the same one**. Pinning the count to a literal made
+    # adding a scenario group fail this test for the one reason it does not
+    # care about, so the invariant is stated as agreement across seeds instead.
+    ids: set[str] | None = None
     for seed in (7, 8, 11, 42):
         w = ScenarioWorld.new(seed, CorpusProfile.load())
         build_cast(w)
@@ -678,7 +708,15 @@ def test_generation_is_robust_across_seeds():
         w.identity.close_window(w.t1)
         rep = validate_world(w)
         assert rep.ok, f"seed {seed} failed validation:\n{rep.format()}"
-        assert len(w.truth) == 40, f"seed {seed} produced {len(w.truth)} scenarios"
+        seen = {t.scenario_id for t in w.truth}
+        assert len(seen) == len(w.truth), f"seed {seed} duplicated a scenario id"
+        if ids is None:
+            ids = seen
+        else:
+            assert seen == ids, (
+                f"seed {seed} produced a different catalogue: "
+                f"missing {sorted(ids - seen)}, extra {sorted(seen - ids)}")
+    assert ids and len(ids) >= 40, f"catalogue shrank to {len(ids or ())}"
 
 
 def test_measured_tails_are_truncated_with_a_stated_reason():

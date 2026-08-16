@@ -1,6 +1,7 @@
 """Canonical record schemas (versioned).
 
   - PositionReport    (AIS)          -> ingest/aisstream, ingest/noaa_ais
+  - RadarTrackReport  (coastal radar)-> ingest/radar
   - SceneCatalogEntry (Sentinel-1)   -> ingest/copernicus, process/s1_preprocess
   - Detection         (SAR contact)  -> process/cfar, process/classifier
 
@@ -50,6 +51,75 @@ class PositionReport(BaseModel):
     def _mmsi_range(cls, v: int) -> int:
         if not (0 < v < 1_000_000_000):
             raise ValueError(f"MMSI out of 9-digit space: {v}")
+        return v
+
+
+class RadarTrackReport(BaseModel):
+    """One track report from one coastal surveillance radar station.
+
+    **There is no identity field, and that is the point.** A coastal radar
+    measures range, bearing, speed and echo strength. It cannot tell you which
+    ship it is looking at, which is precisely why a radar track that no AIS
+    track explains is a candidate dark vessel — the product's headline claim.
+
+    `radar_track_id` is the station's own track number, namespaced by station.
+    It is a *slot in a track table*, not a name: stations reuse numbers, and a
+    target crossing between stations gets a different number from each. Nothing
+    downstream may treat a collision on it as a spoofing tell the way it rightly
+    treats a duplicate MMSI (see `schemas.sources.TrackSource.key_is_identity`).
+
+    `length_est_m` is derived from `rcs_dbsm`, not measured. Radar cross-section
+    fluctuates by several dB look to look, so a single plot's length estimate is
+    worth roughly a size *class*; the median over a long track is worth rather
+    more, because averaging beats the fluctuation down. Consumers that need a
+    size gate should use the track-level aggregate and not this field.
+    """
+
+    report_id: str = Field(..., description="deterministic: station|track|ts")
+    station_id: str
+    radar_track_id: str = Field(
+        ..., description="station-assigned track number — NOT an identity")
+    lat: float = Field(..., ge=-90.0, le=90.0)
+    lon: float = Field(..., ge=-180.0, le=180.0)
+    sog_kn: Optional[float] = Field(default=None, ge=0.0)
+    cog_deg: Optional[float] = Field(default=None, ge=0.0, le=360.0)
+    timestamp: datetime = Field(..., description="report time (UTC)")
+    range_km: Optional[float] = Field(default=None, ge=0.0)
+    bearing_deg: Optional[float] = Field(default=None, ge=0.0, le=360.0)
+    position_sigma_m: Optional[float] = Field(
+        default=None, ge=0.0,
+        description="1-σ position error at this range — travels with the row "
+                    "because it is not a constant of the sensor")
+    rcs_dbsm: Optional[float] = Field(default=None)
+    length_est_m: Optional[float] = Field(default=None, ge=0.0)
+    snr_db: Optional[float] = Field(default=None)
+    track_quality: Optional[int] = Field(default=None, ge=0, le=100)
+    h3_r7: Optional[str] = Field(default=None)
+    h3_r9: Optional[str] = Field(default=None)
+    prov: Provenance
+
+    @field_validator("timestamp")
+    @classmethod
+    def _utc(cls, v: datetime) -> datetime:
+        if v.tzinfo is None:
+            raise ValueError("timestamp must be tz-aware UTC")
+        return v.astimezone(timezone.utc)
+
+    @field_validator("radar_track_id")
+    @classmethod
+    def _namespaced(cls, v: str) -> str:
+        """A bare integer is refused.
+
+        Two stations both numbering their tracks from 1 is the normal case, so
+        an un-namespaced track number silently merges two unrelated targets into
+        one track. Requiring the station prefix at the schema boundary means
+        that mistake cannot reach the track engine.
+        """
+        if ":" not in v:
+            raise ValueError(
+                f"radar_track_id {v!r} is not namespaced by station. Station "
+                f"track numbers are only unique within a station; use "
+                f"'<station_id>:<number>'.")
         return v
 
 

@@ -314,11 +314,115 @@ ASSOC_MAX_TRACK_AGE_H = 12        # gate only against tracks reporting within th
 ASSOC_GATE_BUFFER_M = 500.0       # added to the uncertainty cone when gating
 ASSOC_SCORE_FLOOR = -8.0          # log-score below which "no match" wins
 ASSOC_AMBIGUITY_MARGIN = 2.0      # top-2 log-score margin under this => ambiguous
+
+#: Reference position precision for the association score, metres.
+#:
+#: The score is a log-likelihood *ratio*, so it needs a scale to be a ratio
+#: against. At exactly this σ the volume-normalisation term is zero and the
+#: score is the bare distance term — which is what the score used to be, so the
+#: well-constrained case is unchanged and `ASSOC_SCORE_FLOOR` keeps its meaning.
+#: Above it, agreement is discounted for the size of the area searched; a track
+#: whose position is only known to 360 km cannot explain anything, which is the
+#: whole point (see `fusion.associate._score`).
+#:
+#: 200 m is roughly Sentinel-1 geolocation plus smoothing residual, and roughly
+#: a coastal radar plot at 40 km. It is a statement about what "a good position
+#: agreement" means for the sensors this system has, not a tuned number.
+ASSOC_SIGMA_REF_M = 200.0
 DARK_MIN_LENGTH_M = 20.0          # size floor with margin over the 15-25 m physics floor
 DARK_SCORE_THRESHOLD = 0.5        # precision-gated launch threshold (roadmap 3.3)
 STATIC_MIN_SCENES = 3             # detections in >= this many scenes to become static
 STATIC_MIN_SPAN_DAYS = 7.0        # ...spread over at least this long
 STATIC_RADIUS_M = 200.0           # suppression radius around a static object
+
+# ---- Coastal radar correlation (ADR-028) ------------------------------
+# Radar reuses the fusion core rather than duplicating it, so what lives here
+# are the *sensor's* parameters, not a second set of rules.
+
+#: How wide a correlation epoch is. Every radar track visible in the epoch
+#: competes for every live AIS track at once, through the same Hungarian
+#: assignment the SAR path uses — so the epoch is the unit of global
+#: assignment and it must be wide enough to hold the whole picture and narrow
+#: enough to locate a transponder shutdown in time. Fifteen minutes puts the
+#: "went dark at" position within about 3 nm at merchant speeds.
+RADAR_CORRELATION_EPOCH_S = 900.0
+
+#: Fraction of a radar track's epochs one AIS track must win to explain it, and
+#: the fraction below which nothing is claimed at all. Between the two the
+#: track is AMBIGUOUS: something is near it often enough to be a candidate and
+#: not often enough to be the answer, and the precision-first posture says
+#: report that rather than convict either way.
+RADAR_SUPPORT_CORRELATED = 0.55
+RADAR_SUPPORT_AMBIGUOUS = 0.20
+
+#: A dark contact must rest on at least this many unexplained epochs and span
+#: at least this long. These are the persistence gate, and the cascade records
+#: what they suppress as `suppressed_transient` rather than dropping it.
+#:
+#: **Two hours is a product decision, not a fitted curve.** Below it, three
+#: things are indistinguishable: a vessel genuinely dark for a short while, a
+#: tracker dropping and reacquiring a target at the edge of cover, and a sea
+#: clutter return. An analyst cannot task anything on a ninety-minute-old
+#: hole either — by the time a boat is on its way the contact is stale.
+#: Measured on the synthetic picture at 40 minutes: 20 contacts, precision
+#: 40%, and nine of the twelve false positives were brief holes of exactly
+#: that kind. ADR-004 makes precision a product policy with a number attached,
+#: and the recall this costs is recorded rather than hidden: it drops the one
+#: findable episode whose dark run was under two hours, and that vessel is
+#: still detected on a different station's track.
+RADAR_DARK_MIN_EPOCHS = 4
+RADAR_DARK_MIN_MINUTES = 120.0
+RADAR_MIN_LOOKS = 4
+
+#: The static-object layer's clustering geometry, for radar.
+#:
+#: STATIC_RADIUS_M is 200 m, which is right for Sentinel-1's ~60 m geolocation
+#: and *narrower than a coastal radar's own position error at range*. Left
+#: alone, a mooring buoy's plots scatter past the radius, the cluster is
+#: rejected on spread, and every fixed installation in the picture is promoted
+#: to a dark vessel — the top of the queue becomes four mooring buoys. The
+#: cell resolution moves with it: at res 8 (~460 m across) one buoy's plots
+#: straddle several cells and none of them accumulates.
+RADAR_STATIC_RADIUS_M = 600.0
+RADAR_STATIC_RES = 7
+
+#: Distinct days a contact must recur on to be a fixed installation.
+#:
+#: STATIC_MIN_SCENES is 3, which is right for a satellite that revisits every
+#: six days and wrong for a sensor that never stops looking. Measured on the
+#: synthetic picture: at 3 the layer produced 58 "installations", four of which
+#: were the real moorings and the rest **shipping lanes** — three ships crossing
+#: one cell on three days is not a fixed object. An installation is present on
+#: essentially every day the radar is up; 20 of ~51 days is a wide margin below
+#: that and far above anything traffic produces.
+RADAR_STATIC_MIN_SCENES = 20
+
+#: The neighbourhood the contacts-versus-broadcasters count is taken over.
+#:
+#: H3 res 7 cells are ~5 km2 (about 1.2 km across); with the surrounding ring
+#: the neighbourhood is roughly 3.5 km wide. **Res 6 was tried first and was
+#: measurably too wide**: at ~10 km across, a contact in the Gulf of Kachchh is
+#: counted against every transmitter in the anchorage several kilometres away,
+#: so the census came out negative for genuinely isolated vessels and recall
+#: fell to 38%. The neighbourhood has to be the scale at which "here" means
+#: here.
+#:
+#: This is the H3 join the whole architecture is built around (CLAUDE.md 3):
+#: same cell means candidate, and the count is a hash join rather than a
+#: distance sweep over every pair.
+RADAR_NEIGHBOURHOOD_RES = 7
+
+#: How far either side of an epoch an AIS receipt still counts as evidence that
+#: something is broadcasting here.
+#:
+#: **Wider than the epoch, deliberately, and this is the whole trick.** The
+#: contact census is instantaneous — radar reports every five minutes, so an
+#: epoch holds every contact present. The broadcaster census cannot be: a vessel
+#: at anchor lands one AIS receipt roughly every fifty minutes, so asking "was
+#: she heard in this fifteen-minute epoch" answers no for two epochs in three
+#: and manufactures an excess contact out of her own reporting schedule. An hour
+#: either side spans the anchored reporting interval with margin.
+RADAR_CENSUS_WINDOW_EPOCHS = 4
 
 # ---- Phase 2: AIS track engine constants ------------------------------
 # Physical cap on the uncertainty cone: no displacement hypothesis beyond

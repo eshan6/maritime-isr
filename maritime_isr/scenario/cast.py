@@ -262,6 +262,41 @@ PRINCIPALS: tuple[CastEntry, ...] = (
     CastEntry("bg_12", "fishing", "background", "Gujarat coastal fishing"),
 )
 
+#: Hulls that exist for the coastal-radar scenarios (ADR-028).
+#:
+#: **A separate tuple, minted last, on purpose.** Identifier serials come from
+#: position in the cast, so appending these to `PRINCIPALS` would have shifted
+#: every fishing-fleet and commercial hull minted after them and quietly
+#: renumbered forty-odd background vessels. Nothing references those by
+#: identifier, so it would not have broken — which is exactly why it would not
+#: have been noticed, and why a corpus generated at seed 7 today would no longer
+#: be comparable with one generated at seed 7 last month. Minting these after
+#: the commercial fleet leaves every existing serial byte-identical.
+#:
+#: They are all *coastal*, because that is where a coastal radar can see. The
+#: existing dark scenarios happen 400 km offshore in the deep transfer basins,
+#: which is the right place for a ship-to-ship transfer and the wrong place for
+#: a shore station — a real finding about the sensor, recorded in ADR-028
+#: rather than fixed by moving the network out to sea.
+RADAR_PRINCIPALS: tuple[CastEntry, ...] = (
+    CastEntry("coast_runner", "general_cargo", "true_anomaly",
+              "R1: works the Saurashtra coast with no AIS at all",
+              ais_expected=False, size=0.0),
+    CastEntry("quiet_quitter", "product_tanker", "true_anomaly",
+              "R2: switches her transponder off inside radar cover, mid-passage",
+              size=0.15),
+    CastEntry("coast_dark_party", "general_cargo", "true_anomaly",
+              "R3: dark party to an inshore transfer", size=0.0),
+    CastEntry("coast_light_party", "fishing", "true_anomaly",
+              "R3: the AIS-transmitting party to the same transfer", size=0.9),
+    CastEntry("subfloor_skiff", "fishing", "deliberate_miss",
+              "R4: 12 m hull working 25 km out — under the radar's reach there",
+              ais_expected=False, size=0.0),
+    CastEntry("hole_runner", "product_tanker", "deliberate_miss",
+              "R5: runs dark through the Konkan coverage hole",
+              ais_expected=False, size=0.5),
+)
+
 #: The fishing-fleet-aggregation decoy. Sized to the phenomenon, not to the
 #: headline cast count — see the module docstring.
 FISHING_FLEET_SIZE = 40
@@ -311,6 +346,19 @@ def build_vessels(world: ScenarioWorld) -> None:
     # The commercial fleet is minted LAST, so growing it never renumbers the
     # named cast — same seed, same hulls, for every scenario that references one.
     commercial.build_commercial_vessels(world, used_names)
+
+    # ...and the radar cast after even that, so adding it left every serial in
+    # the corpus exactly where it was. See RADAR_PRINCIPALS.
+    for entry in RADAR_PRINCIPALS:
+        serial = world.take_serial()
+        v = make_vessel(
+            world.rng, world.profile, entry.vessel_class,
+            serial=serial, entity_id=entity_id(entry.key),
+            flag=entry.flag, used_names=used_names, role=entry.role,
+            ais_expected=entry.ais_expected, notes=entry.notes,
+            size=entry.size,
+        )
+        world.add_vessel(v)
 
 
 def build_ownership(world: ScenarioWorld) -> None:
