@@ -223,6 +223,13 @@ def cmd_zones(args):
     from .zones.analyses import anchoring_analysis_status
 
     if args.action == "build":
+        from .zones.store import clear_standing_zones
+        # Replace, do not merge. See `clear_standing_zones` — a shrinking zone
+        # otherwise keeps every cell its larger self claimed.
+        dropped = clear_standing_zones()
+        if dropped:
+            print(f"  cleared {dropped:,} row(s) from the previous standing set "
+                  f"(operator geofences kept)")
         zones = build_operational_zones()
         written = land_zones(zones)
         for table, days in sorted(written.items()):

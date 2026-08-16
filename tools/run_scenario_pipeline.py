@@ -396,7 +396,8 @@ def run_zone_analyses(store, all_tracks: list, zone_out: dict) -> dict:
     print(f"  area_visit         : {len(visits):,} presence row(s) "
           f"(a query, not an alert)")
 
-    maiden = detect_maiden_visit(store, trans, source_ref="zones-combined")
+    maiden = detect_maiden_visit(store, trans, index=index,
+                                 source_ref="zones-combined")
     print(f"  maiden_zone_visit  : {len(maiden):,} alert(s)")
 
     lane = detect_lane_deviation(store, all_tracks, index,

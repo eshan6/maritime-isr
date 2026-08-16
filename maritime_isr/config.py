@@ -331,6 +331,20 @@ GEOFENCE_LOITER_MIN_HOURS = 1.5   # loitering near sensitive geometry
 #: working this coast, now somewhere she has never been.
 MAIDEN_MIN_PRIOR_ZONES = 3
 
+#: And the new zone has to be somewhere genuinely else. Without this the rule
+#: fires every time a vessel adds the next berth along to her rotation, which on
+#: this coast is most weeks.
+#:
+#: **Chosen at a structural break, not by taste.** Measured over every candidate
+#: fire on the corpus, the distance from the new zone to the nearest zone the
+#: vessel had already visited is bimodal: 75% fall under 28 km — the adjacent
+#: facility — and the next value above that is 558 km. Any threshold from 100 to
+#: 300 km selects exactly the same 110 fires, which is what makes 300 defensible
+#: rather than fitted. The gap is real geography: the facilities on this coast
+#: come in clusters (Gulf of Kachchh, Mumbai, Konkan, Kerala) with hundreds of
+#: kilometres between them.
+MAIDEN_MIN_NOVELTY_KM = 300.0
+
 #: Lane deviation: how far outside every corridor, for how long, while making
 #: way. All three together, because each alone is noise — position error puts
 #: fixes outside a corridor, a drifting vessel is the loitering rule's finding

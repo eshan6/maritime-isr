@@ -33,8 +33,9 @@ import numpy as np
 import pandas as pd
 
 from ..config import (LANE_DEVIATION_MIN_KM, LANE_DEVIATION_MIN_MINUTES,
-                      LANE_DEVIATION_MIN_SOG_KN, MAIDEN_MIN_PRIOR_ZONES,
-                      OUTSIDE_LIMITS_MIN_HOURS, OUTSIDE_LIMITS_MAX_SOG_KN)
+                      LANE_DEVIATION_MIN_SOG_KN, MAIDEN_MIN_NOVELTY_KM,
+                      MAIDEN_MIN_PRIOR_ZONES, OUTSIDE_LIMITS_MIN_HOURS,
+                      OUTSIDE_LIMITS_MAX_SOG_KN)
 from .geometry import distance_to_m, haversine_m
 from .store import ZoneIndex
 
@@ -119,11 +120,12 @@ def _as_utc(v):
 # --------------------------------------------------------------------------
 
 def detect_maiden_visit(store, transitions: Sequence[dict], *,
-                        source_ref: str,
+                        source_ref: str, index: Optional[ZoneIndex] = None,
                         kinds: Sequence[str] = ("port_limit", "anchorage",
                                                 "oil_terminal",
                                                 "sensitive_area", "geofence"),
-                        min_prior_zones: int = MAIDEN_MIN_PRIOR_ZONES
+                        min_prior_zones: int = MAIDEN_MIN_PRIOR_ZONES,
+                        min_novelty_km: float = MAIDEN_MIN_NOVELTY_KM
                         ) -> list[str]:
     """A vessel's first ever presence in a zone — but only if she is not new.
 
@@ -139,6 +141,17 @@ def detect_maiden_visit(store, transitions: Sequence[dict], *,
     somewhere she has never been. That is the signal the requirement is asking
     for, and it is why the rule reads history rather than a single visit.
 
+    **And the new place has to be somewhere genuinely else.** The prior-zones
+    qualifier alone still fired 643 times, because a vessel adding the next
+    berth along to her rotation satisfies it every time. `min_novelty_km` asks
+    how far the new zone is from the nearest zone she has already worked; see
+    `config.MAIDEN_MIN_NOVELTY_KM` for why 300 km is a structural break in the
+    data rather than a fitted number.
+
+    Without a `index` the novelty term cannot be computed and is skipped, with
+    the prior-zones qualifier alone — which is weaker, and the caller gets what
+    it asked for rather than a silent no-op.
+
     The large statutory limits are excluded by default: a first entry into the
     EEZ is what every arriving vessel does.
     """
@@ -147,6 +160,13 @@ def detect_maiden_visit(store, transitions: Sequence[dict], *,
 
     rows = [r for r in transitions if r.get("zone_kind") in set(kinds)]
     rows.sort(key=lambda r: pd.Timestamp(r["t_enter"]))
+
+    cent: dict[str, tuple[float, float]] = {}
+    if index is not None:
+        for z in index.zones:
+            g = index.geometry(z.zone_id)
+            if g is not None and not g.is_empty:
+                cent[z.zone_id] = (g.centroid.y, g.centroid.x)
 
     seen_zones: dict[str, set[str]] = defaultdict(set)
     out: list[str] = []
@@ -161,6 +181,14 @@ def detect_maiden_visit(store, transitions: Sequence[dict], *,
         prior.add(zid)
         if not first_here or n_prior < min_prior_zones:
             continue
+        novelty_km = None
+        if cent and zid in cent:
+            near = [haversine_m(*cent[zid], *cent[p]) / 1000.0
+                    for p in prior if p in cent and p != zid]
+            if near:
+                novelty_km = min(near)
+                if novelty_km < min_novelty_km:
+                    continue
         t = pd.Timestamp(r["t_enter"]).timestamp()
         mmsi = r.get("mmsi")
         if mmsi is None:
@@ -176,12 +204,16 @@ def detect_maiden_visit(store, transitions: Sequence[dict], *,
                    props=dict(zone_name=r.get("zone_name"),
                               zone_kind=r.get("zone_kind"),
                               prior_zones=n_prior,
+                              novelty_km=(round(novelty_km, 1)
+                                          if novelty_km is not None else None),
                               dwell_min=r.get("dwell_min"),
                               entry_bearing_deg=r.get("entry_bearing_deg")))]
         _emit(out, store, "maiden_zone_visit", vid, t, score, ev,
               props=dict(zone_id=zid, zone_name=r.get("zone_name"),
                          zone_kind=r.get("zone_kind"),
                          prior_zones=n_prior,
+                         novelty_km=(round(novelty_km, 1)
+                                     if novelty_km is not None else None),
                          lat=r.get("entry_lat"), lon=r.get("entry_lon")))
     return out
 

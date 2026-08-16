@@ -46,7 +46,7 @@ import hashlib
 
 from ..ports import ANCHORAGES, PORTS
 from .geometry import (cells_covering, circle_polygon, corridor_polygon,
-                       geom_to_wkt)
+                       geom_to_wkt, haversine_m)
 from .model import Zone
 
 __all__ = ["build_operational_zones", "SHIPPING_LANES", "PORT_LIMIT_KM",
@@ -69,6 +69,11 @@ PORT_LIMIT_KM: dict[str, float] = {
     "Hazira": 10.0, "Dahej": 10.0, "Pipavav": 10.0,
 }
 _DEFAULT_PORT_LIMIT_KM = 8.0
+
+#: However close its neighbours, a port area is at least this wide. Below about
+#: 2 km the circle is smaller than the berth structure it stands for and stops
+#: being useful for anything.
+_MIN_PORT_LIMIT_KM = 2.0
 
 #: Anchorages are drawn wider than port areas: a designated anchorage is a
 #: holding area and vessels spread across it, which is the whole reason the
@@ -129,6 +134,36 @@ SENSITIVE_AREAS: dict[str, tuple[float, float, float]] = {
 }
 
 
+def _radius_for(name: str, lat: float, lon: float) -> float:
+    """A port's working radius, capped so neighbouring facilities cannot overlap.
+
+    **This cap is a repair, not a refinement.** The first version used the size
+    of the facility alone, and on the Gulf of Kachchh cluster that produced
+    circles that swallowed each other: Sikka and Vadinar are 11 km apart and
+    both were given 10 km, so a vessel alongside at Vadinar was simultaneously
+    "inside" Sikka, Vadinar and Mundra and all three anchorages. Measured
+    consequence — the maiden-visit rule's "three distinct zones already visited"
+    qualifier was satisfied within an hour of a vessel arriving anywhere in the
+    Gulf, and the rule fired 643 times. Overlapping zones are not zones; they
+    are one zone with several names, and every question asked of them is
+    answered wrongly.
+
+    Half the distance to the nearest other port is the natural boundary — the
+    same construction a Voronoi diagram uses, applied one facility at a time.
+    A generous 500 m margin comes off it so two adjacent circles do not touch,
+    because `contains` is inclusive on the boundary and a vessel exactly between
+    two ports should belong to neither rather than to both.
+    """
+    want = PORT_LIMIT_KM.get(name, _DEFAULT_PORT_LIMIT_KM)
+    nearest = min(
+        (haversine_m(lat, lon, la, lo) / 1000.0
+         for other, (la, lo) in PORTS.items() if other != name),
+        default=None)
+    if nearest is None:
+        return want
+    return max(_MIN_PORT_LIMIT_KM, min(want, nearest / 2.0 - 0.5))
+
+
 def _zid(kind: str, name: str) -> str:
     """A stable id from kind and name.
 
@@ -161,12 +196,16 @@ def build_operational_zones() -> list[Zone]:
     zones: list[Zone] = []
 
     for name, (lat, lon) in sorted(PORTS.items()):
-        r_km = PORT_LIMIT_KM.get(name, _DEFAULT_PORT_LIMIT_KM)
+        r_km = _radius_for(name, lat, lon)
         zones.append(_zone(
             "port_limit", f"{name} port area",
             circle_polygon(lat, lon, r_km * 1000.0),
             authority="derived:maritime-isr", facility=name,
-            method=f"{r_km:.0f} km circle on the gazetteer position",
+            method=(f"{r_km:.1f} km circle on the gazetteer position"
+                    + (", capped at half the distance to the nearest "
+                       "neighbouring port"
+                       if r_km < PORT_LIMIT_KM.get(name, _DEFAULT_PORT_LIMIT_KM)
+                       else "")),
             confidence=0.4,
             note=("WORKING AREA, NOT A DECLARED LIMIT. A declared port limit is "
                   "a published administrative boundary and is not a circle. "
@@ -175,12 +214,21 @@ def build_operational_zones() -> list[Zone]:
                   "available.")))
 
     for name, (lat, lon) in sorted(ANCHORAGES.items()):
+        # Anchorages are capped against each OTHER but not against ports: an
+        # anchorage genuinely does lie off its own port and overlapping the
+        # facility it serves is correct. Two anchorages overlapping is not.
+        a_km = ANCHORAGE_LIMIT_KM
+        near = min((haversine_m(lat, lon, la, lo) / 1000.0
+                    for o, (la, lo) in ANCHORAGES.items() if o != name),
+                   default=None)
+        if near is not None:
+            a_km = max(_MIN_PORT_LIMIT_KM, min(a_km, near / 2.0 - 0.5))
         zones.append(_zone(
             "anchorage", f"{name} anchorage",
-            circle_polygon(lat, lon, ANCHORAGE_LIMIT_KM * 1000.0),
+            circle_polygon(lat, lon, a_km * 1000.0),
             authority="charted waiting area", facility=name,
-            method=(f"{ANCHORAGE_LIMIT_KM:.0f} km circle on the charted "
-                    f"waiting-area position"),
+            method=(f"{a_km:.1f} km circle on the charted waiting-area "
+                    f"position"),
             confidence=0.5,
             note=("Charted waiting areas, not positions read back from our own "
                   "corpus — deriving them from generated traffic would be "

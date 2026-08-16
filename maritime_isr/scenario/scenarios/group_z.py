@@ -46,6 +46,12 @@ from ..world import ScenarioWorld, week
 from .common import V, emit, hours, schedule_arrival
 
 
+def _anch(port: str) -> tuple[float, float]:
+    """The charted waiting area off a port. Water by definition."""
+    from ...ports import ANCHORAGES
+    return ANCHORAGES[port]
+
+
 def _off(port: str, bearing_deg: float, km: float) -> tuple[float, float]:
     """A position `km` seaward of a gazetteer port on a bearing.
 
@@ -81,15 +87,30 @@ def z1_first_visit_after_a_settled_pattern(world: ScenarioWorld) -> None:
     t0 = week(1, hours=4)
 
     # Three settled circuits in the Gulf of Kachchh: Sikka, Vadinar, Mundra.
+    #
+    # **The waiting legs are the scenario, not padding.** The first version
+    # strung the calls back to back and the whole "four weeks of settled work"
+    # collapsed into four days — a claim the docstring made and the track did
+    # not support, which would have made any measurement of a history-dependent
+    # rule meaningless. Each circuit now ends with days at anchor, which is what
+    # a liner working a rotation actually does between fixtures.
     legs = [
         Leg("transit", target=_off("Sikka", 250.0, 6.0), speed_kn=11.0),
         Leg("moored", duration_h=14.0),
+        Leg("transit", target=_anch("Sikka"), speed_kn=9.0),
+        Leg("station", duration_h=140.0, radius_m=2500.0),      # ~6 days
         Leg("transit", target=_off("Vadinar", 230.0, 6.0), speed_kn=10.0),
         Leg("moored", duration_h=16.0),
+        Leg("transit", target=_anch("Vadinar"), speed_kn=9.0),
+        Leg("station", duration_h=150.0, radius_m=2500.0),      # ~6 days
         Leg("transit", target=_off("Mundra", 210.0, 7.0), speed_kn=10.5),
         Leg("moored", duration_h=18.0),
+        Leg("transit", target=_anch("Mundra"), speed_kn=9.0),
+        Leg("station", duration_h=160.0, radius_m=2500.0),      # ~7 days
         Leg("transit", target=_off("Sikka", 250.0, 6.0), speed_kn=11.0),
         Leg("moored", duration_h=12.0),
+        Leg("transit", target=_anch("Sikka"), speed_kn=9.0),
+        Leg("station", duration_h=150.0, radius_m=2500.0),      # ~6 days
         # ... and then south, to a coast she has never worked.
         Leg("transit", target=_off("Porbandar", 220.0, 30.0), speed_kn=12.0),
         Leg("transit", target=_off("Mumbai", 250.0, 40.0), speed_kn=12.5),

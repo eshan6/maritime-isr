@@ -24,7 +24,8 @@ from .geometry import (INDEX_RES, area_km2, cells_covering, centroid_latlon,
 from .model import ZONE_SET_VERSION, Zone, kind_is_line
 
 __all__ = ["ZONE_TABLE", "CELL_TABLE", "land_zones", "load_zones",
-           "zone_by_id", "ZoneIndex", "OPERATOR_AUTHORITY"]
+           "zone_by_id", "ZoneIndex", "OPERATOR_AUTHORITY",
+           "clear_standing_zones"]
 
 ZONE_TABLE = "maritime_zone"
 CELL_TABLE = "maritime_zone_cell"
@@ -207,3 +208,49 @@ class ZoneIndex:
 
     def of_kind(self, kind: str) -> list[Zone]:
         return [z for z in self.zones if z.kind == kind]
+
+
+def clear_standing_zones() -> int:
+    """Drop every non-operator zone and its cells, so a rebuild REPLACES.
+
+    **Landing alone is not enough when geometry shrinks.** `land_zones` merges
+    on `(zone_id, h3_r6)`, so a zone whose circle got smaller keeps every cell
+    the larger circle claimed — and those stale cells stay in the index for
+    ever, over-selecting candidates that the exact test then has to reject.
+    Measured after the port radii were capped: the cell table did not move,
+    14,270 rows before and after, because none of the old rows had been asked
+    to leave.
+
+    Operator geofences are left alone. They are the operator's own work and
+    have nothing to do with a rebuild of the standing set — deleting them every
+    time the geometry is regenerated would be a data-loss bug wearing a
+    housekeeping hat.
+    """
+    import pyarrow as pa
+    import pyarrow.compute as pc
+    import pyarrow.parquet as pq
+
+    from ..ingest.landing import conformed_dir
+
+    keep_ids = {z.zone_id for z in load_zones()
+                if z.authority == OPERATOR_AUTHORITY}
+    removed = 0
+    for table, has_authority in ((ZONE_TABLE, True), (CELL_TABLE, False)):
+        root = conformed_dir(table)
+        if not root.exists():
+            continue
+        for part in sorted(root.glob("day=*")):
+            for f in sorted(part.glob("*.parquet")):
+                tbl = pq.read_table(f)
+                if "zone_id" not in tbl.column_names:
+                    continue
+                ids = tbl["zone_id"].to_pylist()
+                mask = pa.array([i in keep_ids for i in ids])
+                kept = tbl.filter(mask)
+                if kept.num_rows == tbl.num_rows:
+                    continue
+                removed += tbl.num_rows - kept.num_rows
+                tmp = f.with_suffix(".parquet.tmp")
+                pq.write_table(kept, tmp)
+                tmp.replace(f)
+    return removed
