@@ -7,6 +7,7 @@ import { AlertsView } from "./views/AlertsView.jsx";
 import { VesselsView } from "./views/VesselsView.jsx";
 import { VesselPage } from "./views/VesselPage.jsx";
 import { GraphView } from "./views/GraphView.jsx";
+import { RadarView } from "./views/RadarView.jsx";
 
 export function App() {
   const [health, setHealth] = useState("checking");
@@ -27,6 +28,7 @@ export function App() {
             you find?", and the ranked table is what the landed data supports. */}
         <NavLink to="/findings" className={({ isActive }) => `navlink ${isActive ? "active" : ""}`}>Findings</NavLink>
         <NavLink to="/alerts" className={({ isActive }) => `navlink ${isActive ? "active" : ""}`}>Alerts</NavLink>
+        <NavLink to="/radar" className={({ isActive }) => `navlink ${isActive ? "active" : ""}`}>Radar</NavLink>
         <NavLink to="/vessels" className={({ isActive }) => `navlink ${isActive ? "active" : ""}`}>Vessels</NavLink>
         <NavLink to="/graph" className={({ isActive }) => `navlink ${isActive ? "active" : ""}`}>Graph</NavLink>
         <div className="nav-spacer" />
@@ -41,6 +43,7 @@ export function App() {
           <Route path="/" element={<MapView />} />
           <Route path="/findings" element={<FindingsView />} />
           <Route path="/alerts" element={<AlertsView />} />
+          <Route path="/radar" element={<RadarView />} />
           <Route path="/vessels" element={<VesselsView />} />
           <Route path="/vessels/:id" element={<VesselPage />} />
           <Route path="/graph" element={<GraphView />} />

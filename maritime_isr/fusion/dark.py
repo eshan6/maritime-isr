@@ -250,9 +250,22 @@ def dark_cascade(unmatched: list[dict], model: CoverageModel,
             status, score = "suppressed_spoof_ambiguity", 0.0
         elif near_static:
             status, score = "suppressed_static", 0.0
-        elif require_excess_contacts and int(u.get("excess_contacts") or 0) <= 0:
-            # More transmitters heard here than contacts seen: nothing is
-            # unexplained, whichever way the assignment ran.
+        elif (require_excess_contacts and not u.get("identity_known")
+                and int(u.get("excess_contacts") or 0) <= 0):
+            # More free transmitters here than unexplained contacts: nothing is
+            # unaccounted for, whichever way the assignment ran.
+            #
+            # **Skipped when the contact carries an identity.** The census asks
+            # "could anything else here be this contact", which is the right
+            # question for a target nobody ever named. It is the wrong question
+            # for one we *did* name and then watched go quiet: there the
+            # evidence is that a known vessel stopped being heard while we kept
+            # seeing her, and it does not depend on who her neighbours are.
+            # Applying the census to those suppressed **all 77** of the
+            # correlated-then-dark tracks measured for ADR-028, which is why
+            # "here is where its transponder went quiet" reached the queue for
+            # none of them: in busy water some neighbour is always unmatched,
+            # so a free broadcaster always exists.
             status, score = "suppressed_not_isolated", 0.0
         elif n_looks < min_looks:
             # Not enough observations to believe anything is there. A separate

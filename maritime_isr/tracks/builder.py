@@ -41,7 +41,7 @@ import pandas as pd
 from ..config import HYPOTHESIS_SPEED_GATE_KN, PIPELINE_VERSION
 from .. import h3util as tiling
 from ..schemas.sources import AIS, TrackSource
-from .kalman import KN_TO_MS, TrackState, epoch_s, filter_smooth
+from .kalman import (KN_TO_MS, TrackState, bridge, epoch_s, filter_smooth)
 
 MIN_REAL_POINTS = 3
 OVERLAP_SPOOF_MIN_S = 300  # hypotheses must co-live ≥5 min to call it a spoof
@@ -128,10 +128,42 @@ class BuiltTrack:
         return self.source.key_is_identity and self.mmsi is not None
 
     def state_at(self, t_epoch: float) -> TrackState:
-        """Nearest-preceding smoothed state, predicted forward — the query
-        Phase 3 gating will hammer."""
+        """Where this track was at `t_epoch` — the query Phase 3 gating hammers.
+
+        **Bridged between the reports on either side when there are two, not
+        extrapolated from the one before.** This used to take the nearest
+        preceding smoothed state and predict forward, which is the right answer
+        only when `t_epoch` is past the end of the track. Inside the track the
+        report *after* the moment is already in hand and already smoothed, and
+        ignoring it throws away half of what is known: a vessel that was at A
+        and then at B was, in between, somewhere on the line joining them.
+
+        The cost of getting this wrong was large and only visible once a sensor
+        arrived that reports faster than AIS does. An anchored merchant lands
+        one AIS receipt every fifty minutes; the radar sees her every five. With
+        forward prediction her 95% radius mid-gap was 4,120 m, so a contact
+        sitting on her was inside a cone containing the whole anchorage and the
+        association correctly declined to name her. Bridged, the radius is
+        1,450 m and she is identifiable.
+
+        **The r95 numbers are what was measured; resist attributing a
+        correlation figure to this change alone.** Two other repairs landed in
+        the same session — contacts gating at their own timestamp rather than
+        their epoch's, and a measurement that had been counting genuinely dark
+        vessels as correlation failures — and the three are not separable after
+        the fact. The weakness they collectively explain had been read as a
+        property of the AIS feed rather than of the filtering (STATE.md,
+        OQ-radar-1), which is the part worth remembering.
+
+        Past the last report there is nothing to bridge to and this is a forward
+        prediction exactly as before, which is what the dark-vessel path relies
+        on: a vessel that stopped transmitting has no far anchor, and her cone
+        should open.
+        """
         i = int(np.searchsorted(self._state_epochs, t_epoch, side="right")) - 1
         i = max(0, min(i, len(self.states) - 1))
+        if i + 1 < len(self.states) and self.states[i].t <= t_epoch:
+            return bridge(self.states[i], self.states[i + 1], t_epoch)
         return self.states[i].predict(max(t_epoch, self.states[i].t))
 
 

@@ -1684,6 +1684,15 @@ shutdown and unable ever to confirm one.
 
 **Consequences.**
 
+> **Two figures below were superseded within the day by ADR-029, and one of them
+> was simply wrong.** Recall was re-measured at **43% (3 of 7)** after the corpus
+> was regenerated, and the "one radar track in nine" correlation figure is
+> **withdrawn** — it came from a probe that gated contacts at the wrong timestamp
+> and counted genuinely dark vessels as correlation failures. The corrected
+> figure is 98.2% of resolvable tracks. The original text is left intact below
+> because a decision record that quietly edits its own numbers is worth less than
+> one that shows them being corrected.
+
 - **Measured through the landed pipeline: precision 100%, recall 50%** — four
   of eight findable dark episodes, zero false positives. Above the ADR-004
   gate. Run in memory against the full vessel registry it is five of eight; the
@@ -1737,3 +1746,203 @@ shutdown and unable ever to confirm one.
   hull is detected to about 9 km and works at 25 (R4), and 100 km offshore of
   the 215 km Mumbai–Ratnagiri stretch nothing has cover at all (R5). The second
   is an argument for a station, and the system can say where.
+
+---
+
+## ADR-029 — Finishing Build 1: the shutdown story, a serving layer, and two rules that were asking the wrong question *(Accepted)*
+**2026-08-16. Closes the four items left open when ADR-028 merged.**
+
+**Context.** ADR-028 landed coastal radar as a second sensor and was merged with
+four things explicitly unfinished, listed at the merge rather than buried:
+
+1. *"Here is where its transponder went quiet"* was computed for 77 tracks, 48
+   of them with a position, and **reached the alert queue for none**.
+2. Radar↔AIS correlation was reported as resolving **about one track in nine**,
+   logged as OQ-radar-1 and deliberately not retuned.
+3. **No API, no UI.** A watchkeeper could not see a single radar output; the
+   whole path was reachable only from a terminal.
+4. **Nothing had run on Eshan's machine.** Sandbox-green only.
+
+This ADR records what closing the first three took, and what the fourth
+actually is.
+
+### (a) The one-in-nine figure was wrong, and is withdrawn
+
+**Two faults in the measurement, one of them also a fault in the code.**
+
+The correlation slices the radar picture into 15-minute epochs and hands each to
+`associate_scene`. That function gated **every contact in the epoch at the
+epoch's own timestamp** — so a contact observed at minute 14 was compared
+against every AIS track's position at minute 0. A merchant at 13 knots covers
+5.5 km in that time, and the gate was being asked to absorb it as error. The
+repair is one function, `_t_of(c)`: each contact gates at the instant it was
+actually observed. Nothing about the assignment, the score or the floor changed.
+
+The second fault was in the probe, not the product: it counted every radar track
+that failed to resolve, **including the tracks of vessels that really were
+dark**. Those are the finding. Counting them as correlation failures measured
+the system's success as its failure.
+
+Corrected, on the same denominator the old figure used — radar tracks whose
+vessel was demonstrably on AIS during that track:
+
+| | |
+|---|---|
+| resolvable tracks | 996 |
+| **resolved to the right hull** | **978 (98.2%)** |
+| resolved to the wrong hull | 11 (1.1%) — 10 of them reported `ambiguous`, i.e. not claimed |
+| left unresolved | 7 (0.7%) |
+| tracks of a genuinely silent vessel | 241 — **224 correctly left dark, 14 followed across a short gap onto her own MMSI, 0 confidently explained away by another hull** |
+
+That last row is the one that matters for the product: a false correlation onto
+somebody else's hull is how a dark vessel disappears, and it happened zero times.
+
+**OQ-radar-1 is answered, and answered differently than expected.** The open
+question asked whether the AIS thinning model for anchored vessels was making
+correlation look bad. It was not the cause. A second fix — teaching
+`BuiltTrack.state_at` to **interpolate between two known fixes (a Brownian
+bridge) instead of extrapolating forward from the earlier one** — cut the
+95th-percentile position error at the midpoint of a gap from **4,120 m to
+1,450 m**, which is exactly the sparsity problem the open question named, and it
+is a filtering fix rather than a generator retune. The thinning model may still
+be unrealistic and that remains worth checking against a real capture; it is no
+longer load-bearing for any number this project quotes.
+
+### (b) The shutdown story reaches the queue
+
+Three things had to be true at once, and the first two were already built:
+
+* the track has to be **held across the transition** — radar must see her both
+  while she is transmitting and after she stops;
+* the AIS side has to agree she went quiet. `_receipts_between` counts her
+  actual receipts during the dark run, which needs no threshold: the vessel that
+  survives this test was heard **0 times in five hours**, and the one that does
+  not was heard 66 times. Two cleverer tests were tried first — her median
+  reporting interval, then her 90th percentile — and both let an anchored ship's
+  routine hole through as a shutdown;
+* and the cascade has to stop suppressing her. It was suppressing all 77,
+  correctly by its own logic: the neighbourhood census asks whether unexplained
+  contacts outnumber unspent broadcasters, and a vessel who has been
+  broadcasting all week is by construction in water where AIS is heard. The fix
+  is `identity_known`: when we watched a *named* hull stop transmitting, that
+  evidence stands on its own and does not depend on her neighbours, so the
+  census is skipped for that row alone.
+
+Landed result on seed 7: one `correlated_then_dark` track, carrying a shutdown
+position, reaching the queue and rendering in the UI as *"Transponder went quiet
+here. Last explained by MMSI 999000211 at 2026-06-25 12:36Z, position 18.8218,
+72.5868."* One is not many. It is the difference between a sentence the system
+can say and one it cannot.
+
+### (c) A serving layer, and the synthetic flag stays on the screen
+
+Three endpoints — `/api/radar/stations`, `/api/radar/contacts`,
+`/api/radar/tracks` — plus a Radar view and three map layers.
+
+They read **landed** tables. A full correlation is tens of minutes over ~5,000
+epochs, so no request can compute one; `maritime-isr radar correlate --write`
+lands `radar_correlation` and `radar_dark_contact` through the same landing
+layer as every connector, provenance envelope and H3 cells included.
+
+Two things the view is required to do:
+
+* **Show the suppressions.** `?status=all` returns the rejected verdicts with
+  their reasons. "Why is this NOT dark" has to be answerable from the product; a
+  cascade whose rejections are invisible is a black box an operator has to take
+  on faith.
+* **Keep the synthetic flag visible in the interface, not only in the
+  database.** There is no radar feed and a coverage map is the most persuasive
+  picture this system can draw. The Radar tab carries a non-dismissible banner,
+  every row carries a mark, and the three map layers say "(synthetic)" in their
+  own names. Note this deliberately **contradicts `components/bits.jsx`**, where
+  `SyntheticBadge` is a no-op on the reasoning that provenance is communicated
+  outside the product. That reasoning may be right for a corpus that is mostly
+  real; it is not right for a sensor that is entirely invented, and the build
+  brief for this work makes the visible flag a requirement. The inconsistency is
+  recorded here rather than resolved silently.
+
+The coverage ring is drawn as **two** rings, not one: the radar horizon depends
+on the target's height, so a station holds a 250 m tanker roughly twice as far
+out as a 15 m skiff. A single circle would either promise skiff coverage the
+station does not have or hide tanker coverage it does, and the band between the
+two rings — "big ships only" — is exactly what an operator needs to see before
+believing a silence.
+
+### (d) Two rules that were asking the wrong question
+
+Radar did not break these. It made them visible, which is the same thing ADR-028
+found four times and is becoming the pattern: **a rule tuned against six SAR
+contacts is not tested, it is merely quiet.**
+
+**`detect_dark_rendezvous` was asking a global question.** Its `gap_party`
+branch scanned every unmatched association *anywhere in the AOI* within twelve
+hours, with no distance test at all — effectively "was anything, anywhere in the
+Arabian Sea, dark today?" With six SAR contacts in the whole corpus that was
+usually false by accident. With 270,000 radar plots it was true almost always:
+**667 alerts on seed 7, 76 of them on background traffic with no truth row
+behind them.** The rule now asks about the encounter's own parties: a sensor
+that tracks its targets stamps the sensing track into the detection id, so
+"a party to this meeting was unexplained while it was happening" is a lookup
+rather than a proximity guess. The positional test survives unchanged for
+detections with no track of their own, which is the SAR case it was written for.
+
+Its **score could not fall below its own threshold** — `0.5 + confidence × 0.4`
+against a gate of `0.50`, so `ANOMALY_THRESHOLDS["dark_rendezvous"]` had never
+excluded anything in the project's history. It now starts from the evidence
+(`0.35 + 0.35 × confidence`, plus 0.25 for a demonstrably silent party), so the
+gate does the job it was configured to do.
+
+**The cascade gate dropped `ambiguous` tracks before anything could judge
+them.** A track whose support fell between the two thresholds — partly
+explained, mostly not — never reached the filters. Measured: two of the seven
+findable episodes on seed 7 had **no verdict row anywhere in the store**,
+indistinguishable from episodes that were never in the picture. `ambiguous` is a
+statement about *identity* ("we cannot name this target"), not about explanation,
+and the cascade already owns the doubt it expresses — `require_excess_contacts`
+is literally the test for "is this a mis-association rather than a dark vessel".
+Admitting them moved nothing in the queue (precision 100%, recall 43% both ways)
+and moved ten rows from silence into the record, two of them the missing
+episodes. That is the whole benefit and it is claimed as nothing more.
+
+### (e) The fourth item cannot be closed from here, and saying so is the point
+
+**"Nothing has run on your machine" is not a defect I can fix.** Claude has no
+access to Eshan's laptop; the only person who can convert *built, sandbox-green*
+into *verified on the host* is Eshan, by running three commands and pasting back
+what they print. They are listed with their success and failure signatures in
+`STATE.md`. Until that happens the honest status of every number in this ADR is
+**measured in the sandbox, on synthetic data** — which is also the status of
+every number in ADR-028, and will not change by being written more confidently.
+
+### Consequences
+
+- **Precision 100%, recall 43%** (3 of 7 findable episodes) through the landed
+  pipeline. Recall fell from the 4-of-8 quoted in ADR-028 because the corpus was
+  regenerated and the episode set changed, not because detection got worse; the
+  four misses are named individually in `STATE.md` and three of them are dark
+  runs below the deliberate two-hour persistence floor.
+- The two headline sentences are both earned now. That is one sentence more than
+  ADR-028 could claim.
+- **10,920 radar-only encounters** exist on this corpus, which is what a
+  continuous sensor over eight weeks of coastal fishing traffic looks like. The
+  rendezvous rule is now correct about *which* of them carry evidence — 81 of
+  them, and **zero** on a named vessel with no truth row behind it, down from 76.
+  68 of the 81 land on contacts nobody can name, which is the shape of the
+  finding rather than a defect. The count is still long for a queue, and the
+  principled discriminator — anchorage and port-limit geometry, so a raft-up
+  inside a designated anchorage is not a rendezvous — is Build 2's zone layer.
+  Recorded as an open question rather than tuned around.
+- **A measurement hazard, now guarded.** The graph accumulates alerts across
+  runs, which is correct for the graph and a trap for measuring a rule change:
+  re-running the pipeline after tightening `dark_rendezvous` reported 81 new
+  alerts against a store still holding 667 from the previous run's looser rule,
+  and the final table scored both. `run_scenario_pipeline.py` now prints a NOTE
+  when it finds alerts already there. **Delete `data/graph.sqlite` before
+  measuring a detector change.** This was found by disbelieving a number that
+  had failed to move when it should have.
+- `tests/test_radar.py` gains six tests, every one driving real code: the
+  locality repair (a silent contact 300 km away must not fire the rule), the
+  ambiguous admission, and the three endpoints through the real FastAPI app.
+  A seventh covers `_epoch` reading a tz-naive Parquet timestamp as UTC — the
+  host's local zone would otherwise slide every radar track on the map, silently,
+  and differently on Eshan's laptop than in the sandbox.

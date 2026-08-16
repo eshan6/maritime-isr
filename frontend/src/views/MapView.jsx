@@ -51,6 +51,12 @@ const LAYERS = [
   { id: "scenes", label: "Sentinel-1 footprints", color: "#6039c4" },
   { id: "ports", label: "Ports", color: "#55636f" },
   { id: "alerts", label: "Alert markers", color: "#b0221b" },
+  // Coastal radar (ADR-028). All three are SYNTHETIC and say so in the label,
+  // because a coverage map is the most persuasive picture this system can draw
+  // and there is no radar behind it.
+  { id: "radar_coverage", label: "Radar coverage (synthetic)", color: "#0b6e75" },
+  { id: "radar_tracks", label: "Radar tracks (synthetic)", color: "#3aa0a8" },
+  { id: "radar_contacts", label: "Radar dark contacts (synthetic)", color: "#d33682" },
 ];
 
 const EVENT_COLOR = { encounter: "#b0221b", loitering: "#9a6300", port_visit: "#1f7a4d", gap: "#b0221b" };
@@ -75,14 +81,22 @@ export function MapView() {
     // laptop corpus — and defaulting the layer off meant the one unambiguously
     // real thing on the map was hidden until somebody found the checkbox.
     scenes: true, ports: true, alerts: true,
+    // Coverage and contacts on by default — the coverage rings are what make a
+    // dark contact readable ("we could see there, and heard nothing"), and a
+    // contact drawn without them invites exactly the out-of-coverage-is-not-dark
+    // misreading. The 1,200-odd track polylines are off: they are a dense mat
+    // over the whole coast and are for inspection, not for the headline.
+    radar_coverage: true, radar_tracks: false, radar_contacts: true,
   });
   const [data, setData] = useState({
     events: [], ports: [], scenes: [], alerts: [], density: [], detections: [],
+    radarStations: [], radarContacts: [],
   });
   // What the API told us it could not fit in the events response, and what the
   // detections response is. Surfaced in the corner rather than swallowed.
   const [notes, setNotes] = useState({});
   const [tracks, setTracks] = useState([]);
+  const [radarTracks, setRadarTracks] = useState([]);
   const [window_, setWindow] = useState(null); // {start,end} epoch ms
   const [windowError, setWindowError] = useState(null);
   const [t, setT] = useState(1); // 0..1 across the window
@@ -148,6 +162,18 @@ export function MapView() {
     api.tracks({ max_points: 160 })
       .then((r) => { live && setTracks(r.items || []); note("tracks", r.note); })
       .catch(() => {});
+    api.radarStations()
+      .then((r) => set({ radarStations: r.items || [] }))
+      .catch(() => {});
+    api.radarContacts({ status: "all", limit: 2000 })
+      .then((r) => { set({ radarContacts: r.items || [] }); note("radar", r.note); })
+      .catch(() => {});
+    // Requested last and thinned hard. This is the heaviest layer in the app
+    // (270k plots behind it) and it is off by default, so it must not be in
+    // front of anything the operator sees immediately.
+    api.radarTracks({ max_tracks: 600, max_points: 40 })
+      .then((r) => live && setRadarTracks(r.items || []))
+      .catch(() => {});
     return () => { live = false; };
   }, []);
 
@@ -162,7 +188,8 @@ export function MapView() {
     if (!ready || !map.current) return;
     renderStatic(map.current, data, tracks, visible, (id) => setSelected(id));
     renderDensity(map.current, data.density, visible.density);
-  }, [ready, data, tracks, visible]);
+    renderRadar(map.current, data, radarTracks, visible);
+  }, [ready, data, tracks, radarTracks, visible]);
 
   // ---- moving vessels: interpolate each track to the clock and glide ----
   useEffect(() => {
@@ -463,6 +490,200 @@ function renderDensity(m, cells, on) {
   }
   if (m.getLayer("density"))
     m.setLayoutProperty("density", "visibility", on ? "visible" : "none");
+}
+
+// ---- coastal radar (ADR-028) ---------------------------------------------
+//
+// Three layers, and the ORDER they are added in is load-bearing: coverage
+// underneath everything (it is context), then tracks, then contacts on top,
+// because a contact hidden under a mat of track lines is a contact nobody
+// clicks.
+//
+// The coverage ring is drawn as TWO rings, not one. A radar's reach depends on
+// how tall the target is — the horizon to a 250 m tanker is roughly twice the
+// horizon to a 15 m skiff — so a single circle would either promise skiff
+// coverage the station does not have or hide tanker coverage it does. The inner
+// solid ring is what it holds for a small target; the dashed outer ring is what
+// it holds for a large one. Everything between them is "big ships only", which
+// is exactly the kind of thing an operator must be able to see before believing
+// a silence.
+function renderRadar(m, data, radarTracks, visible) {
+  const stations = data.radarStations || [];
+
+  const ringFeats = [];
+  for (const s of stations) {
+    if (s.lat == null || s.lon == null) continue;
+    ringFeats.push({
+      type: "Feature",
+      geometry: { type: "Polygon", coordinates: [circleRing(s.lat, s.lon, s.range_large_km)] },
+      properties: { band: "large", station: s.station_id },
+    });
+    ringFeats.push({
+      type: "Feature",
+      geometry: { type: "Polygon", coordinates: [circleRing(s.lat, s.lon, s.range_small_km)] },
+      properties: { band: "small", station: s.station_id },
+    });
+  }
+  upsertRingLayer(m, "radar-coverage", ringFeats, visible.radar_coverage);
+
+  const stationFeats = stations
+    .filter((s) => s.lat != null && s.lon != null)
+    .map((s) => ({
+      type: "Feature",
+      geometry: { type: "Point", coordinates: [s.lon, s.lat] },
+      properties: {
+        vessel_id: "",
+        label:
+          `Radar station ${s.station_id} · ${s.name} (SYNTHETIC) — holds a ` +
+          `small craft to ${Math.round(s.range_small_km)} km, a large ship to ` +
+          `${Math.round(s.range_large_km)} km`,
+      },
+    }));
+  upsertCircleLayer(m, "radar-stations", stationFeats, "#0b6e75",
+                    visible.radar_coverage, () => {}, 4);
+
+  const trackFeats = (radarTracks || []).map((tr) => ({
+    type: "Feature",
+    geometry: { type: "LineString", coordinates: tr.points.map((p) => [p[0], p[1]]) },
+    properties: { station: tr.station_id },
+  }));
+  upsertLineLayer(m, "radar-tracklines", trackFeats, "#3aa0a8", visible.radar_tracks);
+
+  // Contacts. Survivors are filled; suppressed verdicts are hollow and half
+  // opacity, present but visibly not a finding — the same "shape of a thing
+  // versus the thing" treatment the SAR layer uses for unmatched detections.
+  const contacts = (data.radarContacts || []).filter(
+    (c) => c.lat != null && c.lon != null);
+  const contactFeats = contacts.map((c) => ({
+    type: "Feature",
+    geometry: { type: "Point", coordinates: [c.lon, c.lat] },
+    properties: {
+      vessel_id: "",
+      candidate: c.status === "dark_candidate" ? 1 : 0,
+      label:
+        (c.status === "dark_candidate"
+          ? "DARK CONTACT (synthetic)"
+          : `suppressed — ${String(c.status || "").replace("suppressed_", "").replace(/_/g, " ")} (synthetic)`) +
+        ` · ${c.radar_track_id || ""}` +
+        (c.length_m ? ` · ≈${Math.round(c.length_m)} m` : "") +
+        (c.dark_minutes ? ` · ${Math.round(c.dark_minutes)} min unexplained` : "") +
+        (c.went_dark_at
+          ? ` · last explained by MMSI ${c.mmsi} at ${c.went_dark_at}`
+          : ""),
+    },
+  }));
+  upsertContactLayer(m, "radar-contacts", contactFeats, visible.radar_contacts);
+
+  // The shutdown segment: a line from where the transponder was last heard to
+  // where radar was still holding her. Drawn only for contacts that carry the
+  // pair, which means only for contacts that really were correlated first —
+  // this stroke is an assertion and it must not appear on a target nothing ever
+  // identified.
+  const segFeats = contacts
+    .filter((c) => c.went_dark_lat != null && c.went_dark_lon != null)
+    .map((c) => ({
+      type: "Feature",
+      geometry: {
+        type: "LineString",
+        coordinates: [[c.went_dark_lon, c.went_dark_lat], [c.lon, c.lat]],
+      },
+      properties: { mmsi: c.mmsi },
+    }));
+  upsertWentDarkLayer(m, "radar-wentdark", segFeats, visible.radar_contacts);
+}
+
+//: A closed ring of [lon,lat] approximating a circle of `km` around a point.
+//: Flat-earth is fine at this scale — the largest ring here is ~90 km and the
+//: error is well under the width of the stroke.
+function circleRing(lat, lon, km, steps = 72) {
+  const out = [];
+  const dLat = km / 111.32;
+  const dLon = km / (111.32 * Math.max(0.2, Math.cos((lat * Math.PI) / 180)));
+  for (let i = 0; i <= steps; i++) {
+    const a = (2 * Math.PI * i) / steps;
+    out.push([lon + dLon * Math.cos(a), lat + dLat * Math.sin(a)]);
+  }
+  return out;
+}
+
+function upsertRingLayer(m, id, feats, on) {
+  const fc = { type: "FeatureCollection", features: feats };
+  const src = m.getSource(id);
+  if (src) src.setData(fc);
+  else {
+    m.addSource(id, { type: "geojson", data: fc });
+    // Inserted BENEATH the AOI outline, which is the first layer this app adds
+    // after the basemap. Coverage is context: a ring painted over the contact
+    // it explains is a ring in the way. Layer order in MapLibre is creation
+    // order unless a beforeId says otherwise, and these are created last.
+    const under = m.getLayer("aoi-line") ? "aoi-line" : undefined;
+    m.addLayer({
+      id: id + "-fill", type: "fill", source: id,
+      paint: {
+        "fill-color": "#0b6e75",
+        "fill-opacity": ["case", ["==", ["get", "band"], "small"], 0.07, 0.035],
+      },
+    }, under);
+    m.addLayer({
+      id: id + "-line", type: "line", source: id,
+      paint: {
+        "line-color": "#0b6e75",
+        "line-width": 0.9,
+        "line-opacity": ["case", ["==", ["get", "band"], "small"], 0.55, 0.35],
+        "line-dasharray": ["case", ["==", ["get", "band"], "small"], ["literal", [1, 0]], ["literal", [3, 2]]],
+      },
+    }, under);
+  }
+  for (const suff of ["-fill", "-line"]) {
+    if (m.getLayer(id + suff))
+      m.setLayoutProperty(id + suff, "visibility", on ? "visible" : "none");
+  }
+}
+
+function upsertContactLayer(m, id, feats, on) {
+  const fc = { type: "FeatureCollection", features: feats };
+  const src = m.getSource(id);
+  if (src) src.setData(fc);
+  else {
+    m.addSource(id, { type: "geojson", data: fc });
+    m.addLayer({
+      id, type: "circle", source: id,
+      paint: {
+        "circle-radius": ["case", ["==", ["get", "candidate"], 1], 8, 4],
+        "circle-color": ["case", ["==", ["get", "candidate"], 1], "#d33682", "rgba(0,0,0,0)"],
+        "circle-opacity": 0.85,
+        "circle-stroke-width": 2,
+        "circle-stroke-color": "#d33682",
+        "circle-stroke-opacity": ["case", ["==", ["get", "candidate"], 1], 1, 0.45],
+      },
+    });
+    m.on("click", id, (e) => {
+      new maplibregl.Popup({ closeButton: false, offset: 10 })
+        .setLngLat(e.lngLat)
+        .setHTML(`<b>${e.features[0].properties.label}</b>`)
+        .addTo(m);
+    });
+    m.on("mouseenter", id, () => (m.getCanvas().style.cursor = "pointer"));
+    m.on("mouseleave", id, () => (m.getCanvas().style.cursor = ""));
+  }
+  if (m.getLayer(id)) m.setLayoutProperty(id, "visibility", on ? "visible" : "none");
+}
+
+function upsertWentDarkLayer(m, id, feats, on) {
+  const fc = { type: "FeatureCollection", features: feats };
+  const src = m.getSource(id);
+  if (src) src.setData(fc);
+  else {
+    m.addSource(id, { type: "geojson", data: fc });
+    m.addLayer({
+      id, type: "line", source: id,
+      paint: {
+        "line-color": "#b0221b", "line-width": 2,
+        "line-opacity": 0.8, "line-dasharray": [2, 1.5],
+      },
+    });
+  }
+  if (m.getLayer(id)) m.setLayoutProperty(id, "visibility", on ? "visible" : "none");
 }
 
 function upsertDetectionLayer(m, id, feats, on) {

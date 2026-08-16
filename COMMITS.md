@@ -488,6 +488,8 @@ a 2-D Gaussian log-density fixes it; the well-constrained case is numerically
 unchanged, which is why the SAR regression suite still passes untouched.
 
 **Measured, synthetic, through the landed pipeline: precision 100%, recall 50%.**
+*(Superseded by ADR-029: re-measured at precision 100%, recall 43% — 3 of 7 —
+after the corpus was regenerated. Left as written; this file is a log.)*
 Zero false positives; zero fires on the three out-of-coverage episodes or on the
 naval decoy. The weakest number is stated too: correlation resolves about one
 radar track in nine, and the honest cause is AIS receipt sparsity in the
@@ -502,4 +504,71 @@ python -m pytest -q tests/test_radar.py          # 27 passed
 python tools/run_scenario_pipeline.py            # stages 3b and 4b, then the
                                                  # dark-contact results block
 python -m maritime_isr.cli radar correlate
+```
+
+---
+
+## feat: close Build 1 — the shutdown story, a serving layer, and two rules that were asking the wrong question (ADR-029)
+
+**Why.** ADR-028 merged with four things listed as unfinished. Three of them are
+closed here. The fourth — *nothing has run on Eshan's machine* — cannot be closed
+from a sandbox and is answered rather than fixed.
+
+**The number that was wrong.** The merged PR, ADR-028, STATE.md and the README
+all said radar↔AIS correlation "resolves about one radar track in nine". It does
+not. Two faults: the probe counted **genuinely dark vessels** as correlation
+failures (they are the finding), and `associate_scene` gated every contact in a
+15-minute epoch at the **epoch's** timestamp rather than the contact's own — 5.5
+km of manufactured error at 13 knots. Fixed with one function, `_t_of(c)`; the
+assignment, the score and the floor are untouched. A second fix has `state_at`
+**bridge between two known fixes** instead of extrapolating from the earlier one,
+cutting r95 error at the midpoint of a gap from **4,120 m to 1,450 m**.
+
+Corrected, on the same denominator: **978 of 996 resolvable tracks (98.2%)
+resolve to the right hull**, 11 to the wrong one (10 of them not claimed), 7 to
+none — and of 241 tracks belonging to a genuinely silent vessel, **zero were
+confidently explained away by another hull**. OQ-radar-1 is closed by this, not
+by retuning the generator.
+
+**What landed.**
+
+- `fusion/radar_ais.py` — `identity_known` on a dark row when a *named* hull was
+  watched stopping, so the neighbourhood census is skipped for that row alone;
+  `_receipts_between` to decide she really went quiet by counting her receipts
+  during the dark run (0 in five hours vs 66); `land_correlation` so the result
+  reaches disk; `ambiguous` admitted into the cascade.
+- `api/service.py`, `api/models.py`, `api/app.py` — `/api/radar/stations`,
+  `/api/radar/contacts`, `/api/radar/tracks`, reading landed tables.
+- `frontend/src/views/RadarView.jsx` + three MapView layers — the Radar tab, the
+  suppressed verdicts behind a checkbox, two coverage rings per station, and a
+  dashed segment from a vessel's last AIS fix to where radar still had her.
+- `anomaly/library.py` — `detect_dark_rendezvous` now asks whether a party to
+  **this** meeting was unexplained, by track id, instead of scanning the whole
+  AOI; and scores from the evidence so its own threshold can exclude something.
+  **667 alerts → 81 on the same corpus, and 76 false alarms on named background
+  traffic → 0.**
+- `tools/run_scenario_pipeline.py` — a NOTE when the graph already holds alerts,
+  because the measurement reads the whole store and a stale one scores two rule
+  sets at once. That mis-measurement happened here and is written down.
+
+**Measured, synthetic, through the landed pipeline: precision 100%, recall 43%**
+(3 of 7 findable episodes), zero false positives, zero fires on the four
+out-of-coverage episodes or the naval decoy. Recall is below ADR-028's figure
+because the corpus was regenerated and the episode set changed; three of the four
+misses are dark runs of 60–95 minutes against a deliberate 120-minute floor.
+
+**Not fixed, and named:** `test_generation_is_robust_across_seeds` fails on seed
+8 (`afloat`, `vessel:fleet_16`). Verified against a clean worktree at the parent
+commit — it fails there too, so it is pre-existing land-routing, not a regression.
+
+Verify:
+
+```
+rm -f data/graph.sqlite
+python -m maritime_isr.cli scenario generate     # ~272,000 radar plots landed
+python -m maritime_isr.cli radar correlate --write
+python tools/run_scenario_pipeline.py            # stages 3b and 4b, then the
+                                                 # dark-contact results block
+python -m pytest -q tests/test_radar.py          # 34 passed
+python -m uvicorn maritime_isr.api.app:app --port 8000   # then /radar
 ```

@@ -284,6 +284,18 @@ def cmd_radar(args):
     print()
     print(format_correlation(out))
 
+    if getattr(args, "write", False):
+        from .fusion.radar_ais import land_correlation
+        from .ingest.landing import SYNTHETIC_SOURCE_ID
+        syn = bool(syn_r) and not real_r
+        written = land_correlation(
+            out,
+            source_id=SYNTHETIC_SOURCE_ID if syn else "coastal_radar",
+            is_synthetic=syn)
+        print()
+        for table, n in sorted(written.items()):
+            print(f"  landed {n:,} row(s) into {table}")
+
     darks = [v for v in out.verdicts if v["status"] == "dark_candidate"]
     if darks:
         print()
@@ -681,6 +693,9 @@ def main():
              "the dark contacts (ADR-028)")
     p.add_argument("action", choices=["correlate"], nargs="?",
                    default="correlate")
+    p.add_argument("--write", action="store_true",
+                   help="land the correlation and the contacts, so the API and "
+                        "the map can show them without re-running it")
     p.set_defaults(fn=cmd_radar)
 
     p = sub.add_parser("graph-query")

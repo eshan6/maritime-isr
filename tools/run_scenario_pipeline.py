@@ -180,11 +180,14 @@ def run_radar_stage(tracks_out: dict) -> dict:
     from maritime_isr.schemas.sources import RADAR
     from maritime_isr.tracks import build_tracks
 
+    from maritime_isr.tracks.features import detect_encounters
+
     rows = read_table("radar_track_report")
     if not rows:
         print("  no landed radar_track_report data — the radar picture has not "
               "been generated, and the dark-contact path has nothing to run on")
-        return dict(correlations=[], verdicts=[], statics=[], radar_tracks=[])
+        return dict(correlations=[], verdicts=[], statics=[], associations=[],
+                    radar_tracks=[], encounters=[])
     real, syn = split_real_synthetic(rows)
     print(f"  radar_track_report: {len(real):,} real + {len(syn):,} synthetic plot(s)")
 
@@ -217,7 +220,9 @@ def run_radar_stage(tracks_out: dict) -> dict:
     print(f"  ({time.time() - t0:.0f}s)")
     print(format_correlation(out))
     return dict(correlations=out.correlations, verdicts=out.verdicts,
-                statics=out.statics, radar_tracks=radar_tracks)
+                statics=out.statics, associations=out.associations,
+                radar_tracks=radar_tracks,
+                encounters=detect_encounters(radar_tracks))
 
 
 def run_radar_behaviour(store, radar_tracks: list) -> dict:
@@ -344,6 +349,22 @@ def run_anomalies(store: GraphStore, tracks_out: dict,
     being passed as empty literals. Two of the six detectors read nothing else.
     """
     from maritime_isr.anomaly.library import run_anomaly_library
+    # **The graph accumulates and the measurement at the end of this script
+    # reads the whole store, not this run's output.** That is correct for the
+    # graph — edge history is the moat and cannot be backfilled (CLAUDE.md §6) —
+    # and it is a trap for measuring a rule change: re-running after tightening
+    # `dark_rendezvous` reported 81 new alerts against a store still holding 667
+    # from the previous run's looser version, and the final table scored both.
+    # Alert ids are deterministic, so a re-run with the SAME code is idempotent
+    # and this number is 0; a non-zero count after a rule change means the
+    # figures below are a union of two rule sets. Say so rather than let a
+    # reader assume otherwise.
+    prior = len(store.alerts())
+    if prior:
+        print(f"  NOTE: {prior:,} alert(s) were already in the graph before this "
+              f"stage.\n        If the detectors changed since they were written, "
+              f"the measurement\n        at the end scores BOTH rule sets. Delete "
+              f"data/graph.sqlite and re-run\n        for a clean figure.")
     t0 = time.time()
     fired = run_anomaly_library(
         store,
@@ -389,9 +410,21 @@ def main() -> int:
     # Radar's dark verdicts join the SAR ones. `detect_dark_vessels` reads a
     # list of verdict rows and does not ask which sensor produced them, which
     # is the connector claim holding at the last stage as well as the first.
+    # **Every input the library takes now carries both sensors.** Verdicts,
+    # associations, encounters and tracks are concatenations, and not one of the
+    # six detectors is told which sensor a row came from — which is the
+    # connector claim holding at the last stage as well as the first. Radar
+    # encounters in particular are what let `dark_rendezvous` fire on a meeting
+    # nobody can name; without them it saw an empty list and its silence read as
+    # "radar found no rendezvous" rather than "radar was never asked".
     fusion_out = dict(
         fusion_out,
-        verdicts=[*fusion_out["verdicts"], *radar_out["verdicts"]])
+        verdicts=[*fusion_out["verdicts"], *radar_out["verdicts"]],
+        associations=[*fusion_out["associations"], *radar_out["associations"]])
+    tracks_out = dict(
+        tracks_out,
+        tracks=[*tracks_out["tracks"], *radar_out["radar_tracks"]],
+        encounters=[*tracks_out["encounters"], *radar_out["encounters"]])
     run_anomalies(store, tracks_out, fusion_out)
 
     _hdr("8. decay over the combined graph")

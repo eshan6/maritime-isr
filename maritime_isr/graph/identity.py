@@ -206,16 +206,26 @@ def track_subject_id(store, track, at: float | None = None) -> str:
     if getattr(track, "has_identity", False):
         return resolve_mmsi(store, track.mmsi, at=at)
 
-    nid = contact_node_id(track.track_key, source=track.source.name)
+    return ensure_contact_node(store, track.track_key, source=track.source.name)
+
+
+def ensure_contact_node(store, track_key: str, *, source: str) -> str:
+    """The contact node for this sensed target, created if it does not exist.
+
+    **Minting the id is not the same as creating the node**, and every caller
+    needs both: an alert whose subject names a node the graph does not hold
+    resolves to nothing, which is the shadow-stub failure ADR-022 was written
+    about. `contact_node_id` is the string; this is the object.
+    """
+    nid = contact_node_id(track_key, source=source)
     if store.node(nid) is None:
         # Same reserved-block reasoning as `resolve_mmsi`: the scenario radar
         # stations are named with a reserved prefix, so a contact minted from
         # one is scenario data. No ground truth is consulted.
-        synthetic = str(track.track_key).startswith(_SYNTHETIC_STATION_PREFIX)
+        synthetic = str(track_key).startswith(_SYNTHETIC_STATION_PREFIX)
         store.upsert_node(
             nid, CONTACT_PREFIX,
-            dict(sensor=track.source.name, track_key=track.track_key,
-                 named=False,
+            dict(sensor=source, track_key=track_key, named=False,
                  note="a sensed target with no broadcast identity"),
             is_synthetic=synthetic)
     return nid

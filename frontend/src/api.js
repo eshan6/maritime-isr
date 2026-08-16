@@ -124,4 +124,11 @@ export const api = {
   tracks: (params) => get("/tracks", params),
   scenes: () => get("/scenes"),
   ports: () => get("/ports"),
+  // ---- coastal radar (ADR-028) -----------------------------------------
+  // The station list cannot change while the process is up — it is compiled
+  // into the scenario module, not read from a table — so it is memoised like
+  // the corpus window. The contacts and tracks are landed data and are not.
+  radarStations: () => memo("radar-stations", () => get("/radar/stations")),
+  radarContacts: (params) => get("/radar/contacts", params),
+  radarTracks: (params) => get("/radar/tracks", params),
 };

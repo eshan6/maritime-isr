@@ -1261,3 +1261,167 @@ def _stats_notes(alerts: dict, length_have: int, length_total: int,
             "Encounter graph is thin; vessel-to-vessel structure on real data "
             "runs through shared ports and flags, not encounters.")
     return notes
+
+
+# --------------------------------------------------------------------------
+# coastal radar (ADR-028)
+#
+# All three read LANDED tables. Correlating the picture takes minutes over
+# thousands of epochs, so no request can do it on demand — `maritime-isr radar
+# correlate --write` lands the result and these serve it.
+# --------------------------------------------------------------------------
+
+def list_radar_stations() -> dict:
+    """The station network and what each one can see.
+
+    Served from the scenario module because that is where the network is
+    defined and there is no real one. The `is_synthetic` flag is on every row
+    and is not negotiable: a coverage map is the single most persuasive thing
+    in this whole build and the most dangerous to show unlabelled.
+    """
+    from maritime_isr.scenario.radar_network import (STATIONS, radar_horizon_km,
+                                                     target_height_m)
+    items = []
+    for s in STATIONS:
+        items.append({
+            "station_id": s.station_id,
+            "name": s.name,
+            "lat": s.lat,
+            "lon": s.lon,
+            "max_range_km": s.max_range_km,
+            # What it can hold, by target size — the honest way to draw a
+            # coverage ring, because there is no single radius.
+            "range_small_km": round(min(
+                s.max_range_km,
+                radar_horizon_km(s.antenna_height_m, target_height_m(15.0))), 1),
+            "range_large_km": round(min(
+                s.max_range_km,
+                radar_horizon_km(s.antenna_height_m, target_height_m(250.0))), 1),
+            "shadow_sectors": [list(x) for x in s.shadow_sectors],
+            "is_synthetic": True,
+        })
+    return {"count": {"real": 0, "synthetic": len(items)}, "items": items}
+
+
+def list_radar_contacts(limit: int = 500, status: str | None = None) -> dict:
+    """Dark contacts and the evidence for each, newest first.
+
+    `status` defaults to the survivors. Passing `all` returns the suppressions
+    too, because "why is this NOT dark" has to be answerable from the product
+    and not only from a terminal.
+    """
+    from maritime_isr.fusion.radar_ais import CONTACT_TABLE
+    from maritime_isr.ingest.landing import read_table
+
+    try:
+        rows = read_table(CONTACT_TABLE)
+    except Exception:                                            # noqa: BLE001
+        rows = []
+    if not rows:
+        return {"count": {"real": 0, "synthetic": 0}, "items": [],
+                "note": ("no landed radar correlation — run "
+                         "`maritime-isr radar correlate --write`")}
+    if status != "all":
+        rows = [r for r in rows if r.get("status") == "dark_candidate"]
+    rows.sort(key=lambda r: str(r.get("ts") or ""), reverse=True)
+    real = sum(1 for r in rows if not r.get("is_synthetic"))
+    out = []
+    for r in rows[:limit]:
+        out.append({
+            "candidate_id": r.get("candidate_id"),
+            "radar_track_id": r.get("radar_track_id"),
+            "station_ids": r.get("station_ids"),
+            "ts": _s(r.get("ts")),
+            "lat": r.get("lat"), "lon": r.get("lon"),
+            "length_m": r.get("length_m"),
+            "status": r.get("status"),
+            "dark_score": r.get("dark_score"),
+            "hearable_conf": r.get("hearable_conf"),
+            "dark_minutes": r.get("dark_minutes"),
+            "correlation_status": r.get("correlation_status"),
+            # Populated only when the contact was identified and then went
+            # quiet — this is the "here is where its transponder went off" pair.
+            "went_dark_at": _s(r.get("went_dark_at")),
+            "went_dark_lat": r.get("went_dark_lat"),
+            "went_dark_lon": r.get("went_dark_lon"),
+            "mmsi": r.get("mmsi"),
+            "is_synthetic": bool(r.get("is_synthetic")),
+        })
+    return {"count": {"real": real, "synthetic": len(rows) - real},
+            "items": out}
+
+
+def list_radar_tracks(max_tracks: int = 400, max_points: int = 60) -> dict:
+    """Decimated radar tracks for the map, as compact [lon,lat,epoch] arrays.
+
+    Same shape and the same reasoning as `list_tracks`: this is tens of
+    thousands of points and pydantic-validating each would cost more than it is
+    worth for coordinates.
+    """
+    from collections import defaultdict
+
+    from maritime_isr.ingest.landing import read_table
+    from maritime_isr.ingest.radar import TABLE as RADAR_TABLE
+
+    try:
+        rows = read_table(RADAR_TABLE)
+    except Exception:                                            # noqa: BLE001
+        rows = []
+    if not rows:
+        return {"count": {"real": 0, "synthetic": 0}, "items": [],
+                "note": "no landed radar_track_report data"}
+    by: dict[str, list] = defaultdict(list)
+    for r in rows:
+        lat, lon, ts = r.get("lat"), r.get("lon"), r.get("ts")
+        if lat is None or lon is None or ts is None:
+            continue
+        by[str(r.get("radar_track_id"))].append(
+            (_epoch(ts), round(float(lon), 5), round(float(lat), 5)))
+    items = []
+    for tid, pts in sorted(by.items(), key=lambda kv: -len(kv[1]))[:max_tracks]:
+        pts.sort()
+        # Ceiling division, so `max_points` is a CAP and not a hint. Floor
+        # division overshoots: 210 points at max_points=20 gives step 10 and
+        # 21 samples. That is one point over on a request the caller sized, and
+        # the caller sizing it is the whole reason this parameter exists.
+        step = max(1, -(-len(pts) // max_points))
+        thin = pts[::step]
+        # The track must end where it truly ends — a stride rarely lands on the
+        # last fix, and a polyline that stops short reads as a target that
+        # vanished. Substituted rather than appended, so the cap still holds.
+        if thin[-1] != pts[-1]:
+            thin[-1] = pts[-1]
+        items.append({
+            "radar_track_id": tid,
+            "station_id": tid.split(":", 1)[0],
+            "n_points": len(pts),
+            "points": [[lon, lat, t] for t, lon, lat in thin],
+            "is_synthetic": True,
+        })
+    return {"count": {"real": 0, "synthetic": len(items)}, "items": items}
+
+
+def _epoch(v) -> int:
+    """Unix seconds from whatever the landing layer handed back.
+
+    Parquet round-trips a timestamp column as `pandas.Timestamp`, which IS a
+    `datetime` subclass, so the first branch covers the normal path without
+    importing pandas into the serving layer. A tz-naive value is read as UTC,
+    matching every other timestamp in this codebase — `.timestamp()` on a naive
+    datetime would otherwise silently apply the host's local zone and shift the
+    whole track by the machine's offset.
+    """
+    if isinstance(v, datetime):
+        if v.tzinfo is None:
+            v = v.replace(tzinfo=timezone.utc)
+        return int(v.timestamp())
+    if isinstance(v, (int, float)):
+        return int(v)
+    try:
+        s = str(v).strip().replace("Z", "+00:00")
+        d = datetime.fromisoformat(s)
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=timezone.utc)
+        return int(d.timestamp())
+    except Exception:                                            # noqa: BLE001
+        return 0

@@ -28,8 +28,11 @@ import math
 
 import pandas as pd
 
-from ..config import ANOMALY_THRESHOLDS, GEOFENCE_LOITER_MIN_HOURS
-from ..graph.identity import resolve_mmsi, track_subject_id
+from ..config import (ANOMALY_THRESHOLDS, GEOFENCE_LOITER_MIN_HOURS,
+                      RENDEZVOUS_NEAR_KM, RENDEZVOUS_PARTY_SLACK_S,
+                      RENDEZVOUS_WINDOW_S)
+from ..graph.identity import (ensure_contact_node, resolve_mmsi,
+                              track_subject_id)
 from ..ports import PORTS as _PORTS
 
 # --- sensitive geometry (geofence layer, roadmap 5.2 #4) ------------------
@@ -131,22 +134,90 @@ def detect_spoofing(store, spoof_events: list[dict], verdicts: list[dict],
 
 # ---------------- 3. dark rendezvous ----------------
 
+def _encounter_subject(store, e: dict, side: str, t: float) -> str:
+    """The graph node for one party to an encounter, whatever saw it.
+
+    An encounter derived from AIS names two MMSIs and resolves to two hulls. One
+    derived from **radar** names two station track numbers and no hull at all —
+    which is the interesting case, because a meeting between two contacts nobody
+    can name is exactly the ship-to-ship signature this rule exists to find.
+
+    `resolve_mmsi(store, None)` would mint `vessel:mmsi:None` for both parties,
+    so the rendezvous would be recorded as a vessel meeting itself. Same defect
+    as ADR-028's second finding, one module along.
+    """
+    mmsi = e.get(f"mmsi_{side}")
+    if mmsi is not None:
+        return resolve_mmsi(store, mmsi, at=t)
+    key = e.get(f"track_key_{side}") or e.get(f"track_id_{side}")
+    return ensure_contact_node(store, str(key),
+                               source=e.get("track_source") or "radar")
+
+
 def detect_dark_rendezvous(store, encounters: list[dict],
                            associations: list[dict], *, source_ref: str) -> list[str]:
-    """An encounter where at least one party is AIS-silent at scene-adjacent
-    time — the ship-to-ship transfer signature. We approximate 'silent' via
-    the fusion layer: a party with an in_ais_gap match, OR an unmatched dark
-    detection within the encounter footprint."""
+    """An encounter where at least one party is AIS-silent at the time — the
+    ship-to-ship transfer signature.
+
+    **"A party to this meeting was silent" is what the rule means, and until
+    coastal radar arrived it was not what the rule asked.** Two things were
+    wrong, and both stayed invisible because the SAR corpus holds six unmatched
+    contacts in total, so a loose test was almost always false by accident:
+
+      * `gap_party` was computed over every unmatched association *anywhere in
+        the AOI* within twelve hours. No distance test at all. It asked "was
+        anything, anywhere in the Arabian Sea, dark today?"
+      * `footprint` did narrow to 3 km of the encounter — but 3 km of open
+        water off a working coast contains other traffic, and an unexplained
+        blip near two ships is not evidence about either of them.
+
+    Coastal radar supplies four orders of magnitude more unmatched contacts and
+    the consequence was immediate: **667 dark_rendezvous alerts on seed 7, 76 of
+    them on background traffic with no truth row behind them.** A rule that
+    fires on every meeting in the picture is worse than one that never fires,
+    because it also buries the ones that matter (ADR-004).
+
+    So the question is asked of the parties themselves. A sensor that tracks its
+    own targets stamps the sensing track into the detection id, so an unmatched
+    association can be attributed to the exact track it came from — and an
+    encounter knows its two tracks by id. "This meeting had a silent party" then
+    becomes a lookup rather than a proximity guess.
+
+    The positional test survives for detections that have **no track of their
+    own** — a SAR scene detection is a single look at an object nobody is
+    following, and position is genuinely all there is. That path is unchanged,
+    which is why the SAR behaviour this rule was written for still holds.
+    """
     out = []
-    # index dark detections by rough location/time for footprint lookup
     darks = [a for a in associations if a["status"] == "unmatched"]
+
+    # Unexplained observations that belong to a track we are following, indexed
+    # by that track. `<track_id>@<epoch>` is the radar path's detection id.
+    silent_at: dict[str, list[float]] = {}
+    untracked: list[dict] = []
+    for a in darks:
+        did = str(a.get("detection_id") or "")
+        if "@" in did:
+            silent_at.setdefault(did.rsplit("@", 1)[0], []).append(
+                a["ts"].timestamp())
+        else:
+            untracked.append(a)
+
     for e in encounters:
         t = e["t_start"].timestamp()
-        # nearest dark detection to the encounter centroid within ~3 km / 12 h
-        near = [a for a in darks
-                if abs(a["ts"].timestamp() - t) < 12 * 3600]
-        footprint = None
-        for a in near:
+        t_end = pd.Timestamp(e["t_end"]).timestamp()
+        # Direct evidence: one of THESE two tracks was unexplained while THIS
+        # meeting was happening. One epoch of slack either side, no more —
+        # the claim is about the meeting, not about the day.
+        party_silent = any(
+            t - RENDEZVOUS_PARTY_SLACK_S <= s <= t_end + RENDEZVOUS_PARTY_SLACK_S
+            for k in (e.get("track_id_a"), e.get("track_id_b")) if k
+            for s in silent_at.get(k, ()))
+
+        near = []
+        for a in untracked:
+            if abs(a["ts"].timestamp() - t) >= RENDEZVOUS_WINDOW_S:
+                continue
             # Associations carry the contact's position directly now. They did
             # not, and this loop read `a["props"]["lat"]` — a key that was never
             # written — so `footprint` was always None and the rule could only
@@ -157,20 +228,37 @@ def detect_dark_rendezvous(store, encounters: list[dict],
                 la, lo = a["props"].get("lat"), a["props"].get("lon")
             if la is None or lo is None:
                 continue
-            if _hav_km(e["lat"], e["lon"], la, lo) < 3.0:
-                footprint = a
-                break
+            if _hav_km(e["lat"], e["lon"], la, lo) < RENDEZVOUS_NEAR_KM:
+                near.append(a)
+        footprint = next(iter(near), None)
         gap_party = any(a.get("in_ais_gap") for a in near)
-        if not (footprint or gap_party):
+        if not (party_silent or footprint or gap_party):
             continue
-        va = resolve_mmsi(store, e["mmsi_a"], at=t)
-        vb = resolve_mmsi(store, e["mmsi_b"], at=t)
-        score = min(1.0, 0.5 + e["confidence"] * 0.4 + (0.15 if footprint else 0))
+        va = _encounter_subject(store, e, "a", t)
+        vb = _encounter_subject(store, e, "b", t)
+        # **The score has to be able to fall below the threshold, and it could
+        # not.** It read `0.5 + confidence * 0.4 + …` against a threshold of
+        # 0.50, so its floor WAS the threshold: every encounter that reached
+        # this line was emitted, and `ANOMALY_THRESHOLDS["dark_rendezvous"]`
+        # had no effect on anything. Starting from the evidence instead means a
+        # marginal encounter with only circumstantial silence nearby now scores
+        # under the bar and stays out of the queue, while a confident meeting
+        # with a demonstrably silent party clears it comfortably.
+        score = min(1.0, 0.35 + 0.35 * e["confidence"]
+                    + (0.25 if party_silent else 0.0)
+                    + (0.10 if footprint else 0.0))
         ev = [dict(edge="met-with", src=va, dst=vb,
                    confidence=round(e["confidence"], 3), source="track_engine",
                    source_ref=source_ref,
                    props=dict(encounter_id=e["encounter_id"],
-                              silent_party=bool(footprint or gap_party)))]
+                              silent_party=bool(party_silent or footprint
+                                                or gap_party),
+                              # Which kind of evidence — an analyst opening this
+                              # needs to know whether a party was demonstrably
+                              # unexplained or something merely was, nearby.
+                              silence_evidence=("party" if party_silent
+                                                else "footprint" if footprint
+                                                else "nearby_gap")))]
         _emit(out, store, "dark_rendezvous", va, t, score, ev,
               props=dict(counterpart=vb, encounter_id=e["encounter_id"],
                          lat=e["lat"], lon=e["lon"]))

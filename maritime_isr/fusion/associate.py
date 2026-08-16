@@ -235,8 +235,35 @@ def associate_scene(scene: dict, tracks: list, registry: dict[int, float],
     ship. That flag, not unmatched-ness, is the correct dark signal for a
     vessel we CAN still associate."""
     gaps_by_track = gaps_by_track or {}
-    t_s = pd.Timestamp(scene["ts"]).timestamp()
+    t_scene = pd.Timestamp(scene["ts"]).timestamp()
     contacts = scene["detections"]
+
+    def _t_of(c: dict) -> float:
+        """When THIS contact was observed.
+
+        **A SAR scene is one instant and a radar sweep is not.** Every contact
+        in a Sentinel-1 scene shares the acquisition time, so a single scene
+        timestamp was exactly right and stayed right for as long as SAR was the
+        only source. A radar correlation epoch is fifteen minutes wide, and
+        gating a contact observed at minute fourteen against every track's
+        position at minute zero asks where the vessel *was* rather than where
+        she *is* — at twelve knots that is five kilometres of manufactured
+        error, applied to some contacts and not others depending only on where
+        they happened to fall in the bin.
+
+        The effect was large and completely invisible in isolation: associated
+        on its own, R2's tanker matched her own AIS track in 12 of 23 epochs;
+        in the full picture, where the scene timestamp is the earliest contact's
+        rather than hers, 4 of 23. That is the difference between "she was this
+        vessel and then she went quiet" and "unexplained contact".
+        """
+        v = c.get("ts")
+        if v is None:
+            return t_scene
+        try:
+            return pd.Timestamp(v).timestamp()
+        except (TypeError, ValueError):
+            return t_scene
     # precompute visited cells per track once
     for tr in tracks:
         if not hasattr(tr, "_visited_cells"):
@@ -245,7 +272,7 @@ def associate_scene(scene: dict, tracks: list, registry: dict[int, float],
                 tr.points[tr.points.quality != "outlier"].iloc[::10].itertuples())
 
     cand: list[list] = [
-        [g for g in _gate(c, tracks, t_s)
+        [g for g in _gate(c, tracks, _t_of(c))
          if _length_compatible(c, g[0].mmsi, registry)]
         for c in contacts]
 
@@ -259,7 +286,7 @@ def associate_scene(scene: dict, tracks: list, registry: dict[int, float],
     scores = {}
     for i, cs in enumerate(cand):
         for tr, st, d, r, sig in cs:
-            sc = _score(contacts[i], tr, st, d, sig, registry, t_s)
+            sc = _score(contacts[i], tr, st, d, sig, registry, _t_of(contacts[i]))
             scores[(i, tr.track_id)] = (sc, tr, st, d)
             cost[i, tix[tr.track_id]] = -sc
         cost[i, n_t + i] = -ASSOC_SCORE_FLOOR          # the "no match" option
@@ -281,7 +308,9 @@ def associate_scene(scene: dict, tracks: list, registry: dict[int, float],
         # compute a 3 km separation from it without inverting the tiling, which
         # is not what a cell is for.
         base = dict(association_id=aid, detection_id=c["detection_id"],
-                    scene_id=scene["scene_id"], ts=pd.Timestamp(scene["ts"]),
+                    scene_id=scene["scene_id"],
+                    # the CONTACT's own time, not the scene's — see `_t_of`
+                    ts=pd.Timestamp(c.get("ts") or scene["ts"]),
                     lat=float(c["lat"]), lon=float(c["lon"]),
                     h3_cell=tiling.cell(c["lat"], c["lon"]))
         alts = sorted(((sc, tid) for (ci, tid), (sc, *_ ) in scores.items()
@@ -304,8 +333,9 @@ def associate_scene(scene: dict, tracks: list, registry: dict[int, float],
         status = "ambiguous" if margin < ASSOC_AMBIGUITY_MARGIN else "matched"
         reg_len = registry.get(tr.mmsi)
         in_gap, gtype = False, None
+        t_c = _t_of(c)
         for g in gaps_by_track.get(tid, []):
-            if g["t_start"].timestamp() <= t_s <= g["t_end"].timestamp():
+            if g["t_start"].timestamp() <= t_c <= g["t_end"].timestamp():
                 in_gap, gtype = True, g["gap_type"]
                 break
         out.append(dict(
