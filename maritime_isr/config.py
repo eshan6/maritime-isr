@@ -300,6 +300,24 @@ ANOMALY_THRESHOLDS = {
 RISK_HALF_LIFE_DAYS = 30.0        # anomaly contributions to risk decay
 RISK_SANCTION_HOPS = 3            # graph proximity search depth for risk
 GEOFENCE_LOITER_MIN_HOURS = 1.5   # loitering near sensitive geometry
+
+#: How close in space and time an unexplained contact must be to an encounter
+#: before it counts as evidence that a party to that encounter was dark.
+#:
+#: 3 km is the encounter footprint the rule already used for its positional
+#: test; naming it here is what let the *other* branch of the same rule stop
+#: asking a global question (see `detect_dark_rendezvous`). Twelve hours is
+#: wide on purpose — a transfer and the pass that catches one party silent need
+#: not be simultaneous — and it is only defensible now that it is paired with a
+#: distance.
+RENDEZVOUS_NEAR_KM = 3.0
+RENDEZVOUS_WINDOW_S = 12 * 3600.0
+
+#: How far outside the encounter's own span a party's unexplained observation
+#: may sit and still be about that encounter. One correlation epoch. This one is
+#: deliberately tight where the other two are loose: it applies to direct
+#: evidence about a named party, so there is nothing to be generous about.
+RENDEZVOUS_PARTY_SLACK_S = 15 * 60.0
 # Feedback loop: a detector may auto-retune only after this many dispositions
 FEEDBACK_MIN_DISPOSITIONS = 6
 
@@ -423,6 +441,17 @@ RADAR_NEIGHBOURHOOD_RES = 7
 #: and manufactures an excess contact out of her own reporting schedule. An hour
 #: either side spans the anchored reporting interval with margin.
 RADAR_CENSUS_WINDOW_EPOCHS = 4
+
+#: How many explained epochs a track needs *before* going quiet for the
+#: transition to be claimable.
+#:
+#: "She was this vessel, and then she stopped being anyone" is only worth
+#: saying if the first half is solid. Three epochs is forty-five minutes of
+#: agreement, which is enough that the identification is not an accident of one
+#: lucky gate.
+RADAR_LEAD_MIN_EPOCHS = 3
+
+
 
 # ---- Phase 2: AIS track engine constants ------------------------------
 # Physical cap on the uncertainty cone: no displacement hypothesis beyond

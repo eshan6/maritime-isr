@@ -28,6 +28,8 @@ import hashlib
 from datetime import timezone
 
 from ..ingest.landing import land_table, stamp_envelope, stamp_h3
+from ..fusion.radar_ais import (CONTACT_TABLE as T_RADAR_CONTACT,
+                                CORRELATION_TABLE as T_RADAR_CORR)
 from ..ingest.radar import TABLE as T_RADAR
 from ..ingest.sanctions_match import MATCH_TABLE
 from .identifiers import SYNTHETIC_SOURCE_ID
@@ -65,6 +67,10 @@ EVENT_TABLES = {
 #: real-vs-synthetic split.
 ALL_TABLES = (T_IDENTITY, *EVENT_TABLES.values(), T_POSITIONS, T_DETECTIONS,
               T_SANCTIONS, T_ORGS, T_OWNERSHIP, MATCH_TABLE, T_RADAR,
+              # Derived radar products. Listed so `scenario clear`
+              # removes them too — a clear that silently missed a
+              # table would leave orphan synthetic rows behind.
+              T_RADAR_CORR, T_RADAR_CONTACT,
               TRUTH_TABLE, RADAR_TRUTH_TABLE)
 
 

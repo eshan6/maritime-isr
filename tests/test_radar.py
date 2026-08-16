@@ -45,16 +45,17 @@ T0 = pd.Timestamp("2026-06-01 00:00:00", tz="UTC")
 
 def _radar_rows(track_id, n=40, step_s=300, lat0=21.6, lon0=69.4,
                 dlat=0.004, dlon=0.004, station="SYN-POR", length=140.0,
-                t_start=T0, sigma=60.0, sog=11.0):
+                t_start=T0, sigma=60.0, sog=11.0, cog=45.0):
     """One clean radar track, in the conformed `radar_track_report` shape."""
     rows = []
     for i in range(n):
         rows.append(dict(
-            report_id=f"{station}:{i}", station_id=station,
+            report_id=f"{station}:{int(t_start.timestamp())}:{i}",
+            station_id=station,
             radar_track_id=track_id,
             ts=t_start + pd.Timedelta(seconds=i * step_s),
             lat=lat0 + i * dlat, lon=lon0 + i * dlon,
-            sog_kn=sog, cog_deg=45.0, range_km=20.0, bearing_deg=200.0,
+            sog_kn=sog, cog_deg=cog, range_km=20.0, bearing_deg=200.0,
             position_sigma_m=sigma,
             rcs_dbsm=radar_conn.rcs_dbsm_from_length(length),
             length_est_m=length, snr_db=14.0, track_quality=80))
@@ -522,3 +523,231 @@ def test_source_descriptor_refuses_an_incoherent_sensor():
     assert source_by_name("radar") is RADAR
     with pytest.raises(ValueError, match="unknown track source"):
         source_by_name("lidar")
+
+
+def test_dark_rendezvous_fires_on_two_radar_contacts(tmp_path):
+    """The Build 1 acceptance item: *every* behavioural detector runs on radar.
+
+    This one could not, and the reason was structural rather than a threshold.
+    `detect_dark_rendezvous` reads encounters and associations; the pipeline
+    handed it AIS encounters only, so radar meetings were computed, printed and
+    then dropped. Its silence read as "radar found no rendezvous" when it had
+    never been asked.
+
+    Two contacts alongside, one of them explained by AIS and one not, is the
+    ship-to-ship signature — and neither party has an MMSI, so the subject has
+    to resolve to contact nodes rather than to a vessel meeting itself.
+    """
+    from maritime_isr.anomaly.library import detect_dark_rendezvous
+    from maritime_isr.graph import GraphStore
+
+    a = _radar_rows("SYN-VEN:0001", n=24, lat0=15.900, lon0=73.500,
+                    dlat=0.0, dlon=0.0, sog=0.4)
+    b = _radar_rows("SYN-VEN:0002", n=24, lat0=15.9022, lon0=73.500,
+                    dlat=0.0, dlon=0.0, sog=0.4)
+    tracks, _ = build_tracks(pd.concat([a, b]), source=RADAR)
+    encs = detect_encounters(tracks)
+    assert encs, "fixture problem: no radar encounter to reason about"
+
+    # An unmatched contact inside the encounter footprint — what the rule reads
+    # as "one party here is explaining nothing".
+    assoc = [dict(status="unmatched", ts=T0 + pd.Timedelta(minutes=30),
+                  lat=15.9011, lon=73.500, in_ais_gap=False,
+                  detection_id="d0", track_id=None)]
+    store = GraphStore(tmp_path / "g.sqlite")
+    try:
+        fired = detect_dark_rendezvous(store, encs, assoc, source_ref="test")
+        assert fired, "dark_rendezvous produced nothing from radar encounters"
+        al = store.alerts()[0]
+        assert al["subject"].startswith("contact:radar:"), al["subject"]
+        assert al["props"]["counterpart"].startswith("contact:radar:")
+        assert al["subject"] != al["props"]["counterpart"], (
+            "both parties resolved to the same node — a vessel meeting itself")
+        # the node must EXIST, not merely be named
+        assert store.node(al["subject"]) is not None
+    finally:
+        store.close()
+
+
+def test_dark_rendezvous_ignores_an_unmatched_contact_on_the_other_coast(tmp_path):
+    """The locality repair, stated as a test rather than as a threshold.
+
+    `gap_party` used to be computed over every unmatched association in the AOI
+    within twelve hours, with no distance test at all — so the rule asked "was
+    anything, anywhere, dark today?" and fired on every meeting in the picture.
+    It went unnoticed while SAR supplied six unmatched contacts in total; coastal
+    radar supplies tens of thousands, and seed 7 produced 667 alerts.
+
+    Same encounter as the test above, same twelve-hour window, one difference:
+    the silent contact is 300 km away off the other side of the peninsula. There
+    is no evidence any party to THIS meeting was dark, so there is no finding.
+    """
+    from maritime_isr.anomaly.library import detect_dark_rendezvous
+    from maritime_isr.graph import GraphStore
+
+    a = _radar_rows("SYN-VEN:0001", n=24, lat0=15.900, lon0=73.500,
+                    dlat=0.0, dlon=0.0, sog=0.4)
+    b = _radar_rows("SYN-VEN:0002", n=24, lat0=15.9022, lon0=73.500,
+                    dlat=0.0, dlon=0.0, sog=0.4)
+    tracks, _ = build_tracks(pd.concat([a, b]), source=RADAR)
+    encs = detect_encounters(tracks)
+    assert encs, "fixture problem: no radar encounter to reason about"
+
+    far = [dict(status="unmatched", ts=T0 + pd.Timedelta(minutes=30),
+                lat=18.60, lon=72.60, in_ais_gap=True,
+                detection_id="d-far", track_id=None)]
+    store = GraphStore(tmp_path / "g.sqlite")
+    try:
+        assert detect_dark_rendezvous(store, encs, far, source_ref="test") == []
+        assert store.alerts() == []
+    finally:
+        store.close()
+
+
+def test_an_ambiguous_track_reaches_the_cascade_and_is_judged_there():
+    """A partly-explained track must produce a verdict, not an absence.
+
+    The gate into the cascade read `("dark", "correlated_then_dark")`, so a
+    track whose support fell between the two thresholds was dropped before any
+    filter saw it. Measured on seed 7, two of the seven findable episodes had no
+    verdict row anywhere in the store — indistinguishable, from the outside,
+    from episodes that were never in the picture.
+
+    The fixture is the literal meaning of the word: a target held stationary for
+    three hours, with TWO broadcasters passing through it. The first sits on it
+    for the opening three epochs and then leaves north; the second arrives,
+    holds for three epochs, and leaves east; the last six epochs nothing is
+    anywhere near. Neither hull wins enough of the track to be the answer and
+    both win enough to be a candidate — which is the state `ambiguous` names,
+    and the state the gate used to discard.
+
+    Note the two competitors are what keeps it out of the `correlated_then_dark`
+    branch too: the lead is split evenly, so no single AIS track explains most
+    of the run-up, and the transition story is correctly not told.
+
+    The claim under test is that a verdict EXISTS and can be traced back to its
+    track, not that the verdict is any particular one. Which way the cascade
+    decides is the cascade's business and is covered by its own tests; being
+    asked at all is what regressed.
+    """
+    # A stationary radar target: 36 fixes over three hours in one place.
+    rad, _ = build_tracks(
+        _radar_rows("SYN-POR:0001", n=36, dlat=0.0, dlon=0.0, sog=0.3),
+        source=RADAR)
+
+    # First broadcaster: on the target for fixes 0-8, then away north.
+    a = _ais_rows(999000003, n=36, dlat=0.0, dlon=0.0, sog=0.3)
+    a.loc[9:, "lat"] = [21.6 + 0.01 * (i - 8) for i in range(9, 36)]
+    # Second: closing from the east, on the target for fixes 9-17, then away.
+    b = _ais_rows(999000004, n=36, dlat=0.0, dlon=0.0, sog=6.0)
+    b.loc[:8, "lon"] = [69.50 - 0.01 * i for i in range(9)]
+    b.loc[9:17, "lon"] = 69.40
+    b.loc[18:, "lon"] = [69.40 + 0.01 * (i - 17) for i in range(18, 36)]
+    both = pd.concat([a, b], ignore_index=True)
+    ais, _ = build_tracks(both, source=AIS)
+    out = correlate_radar(rad, ais, _cov(both),
+                          {999000003: 140.0, 999000004: 140.0})
+
+    c = out.correlations[0]
+    assert c["status"] == "ambiguous", (c["status"], c["support"])
+    assert 0.20 <= c["support"] < 0.55, c["support"]
+    assert out.verdicts, (
+        "an ambiguous track with a dark run produced no verdict at all — the "
+        "cascade never saw it, so 'why is this not dark' has no answer")
+    v = out.verdicts[0]
+    assert v["status"], "a verdict with no status is not an answer"
+    assert v["correlation_id"] == c["correlation_id"], (
+        "the verdict cannot be traced back to the radar track that produced it")
+
+
+# ==========================================================================
+# 10. the serving layer — a watchkeeper has to be able to SEE this
+# ==========================================================================
+#
+# The radar path was CLI-only through its first merge: the correlation ran, the
+# verdicts landed, and the only way to read either was a terminal. These tests
+# drive the real FastAPI app through its real routes, because an endpoint that
+# is only known to import is not an endpoint anybody can use.
+
+def _client():
+    from fastapi.testclient import TestClient
+
+    from maritime_isr.api.app import create_app
+    from maritime_isr.api.settings import settings
+    c = TestClient(create_app())
+    c.headers.update({"X-API-Token": settings.token})
+    return c
+
+
+def test_station_endpoint_serves_two_rings_and_flags_every_row_synthetic():
+    """The coverage map is the most persuasive picture here and the most
+    dangerous to serve unlabelled: there is no real radar behind it.
+
+    Two rings, not one, because the radar horizon depends on target height — a
+    single circle would either promise skiff coverage a station does not have or
+    hide tanker coverage it does.
+    """
+    r = _client().get("/api/radar/stations")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["count"]["real"] == 0
+    assert body["items"], "no stations served"
+    for s in body["items"]:
+        assert s["is_synthetic"] is True, s["station_id"]
+        assert 0 < s["range_small_km"] <= s["range_large_km"] <= s["max_range_km"]
+        assert 5.0 <= s["lat"] <= 25.0 and 60.0 <= s["lon"] <= 78.0
+
+
+def test_contact_endpoint_defaults_to_survivors_and_can_show_suppressions():
+    """'Why is this NOT dark' has to be answerable from the product.
+
+    Skipped rather than asserted-empty when nothing is landed: this reads the
+    real store, and a checkout that has not run `radar correlate --write` has
+    nothing to serve. Asserting an empty list would pass in exactly the case the
+    test exists to check.
+    """
+    c = _client()
+    r = c.get("/api/radar/contacts")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    if body.get("note"):
+        pytest.skip("no landed radar correlation in this checkout")
+    assert all(i["status"] == "dark_candidate" for i in body["items"])
+
+    every = c.get("/api/radar/contacts", params={"status": "all", "limit": 2000})
+    assert every.status_code == 200
+    kinds = {i["status"] for i in every.json()["items"]}
+    assert kinds - {"dark_candidate"}, (
+        "no suppressed verdict is reachable through the API — the cascade is a "
+        "black box from the operator's side")
+
+
+def test_track_endpoint_decimates_and_keeps_points_in_time_order():
+    r = _client().get("/api/radar/tracks",
+                      params={"max_tracks": 5, "max_points": 20})
+    assert r.status_code == 200, r.text
+    items = r.json()["items"]
+    if not items:
+        pytest.skip("no landed radar_track_report in this checkout")
+    for t in items:
+        assert len(t["points"]) <= 20, "decimation did not hold"
+        assert t["n_points"] >= len(t["points"])
+        epochs = [p[2] for p in t["points"]]
+        assert epochs == sorted(epochs), "points are not in time order"
+        for lon, lat, _ts in t["points"]:
+            assert 60.0 <= lon <= 78.0 and 5.0 <= lat <= 25.0
+
+
+def test_epoch_reads_a_naive_timestamp_as_utc():
+    """Parquet hands back tz-naive timestamps, and `.timestamp()` on one applies
+    the HOST's local zone — which would slide every radar track on the map by
+    the machine's offset, silently, and differently on Eshan's laptop than in
+    the sandbox."""
+    import datetime as dt
+
+    from maritime_isr.api.service import _epoch
+    want = int(dt.datetime(2026, 6, 25, 12, 36, tzinfo=dt.timezone.utc).timestamp())
+    assert _epoch(dt.datetime(2026, 6, 25, 12, 36)) == want
+    assert _epoch(pd.Timestamp("2026-06-25 12:36", tz="UTC")) == want
+    assert _epoch("2026-06-25T12:36:00Z") == want
+    assert _epoch(None) == 0

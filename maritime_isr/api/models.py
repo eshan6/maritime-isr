@@ -423,6 +423,53 @@ class Port(BaseModel):
     is_synthetic: bool = False
 
 
+class RadarStation(BaseModel):
+    """One coastal radar site and the two rings that bracket what it holds.
+
+    There is no single coverage radius — the radar horizon depends on how tall
+    the *target* is, so a 250 m tanker is held roughly twice as far out as a
+    15 m skiff. Shipping both bounds is the only honest way to draw the ring;
+    a single circle would either promise skiff coverage the site does not have
+    or hide tanker coverage it does.
+    """
+    station_id: str
+    name: str
+    lat: float
+    lon: float
+    max_range_km: float
+    range_small_km: float            # horizon for a ~15 m target
+    range_large_km: float            # horizon for a ~250 m target
+    shadow_sectors: list[list[float]] = []
+    is_synthetic: bool = True
+
+
+class RadarContact(BaseModel):
+    """A radar track with no matching broadcaster — a dark candidate.
+
+    `went_dark_at/lat/lon` are populated only for a contact that WAS correlated
+    to an MMSI and then lost it: that pair is "here is where its transponder
+    went quiet", and it is null for a target that never transmitted at all.
+    Nulls here are meaningful, not missing data.
+    """
+    candidate_id: Optional[str] = None
+    radar_track_id: Optional[str] = None
+    station_ids: Optional[str] = None
+    ts: Optional[str] = None
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+    length_m: Optional[float] = None
+    status: Optional[str] = None
+    dark_score: Optional[float] = None
+    hearable_conf: Optional[float] = None
+    dark_minutes: Optional[float] = None
+    correlation_status: Optional[str] = None
+    went_dark_at: Optional[str] = None
+    went_dark_lat: Optional[float] = None
+    went_dark_lon: Optional[float] = None
+    mmsi: Optional[int] = None
+    is_synthetic: bool = True
+
+
 class Stats(BaseModel):
     """Every figure the demo could quote, split real vs synthetic (ADR-019)."""
     vessels: SplitCount

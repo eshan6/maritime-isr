@@ -57,7 +57,7 @@ maritime_isr/
   schemas/   canonical schemas (versioned) + the shared H3 helper
   ports.py   the one port gazetteer (ADR-023)
   overpass.py  satellite imaging opportunities over AIS gaps (ADR-026)
-frontend/    React + MapLibre product surface (Phase 6) — Map · Alerts · Vessels · Graph
+frontend/    React + MapLibre product surface (Phase 6) — Map · Findings · Alerts · Radar · Vessels · Graph
 ```
 
 ---
@@ -156,6 +156,13 @@ blended** (ADR-019).
 > re-taking rather than inheriting: see STATE.md OPEN QUESTION #10. This README
 > previously claimed a `SCENARIO` badge and a violet treatment "everywhere they
 > appear", which had stopped being true.
+>
+> **The Radar view is the exception, deliberately** (ADR-029). Every row it can
+> ever show is generated — there is no coastal radar feed and there never has
+> been — so it carries a non-dismissible SYNTHETIC banner, a per-row mark, and
+> "(synthetic)" in the name of each of its three map layers. A no-op badge is
+> arguable for a corpus that is mostly real; it is not arguable for a sensor
+> that is entirely invented.
 
 ### Run the demo — Python only, no Node (the easy path)
 
@@ -175,7 +182,7 @@ python -m maritime_isr.api                            # serves 127.0.0.1:8000
 ```
 
 Then open **http://127.0.0.1:8000** in a browser. That's the whole demo — Map,
-Findings, Alerts, Vessels, Graph. Nav routes, hard refreshes and pasted deep
+Findings, Alerts, Radar, Vessels, Graph. Nav routes, hard refreshes and pasted deep
 links all work; the backend falls back to the app's `index.html` for any
 non-`/api` path.
 
@@ -197,24 +204,38 @@ token (`X-API-Token`, default `maritime-isr-dev`, override with `MISR_API_TOKEN`
 | `/api/corpus-window` | just the corpus time span — the map scrubber's only dependency, split out of `/stats` so it is not queued behind the slow calls |
 | `/api/graph/all` | every current relationship as one web, most-connected core first, with `truncated` + totals |
 | `/api/graph/seeds` | vessels worth opening the graph on, ranked by degree |
+| `/api/radar/stations` | the coastal station network, with the two size-dependent coverage rings |
+| `/api/radar/contacts` | dark contacts and their evidence; `?status=all` adds the suppressed verdicts and why |
+| `/api/radar/tracks` | decimated radar tracks for the map |
 
 Interactive docs at `/docs`. Every vessel/edge payload carries `is_synthetic`
 and the provenance envelope; every count returns `{real, synthetic}` separately.
 
-The five views:
+The six views:
 
 - **Map** — AOI framed on the Arabian Sea, an 8-week time scrubber with
   play/pause that animates vessels along their AIS tracks, and toggleable
   layers: events, **event density** (per-H3-cell counts over the *whole* corpus,
   not the page — the plain event layers are capped and say so), **SAR radar
   contacts** (drawn hollow when no AIS track is associated), Sentinel-1
-  footprints, ports and alert markers. Click a vessel for its entity panel.
+  footprints, ports, alert markers, and three **coastal radar** layers —
+  coverage (two rings per station, because the radar horizon depends on how tall
+  the target is), tracks, and dark contacts with a dashed segment from a
+  vessel's last AIS fix to where radar still had her. Click a vessel for its
+  entity panel.
 - **Findings** — the ranked table: GFW-assessed intentional-disabling AIS gaps
   first, then sanctions-matched hulls, each row expanding to its evidence.
   Ranking is a sum of **named signals shown with the row**, never a blended
   score.
 - **Alerts** — a short, high-signal queue; each alert's evidence chain as
   labelled hops, with confirm/watch/dismiss that persist.
+- **Radar** — the coastal-radar dark-contact queue (ADR-028/029), with the
+  evidence for each: which stations held it, its length from radar
+  cross-section, how long nothing on AIS explained it, and — where the contact
+  was identified *before* it went quiet — where the transponder stopped. A
+  checkbox reveals the **suppressed** verdicts and the reason for each, because
+  "why is this NOT dark" has to be answerable from the product. Entirely
+  synthetic and says so at the top of the page.
 - **Vessels** — a sortable, filterable table.
 - **Graph** — opens on the **whole network**: every current relationship drawn
   as one web, framed on the most-connected sanctioned vessel (falling back to
@@ -327,8 +348,14 @@ at the moment of each pass; that area is compared against the scene footprint.
 
 ```bash
 maritime-isr scenario generate               # includes the simulated radar picture
-maritime-isr radar correlate                 # radar <-> AIS, then the dark contacts
+maritime-isr radar correlate --write         # radar <-> AIS, then the dark contacts
 ```
+
+`--write` lands the result into `radar_correlation` and `radar_dark_contact`.
+Without it the correlation prints and is thrown away — and since a full
+correlation takes tens of minutes over ~5,000 epochs, no API request can redo it
+on demand. **The `--write` run is what makes the Radar tab in the UI show
+anything.**
 
 A coastal radar station reports *where* and *how fast*, and never *who*. That
 absence is the point: a radar track that no AIS broadcast explains is a
@@ -344,17 +371,29 @@ appears on radar and not on AIS is one ship with her transponder off rather than
 two separate fabrications. It lands through a real connector into the same
 table a real feed would use, flagged synthetic.
 
-Measured on that picture: **precision 100%, recall 50%** — four dark contacts,
-none of them wrong, four of eight findable dark episodes found. The number that
-is *not* flattering is reported too: radar-to-AIS correlation resolves about one
-radar track in nine, and the likely cause is how sparsely the generator lands
-AIS from anchored vessels rather than the matching itself (STATE.md,
-OQ-radar-1).
+Measured on that picture: **precision 100%, recall 43%** — three dark contacts,
+none of them wrong, three of seven findable dark episodes found. Recall is low
+on purpose and the four misses each have a name in `STATE.md`; ADR-004 makes
+precision the binding constraint and explicitly accepts missing half the real
+dark vessels rather than burying an analyst.
 
-One sentence this earns and one it does not, stated plainly: *"that contact is
-on radar and nothing is broadcasting there"* works. *"Here is where its
-transponder went quiet"* is computed for 77 tracks and reaches the alert queue
-for none of them — see ADR-028 and STATE.md for why, and what the next fix is.
+**Correlation:** of the radar tracks whose vessel was demonstrably on AIS at the
+time, **98.2% resolve to the right hull** (978 of 996), 1.1% to the wrong one,
+0.7% to none. And of the 241 tracks belonging to a vessel that really was
+silent, **not one was confidently explained away by somebody else's hull**,
+which is the failure mode that would manufacture false negatives.
+
+> An earlier version of this section said correlation "resolves about one radar
+> track in nine". **That figure was wrong** and is withdrawn. It came from a
+> probe that gated every contact at its 15-minute epoch's timestamp instead of
+> the contact's own — five kilometres of manufactured error at the end of an
+> epoch — and that counted genuinely dark vessels as correlation failures. Both
+> faults are fixed; ADR-029 has the detail.
+
+Both headline sentences are now earned. *"That contact is on radar and nothing
+is broadcasting there"* works, and so does *"here is where its transponder went
+quiet"* — the shutdown position reaches the alert queue and the UI draws the
+segment from the last AIS fix to where radar was still holding her.
 
 Building this tested the architecture's central claim — that a new sensor is a
 connector and not a rewrite — and found **four places the core silently assumed

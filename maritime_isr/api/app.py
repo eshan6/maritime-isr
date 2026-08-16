@@ -250,6 +250,45 @@ def create_app() -> FastAPI:
             "items": [models.Port(**p).model_dump() for p in res["items"]],
         }
 
+    # ---- coastal radar (ADR-028) -----------------------------------------
+    @api.get("/radar/stations", dependencies=guard)
+    def radar_stations() -> dict:
+        """The station network, with the size-dependent coverage rings.
+
+        Every row is `is_synthetic: true` and the UI is required to say so on
+        the surface. A coverage map is the most persuasive picture this system
+        can draw and there is no real radar behind it.
+        """
+        res = service.list_radar_stations()
+        return {
+            "count": models.SplitCount(**res["count"]).model_dump(),
+            "items": [models.RadarStation(**s).model_dump() for s in res["items"]],
+        }
+
+    @api.get("/radar/contacts", dependencies=guard)
+    def radar_contacts(limit: int = Query(default=500, ge=1, le=5000),
+                       status: Optional[str] = Query(default=None)) -> dict:
+        """Dark contacts and their evidence. `status=all` includes suppressions.
+
+        The suppressed rows matter as much as the survivors: "why is this NOT
+        flagged" has to be answerable from the product, otherwise the filter
+        cascade is a black box the operator has to take on faith.
+        """
+        res = service.list_radar_contacts(limit=limit, status=status)
+        return {
+            "count": models.SplitCount(**res["count"]).model_dump(),
+            "note": res.get("note"),
+            "items": [models.RadarContact(**c).model_dump() for c in res["items"]],
+        }
+
+    @api.get("/radar/tracks", dependencies=guard)
+    def radar_tracks(max_tracks: int = Query(default=400, ge=1, le=4000),
+                     max_points: int = Query(default=60, ge=5, le=1000)) -> dict:
+        # Decimated, and returned raw for the same reason as /tracks: compact
+        # [lon,lat,epoch] arrays, no per-point pydantic validation.
+        return service.list_radar_tracks(max_tracks=max_tracks,
+                                         max_points=max_points)
+
     # ---- stats -----------------------------------------------------------
     @api.get("/stats", dependencies=guard)
     def stats() -> dict:

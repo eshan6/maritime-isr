@@ -134,9 +134,18 @@ def r2_transponder_quits_under_cover(world: ScenarioWorld) -> None:
         start=_offshore_of("SYN-DAH", 260.0, 34.0), start_time=t0,
         legs=legs), r)
 
-    # She goes quiet a third of the way through and stays quiet. The window is
-    # open-ended to the end of the passage: this is a shutdown, not a dropout.
-    t_quiet = pts[len(pts) // 3].t
+    # She goes quiet about two thirds of the way through and stays quiet. The
+    # window is open-ended to the end of the passage: a shutdown, not a dropout.
+    #
+    # **The fraction is load-bearing and the first value was wrong.** At one
+    # third she was still north of Dahanu and outside Mumbai's cover when she
+    # switched off, so by the time a station picked her up she had already been
+    # silent for an hour — her whole radar track was the dark period, there was
+    # nothing to correlate, and the scenario written to demonstrate the
+    # transition could not produce one. She has to be *held on radar while still
+    # transmitting* for the "and then she stopped" to exist at all, which is
+    # exactly the condition an operator would need in reality.
+    t_quiet = pts[int(len(pts) * 0.65)].t
     emit(world, "quiet_quitter", pts,
          suppressions=[Suppression(t_quiet, pts[-1].t + hours(1),
                                    cause="intentional")])

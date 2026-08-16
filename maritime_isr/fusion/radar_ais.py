@@ -42,7 +42,7 @@ import pandas as pd
 
 from ..config import (RADAR_CORRELATION_EPOCH_S, RADAR_DARK_MIN_EPOCHS,
                       RADAR_DARK_MIN_MINUTES, RADAR_MIN_LOOKS,
-                      RADAR_CENSUS_WINDOW_EPOCHS,
+                      RADAR_CENSUS_WINDOW_EPOCHS, RADAR_LEAD_MIN_EPOCHS,
                       RADAR_NEIGHBOURHOOD_RES, RADAR_STATIC_MIN_SCENES,
                       RADAR_STATIC_RADIUS_M,
                       RADAR_STATIC_RES, RADAR_SUPPORT_AMBIGUOUS,
@@ -80,6 +80,10 @@ class RadarCorrelationResult(dict):
     @property
     def statics(self) -> list[dict]:
         return self["statics"]
+
+    @property
+    def associations(self) -> list[dict]:
+        return self["associations"]
 
 
 def correlate_radar(radar_tracks: list, ais_tracks: list,
@@ -122,9 +126,10 @@ def correlate_radar(radar_tracks: list, ais_tracks: list,
     """
     if not radar_tracks:
         return RadarCorrelationResult(correlations=[], verdicts=[], statics=[],
-                                      epochs=0, plots=0)
+                                      associations=[], epochs=0, plots=0)
 
     by_track = {tr.track_id: tr for tr in radar_tracks}
+    ais_by_id = {tr.track_id: tr for tr in ais_tracks}
     t0 = min(tr.t_first for tr in radar_tracks)
     gaps_by_ais: dict[str, list[dict]] = defaultdict(list)
     for g in (ais_gaps or []):
@@ -185,14 +190,26 @@ def correlate_radar(radar_tracks: list, ais_tracks: list,
     #: dark cascade so its isolation term cannot re-use a track that already
     #: explains a different contact. See `dark_cascade`.
     spent_by_epoch: dict[int, set[str]] = defaultdict(set)
+    #: Every per-epoch association row, kept so the anomaly library's
+    #: rendezvous detector can read radar contacts the same way it reads SAR
+    #: ones. Without these, `detect_dark_rendezvous` sees an empty list for
+    #: radar and stays silent — which reads as "radar found no rendezvous"
+    #: rather than "radar was never asked".
+    associations: list[dict] = []
+    #: (radar track, epoch) -> the AIS track that explained it, when one did.
+    #: Feeds the census below, which counts only what is left unexplained.
+    matched_at: dict[tuple[str, int], str] = {}
     for k in sorted(epochs):
         contacts = epochs[k]
         ts = min(pd.Timestamp(c["ts"]) for c in contacts)
         scene = dict(scene_id=f"radar-epoch-{k}", ts=ts, detections=contacts)
-        for a in associate_scene(scene, ais_tracks, registry):
+        rows = associate_scene(scene, ais_tracks, registry, gaps_by_ais)
+        associations.extend(rows)
+        for a in rows:
             rtid = a["detection_id"].rsplit("@", 1)[0]
             if a["status"] != "unmatched" and a.get("track_id"):
                 spent_by_epoch[k].add(a["track_id"])
+                matched_at[(rtid, k)] = a["track_id"]
             per_track[rtid].append((
                 k,
                 pd.Timestamp(a["ts"]).timestamp(),
@@ -202,20 +219,36 @@ def correlate_radar(radar_tracks: list, ais_tracks: list,
                 else float("nan")))
 
     # ---- 2b. the neighbourhood census -------------------------------------
-    # Per (H3 res-6 cell, epoch): how many radar contacts were seen, and how
-    # many distinct AIS identities were actually HEARD. Both are hash joins on
-    # the shared grid — the join CLAUDE.md §3 says this architecture exists to
-    # make cheap — rather than a distance sweep over every pair.
+    # Per (H3 cell, epoch): the contacts nothing explained, against the
+    # broadcasters that are not already explaining something. Both are hash
+    # joins on the shared grid — the join CLAUDE.md §3 says this architecture
+    # exists to make cheap — rather than a distance sweep over every pair.
+    #
+    # **Both sides count only what is left over, and that is the whole point.**
+    # Counting every contact against every broadcaster answers "is this area
+    # busy", which is not the question. A contact the assignment has explained
+    # is accounted for; a broadcaster already explaining a contact is spent.
+    # What is left is the surplus, and a surplus of contacts over free
+    # broadcasters means at least one thing out there is transmitting nothing.
+    #
+    # This is what lets a vessel that went dark *inside* traffic still be found:
+    # her neighbours are matched to their own AIS identities, so they cancel,
+    # and she is the one contact with nothing left to explain her. Counting
+    # gross totals instead suppressed all 77 of those (ADR-028).
     #
     # AIS *receipts*, not predicted track positions: the claim being tested is
     # "nothing is broadcasting there", and only a receipt is evidence of a
     # broadcast. A predicted position is evidence about our filter.
-    contacts_in: dict[tuple[str, int], set[str]] = defaultdict(set)
+    unmatched_contacts_in: dict[tuple[str, int], set[str]] = defaultdict(set)
+    matched_ais_in: dict[tuple[str, int], set[str]] = defaultdict(set)
     for k, cs in epochs.items():
         for c in cs:
-            contacts_in[(tiling.cell(c["lat"], c["lon"],
-                                     RADAR_NEIGHBOURHOOD_RES), k)].add(
-                c["track_id"])
+            cell = tiling.cell(c["lat"], c["lon"], RADAR_NEIGHBOURHOOD_RES)
+            hit = matched_at.get((c["track_id"], k))
+            if hit is None:
+                unmatched_contacts_in[(cell, k)].add(c["track_id"])
+            else:
+                matched_ais_in[(cell, k)].add(hit)
     heard_in: dict[tuple[str, int], set[str]] = defaultdict(set)
     for tr in ais_tracks:
         pts = tr.points[tr.points.quality != "outlier"]
@@ -224,20 +257,23 @@ def correlate_radar(radar_tracks: list, ais_tracks: list,
                       _epoch_key(r.ts, t0))].add(tr.track_id)
 
     def _census(lat: float, lon: float, k: int) -> tuple[int, int]:
-        """(contacts, broadcasters) in this cell and its ring, this epoch."""
+        """(unexplained contacts, unspent broadcasters) around here, now."""
         cell = tiling.cell(lat, lon, RADAR_NEIGHBOURHOOD_RES)
         cells = [cell, *tiling.neighbors(cell, 1)]
         seen: set[str] = set()
         heard: set[str] = set()
+        spent_ais: set[str] = set()
         w = RADAR_CENSUS_WINDOW_EPOCHS
         for c in cells:
-            seen |= contacts_in.get((c, k), set())
+            seen |= unmatched_contacts_in.get((c, k), set())
             # Broadcasters over a WIDER time window than contacts — see
             # RADAR_CENSUS_WINDOW_EPOCHS. An anchored ship is heard once an
-            # hour and seen every five minutes.
+            # hour and seen every five minutes. The matched set is taken over
+            # the same window for the same reason.
             for kk in range(k - w, k + w + 1):
                 heard |= heard_in.get((c, kk), set())
-        return len(seen), len(heard)
+                spent_ais |= matched_ais_in.get((c, kk), set())
+        return len(seen), len(heard - spent_ais)
 
     # ---- 3. aggregate onto whole radar tracks -----------------------------
     correlations: list[dict] = []
@@ -295,12 +331,69 @@ def correlate_radar(radar_tracks: list, ais_tracks: list,
         length_est = _median_length(tr)
         station_ids = _stations_of(tr)
 
+        # **"Correlated, then dark" is a shape in time, not a ratio.**
+        #
+        # Overall support cannot express it and actively hides it: a vessel who
+        # transmits for the first third of her passage and then switches off has
+        # support of about 0.3 by construction, whatever the correlation did,
+        # because two thirds of her epochs are unmatched *because she is dark*.
+        # Judging her by the same threshold as an ordinary track filed her as
+        # `ambiguous` and the transition — the thing the whole build is for —
+        # was never expressible. R2's tanker sat at 0.043.
+        #
+        # So the lead is measured on its own: the epochs before the dark run
+        # began, and whether one AIS track explained most of them. That is the
+        # literal reading of the phrase.
+        lead = [(m, mm) for _k, t_e, m, mm, _e in seq
+                if dark_run and t_e < dark_run[0]]
+        lead_votes = Counter(m for m, _mm in lead if m)
+        lead_best, lead_support = None, 0.0
+        if lead_votes:
+            lead_best, n_lb = lead_votes.most_common(1)[0]
+            lead_support = n_lb / len(lead)
+
         status = _status_of(support, dark_run, n_epochs)
+        if (status != "correlated_then_dark" and lead_best is not None
+                and len(lead) >= RADAR_LEAD_MIN_EPOCHS
+                and lead_support >= RADAR_SUPPORT_CORRELATED
+                and len(dark_run) >= RADAR_DARK_MIN_EPOCHS):
+            status = "correlated_then_dark"
+            best_ais = lead_best
+            mmsi = next((mm for m, mm in lead if m == lead_best), mmsi)
+            support = round(lead_support, 4)
 
         # A correlated track's dark run only counts as a shutdown if the AIS
         # side agrees it was one. See the function docstring.
         ais_gap_type = None
+        identity_known = False
         if status == "correlated_then_dark":
+            # **Did she actually stop being heard? Ask, rather than infer.**
+            #
+            # A radar track stops correlating for two quite different reasons,
+            # and there is no need to reason about which: the AIS side has the
+            # answer directly. If the vessel we identified was heard even once
+            # inside the interval, she never went quiet — what stopped was our
+            # *association*, not her transponder, and there is no finding here.
+            #
+            # This replaced two cleverer tests that were both wrong. Judging the
+            # silence against her median reporting interval called a
+            # two-hour hole in an anchored ship a shutdown, because her median
+            # is three minutes and her routine holes are fifty. Judging against
+            # her 90th percentile was better and still let one through at 135
+            # minutes. Counting her receipts needs no threshold at all: the
+            # vessel that survives this test was heard 0 times while radar
+            # watched her for five hours, and the one that does not was heard
+            # 66 times.
+            heard_during = _receipts_between(
+                ais_by_id.get(best_ais), dark_run[0], dark_run[-1])
+            if heard_during > 0:
+                status = "correlated_gap_explained"
+            else:
+                # We know who she was and we watched her stop. That evidence
+                # stands on its own and does not depend on her neighbours, so
+                # the cascade's neighbourhood census is skipped for this row —
+                # see `dark_cascade`.
+                identity_known = True
             ais_gap_type = _gap_type_over(
                 gaps_by_ais.get(best_ais, []), dark_run[0], dark_run[-1])
             # **Only an explicit non-intentional label suppresses.** `None`
@@ -321,6 +414,7 @@ def correlate_radar(radar_tracks: list, ais_tracks: list,
             if ais_gap_type is not None \
                     and ais_gap_type != "INTENTIONAL_SILENCE":
                 status = "correlated_gap_explained"
+                identity_known = False
 
         went_dark_at = went_dark_lat = went_dark_lon = None
         if dark_run and best_ais is not None and status == "correlated_then_dark":
@@ -404,7 +498,45 @@ def correlate_radar(radar_tracks: list, ais_tracks: list,
                     ts=r.ts, lat=float(r.lat), lon=float(r.lon),
                     length_m=length_est))
 
-        if status not in ("dark", "correlated_then_dark"):
+        # **`ambiguous` is admitted, and it is the cascade that judges it.**
+        #
+        # This gate used to read `("dark", "correlated_then_dark")` and that
+        # dropped a whole class of episode before anything could look at it.
+        # Measured on seed 7: two of the seven findable episodes reached no
+        # verdict row *at all* — the identity-swapping hull unexplained for 90
+        # minutes off Mundra, and the small hull at the Dwarka raft-up
+        # unexplained for 85. Both sat on tracks whose overall support was
+        # 0.29 and 0.37: partly explained, mostly not.
+        #
+        # The reasoning that put them there is sound about the wrong question.
+        # `ambiguous` says *we cannot name this target* — precision-first
+        # forbids convicting a hull on that. It does not say the target was
+        # explained. For the epochs inside the dark run the evidence is
+        # identical to a fully-dark track's: radar held something, and nothing
+        # on AIS accounted for it.
+        #
+        # And the cascade already owns exactly the doubt `ambiguous` expresses.
+        # `require_excess_contacts` asks whether unspent broadcasters were
+        # sitting in the same neighbourhood, which is the literal question "is
+        # this a mis-association rather than a dark vessel" — the third missed
+        # episode was suppressed by it, correctly, on the evidence. Dropping
+        # ambiguous tracks before that test meant the test never ran on the
+        # cases it was written for, and the suppression never got recorded, so
+        # "why is this not dark" had no answer for them either.
+        #
+        # **Measured effect: the queue does not move and the record does.**
+        # Verdicts 272 → 282; precision stays 100%, recall stays 43% (3 of 7).
+        # All ten new rows are suppressions, and two of them are the two
+        # episodes that previously had no verdict row anywhere — they now read
+        # `suppressed_transient`, which is the truthful answer (dark runs of 60
+        # and 85 minutes against a 120-minute floor) rather than silence.
+        #
+        # That is worth having on its own terms. The claim this project makes is
+        # that a suppression an analyst cannot see is a suppression they cannot
+        # trust; an episode the machinery never even reached is worse than one it
+        # rejected, because nothing distinguishes it from an episode that was
+        # never there. It is not a recall fix and is not offered as one.
+        if status not in ("dark", "correlated_then_dark", "ambiguous"):
             continue
         if not dark_run:
             continue
@@ -432,6 +564,7 @@ def correlate_radar(radar_tracks: list, ais_tracks: list,
             length_m=length_est,
             exclude_track_ids=spent,
             excess_contacts=excess,
+            identity_known=identity_known,
             # Persistence, in the cascade's terms: how many independent looks
             # this contact rests on. Sea clutter rests on two or three.
             n_looks=int(len(dark_run)),
@@ -476,7 +609,30 @@ def correlate_radar(radar_tracks: list, ais_tracks: list,
 
     return RadarCorrelationResult(
         correlations=correlations, verdicts=verdicts, statics=statics,
-        epochs=len(epochs), plots=n_plots)
+        associations=associations, epochs=len(epochs), plots=n_plots)
+
+
+def _receipts_between(ais_track, t0: float, t1: float) -> int:
+    """How many times this vessel was actually heard between two instants.
+
+    Direct evidence, and the only thing that separates a transponder being
+    switched off from our association losing its grip. Receipts, not predicted
+    positions — a prediction is evidence about our filter, a receipt is evidence
+    about her radio.
+
+    The epoch timestamps are cached in sorted order on the track, so this is two
+    binary searches per correlated track.
+    """
+    if ais_track is None:
+        return 0
+    ts = getattr(ais_track, "_receipt_epochs", None)
+    if ts is None:
+        pts = ais_track.points[ais_track.points.quality != "outlier"]
+        ts = np.sort(pd.to_datetime(pts["ts"], utc=True).map(
+            lambda x: x.timestamp()).to_numpy())
+        ais_track._receipt_epochs = ts
+    return int(np.searchsorted(ts, t1, side="right")
+               - np.searchsorted(ts, t0, side="left"))
 
 
 def _gap_type_over(gaps: list[dict], t0: float, t1: float) -> str | None:
@@ -564,3 +720,70 @@ def format_correlation(res: RadarCorrelationResult) -> str:
     vc = Counter(v["status"] for v in res.verdicts)
     lines.append(f"  dark verdicts    : {len(res.verdicts):,}  {dict(vc)}")
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------
+# landing — so a watchkeeper can see this without running a correlation
+# --------------------------------------------------------------------------
+
+#: Where the correlation verdicts land. Separate tables because they answer
+#: different questions: one row per radar track (what explained it), one row per
+#: contact that survived the cascade (what to look at).
+CORRELATION_TABLE = "radar_correlation"
+CONTACT_TABLE = "radar_dark_contact"
+
+
+def land_correlation(res: "RadarCorrelationResult", *, source_id: str,
+                     is_synthetic: bool, source_ref: str = "radar-correlate"
+                     ) -> dict[str, int]:
+    """Land the correlation and the surviving contacts.
+
+    **This is what makes radar visible to anything but the CLI.** Correlating
+    the picture takes minutes over five thousand epochs, so no API request can
+    do it on demand; the result has to be on disk like every other derived
+    product in this system. Provenance envelope and H3 on every row, through the
+    same landing layer as the connectors — a derived table that skipped either
+    would be the one place in the corpus an analyst could not trace.
+
+    Suppressed verdicts land too, not just the survivors. "Why is this NOT
+    dark" has to be answerable from the store, and an answer that exists only
+    in a terminal that has since been closed is not an answer.
+    """
+    from ..ingest.landing import land_table, stamp_envelope, stamp_h3
+
+    def _stamp(row: dict, acquired_at, confidence=None) -> dict:
+        stamp_envelope(row, source_id=source_id, source_ref=source_ref,
+                       acquired_at=pd.Timestamp(acquired_at).to_pydatetime(),
+                       confidence=confidence, is_synthetic=is_synthetic)
+        return stamp_h3(row)
+
+    written: dict[str, int] = {}
+    corr_rows = [_stamp(dict(c), c["t_start"], c.get("support"))
+                 for c in res.correlations]
+    if corr_rows:
+        w = land_table(corr_rows, table=CORRELATION_TABLE,
+                       key_fields=("correlation_id",), day_field="t_start")
+        written[CORRELATION_TABLE] = sum(w.values())
+
+    by_corr = {c["correlation_id"]: c for c in res.correlations}
+    contact_rows = []
+    for v in res.verdicts:
+        c = by_corr.get(v.get("correlation_id")) or {}
+        contact_rows.append(_stamp(dict(
+            v,
+            radar_track_id=c.get("radar_track_id"),
+            station_ids=c.get("station_ids"),
+            mmsi=c.get("mmsi"),
+            went_dark_at=c.get("went_dark_at"),
+            went_dark_lat=c.get("went_dark_lat"),
+            went_dark_lon=c.get("went_dark_lon"),
+            dark_minutes=c.get("dark_minutes"),
+            correlation_status=c.get("status"),
+            # sets do not survive Arrow, and the cascade has already used it
+            exclude_track_ids=None,
+        ), v["ts"], v.get("dark_score")))
+    if contact_rows:
+        w = land_table(contact_rows, table=CONTACT_TABLE,
+                       key_fields=("candidate_id",), day_field="ts")
+        written[CONTACT_TABLE] = sum(w.values())
+    return written
