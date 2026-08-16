@@ -21,11 +21,20 @@ Run it with:
     maritime-isr ingest zones --path eez_v12.geojson --kind eez
     maritime-isr ingest zones --path territorial_seas_v4.geojson
 
-**GeoJSON only, and that is deliberate.** Shapefile support would mean adding
-`fiona`/`geopandas` — two large binary dependencies with a GDAL build behind
-them — to a project whose install story is `pip install -e .` on a Windows
-laptop. Every source above offers GeoJSON, and `ogr2ogr` converts one in a
-single command for anything that does not.
+**GeoJSON and zipped shapefile.** Marine Regions ships shapefile, GeoPackage
+and KML — *not* GeoJSON — so a GeoJSON-only connector would have been a door
+nobody could walk through, which is how it shipped first and how it was caught.
+
+Shapefile is read with `pyshp`, which is **pure Python**: no GDAL, no
+`fiona`/`geopandas`, nothing that turns `pip install -e .` on a Windows laptop
+into a compiler problem. Pass the `.zip` exactly as downloaded; the members are
+read out of it in memory and nothing is unpacked to disk.
+
+The `.prj` is **checked, not ignored**. A shapefile in a projected CRS carries
+coordinates in metres, and landing those as degrees would put the Indian
+territorial sea somewhere in the Gulf of Guinea while every row looked
+perfectly well-formed. A file that is not geographic WGS84 is refused with an
+explanation rather than silently mangled.
 
 The connector does **not** invent a kind it cannot determine. A feature it
 cannot classify is skipped and counted, and the count is printed, because
@@ -168,6 +177,95 @@ def _stable(s: str) -> str:
     return hashlib.sha1(s.encode()).hexdigest()[:10]
 
 
+#: Shapefile members we need out of a zip. `.prj` is optional in the format and
+#: required here — see `_features_from_shapefile`.
+_SHP_PARTS = (".shp", ".dbf", ".shx", ".prj")
+
+
+def _features_from_shapefile(payload: bytes, name: str) -> list[dict]:
+    """GeoJSON-shaped features from a shapefile, zipped or bare.
+
+    Returns the same `{"properties": ..., "geometry": ...}` dicts a GeoJSON
+    file would yield, so `conform_features` cannot tell the two apart and there
+    is exactly one code path downstream.
+    """
+    import io
+    import zipfile
+
+    try:
+        import shapefile                                          # pyshp
+    except ImportError as e:                                       # pragma: no cover
+        raise SystemExit(
+            "reading a shapefile needs `pyshp` — run `pip install pyshp`, or "
+            "re-install the project with `pip install -e .` which now requires "
+            "it. No GDAL is involved.") from e
+
+    parts: dict[str, bytes] = {}
+    if name.lower().endswith(".zip"):
+        with zipfile.ZipFile(io.BytesIO(payload)) as zf:
+            for member in zf.namelist():
+                ext = Path(member).suffix.lower()
+                # A Marine Regions zip holds one boundary layer plus readmes and
+                # licence files. Take the first of each part and ignore the rest;
+                # a zip with two layers in it would need naming, and none of the
+                # published products is shaped that way.
+                if ext in _SHP_PARTS and ext not in parts:
+                    parts[ext] = zf.read(member)
+        if ".shp" not in parts:
+            raise SystemExit(
+                f"{name} contains no .shp member — is it really a shapefile "
+                f"download? Members seen: "
+                f"{', '.join(sorted(parts)) or 'none recognised'}")
+    else:
+        base = Path(name)
+        for ext in _SHP_PARTS:
+            sidecar = base.with_suffix(ext)
+            if sidecar.is_file():
+                parts[ext] = sidecar.read_bytes()
+        parts[".shp"] = payload
+
+    _assert_geographic(parts.get(".prj"), name)
+
+    reader = shapefile.Reader(
+        shp=io.BytesIO(parts[".shp"]),
+        dbf=(io.BytesIO(parts[".dbf"]) if ".dbf" in parts else None),
+        shx=(io.BytesIO(parts[".shx"]) if ".shx" in parts else None))
+    feats = []
+    for rec in reader.iterShapeRecords():
+        feats.append({"properties": dict(rec.record.as_dict()),
+                      "geometry": rec.shape.__geo_interface__})
+    return feats
+
+
+def _assert_geographic(prj: bytes | None, name: str) -> None:
+    """Refuse a projected shapefile rather than land metres as degrees.
+
+    This check is cheap and the failure it prevents is not: a projected file
+    lands coordinates like 7,300,000 into a `lon` column, the AOI clip discards
+    everything, and the operator sees "0 zones landed" with no clue why. Worse,
+    a partially-overlapping projection would land *some* rows in plausible
+    positions, which is the silent-corruption shape this project engineers
+    against.
+    """
+    if prj is None:
+        # The format allows it to be absent. Marine Regions ships one; a file
+        # without it is unusual enough to say so, but WGS84 is the overwhelming
+        # default for published boundary data and refusing outright would block
+        # a legitimate file.
+        print("[zones] no .prj in the download — assuming geographic WGS84 "
+              "(lon/lat degrees). If the boundaries land in the wrong place, "
+              "this is why.")
+        return
+    text = prj.decode("utf-8", "replace")
+    if text.upper().startswith("PROJCS"):
+        raise SystemExit(
+            f"{name} is in a PROJECTED coordinate system, not lon/lat degrees:\n"
+            f"  {text[:120]}...\n"
+            f"This connector expects geographic WGS84. Re-download the "
+            f"unprojected version, or convert with "
+            f"`ogr2ogr -t_srs EPSG:4326 out.shp in.shp`.")
+
+
 def run(path: str | Path, *, kind: Optional[str] = None,
         authority: Optional[str] = None, confidence: float = 0.9,
         clip_to_aoi: bool = True) -> dict:
@@ -183,9 +281,21 @@ def run(path: str | Path, *, kind: Optional[str] = None,
     p = Path(path)
     payload = p.read_bytes()
     land_raw("zones", p.name, payload)
-    doc = json.loads(payload)
-    feats = (doc.get("features") if doc.get("type") == "FeatureCollection"
-             else [doc])
+
+    if p.suffix.lower() in (".zip", ".shp"):
+        feats = _features_from_shapefile(payload, p.name)
+    else:
+        try:
+            doc = json.loads(payload)
+        except ValueError as e:
+            raise SystemExit(
+                f"{p.name} is neither GeoJSON nor a shapefile this connector "
+                f"can read ({e}). Supported: .geojson / .json, and .zip / .shp "
+                f"(shapefile). Marine Regions also offers GeoPackage and KML; "
+                f"neither is supported — take the Shapefile download.") from e
+        feats = (doc.get("features") if doc.get("type") == "FeatureCollection"
+                 else [doc])
+    print(f"[zones] {len(feats):,} feature(s) read from {p.name}")
 
     src_ref = p.name
     zones, skipped = conform_features(

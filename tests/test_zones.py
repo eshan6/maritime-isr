@@ -745,3 +745,85 @@ def test_the_graph_ontology_admits_a_zone_and_its_edges():
         assert etype in EDGE_TYPES_V1, etype
         validate_edge(etype, "vessel", "zone", EDGE_TYPES_V1)
         validate_edge(etype, "contact", "zone", EDGE_TYPES_V1)
+
+
+# ==========================================================================
+# 10. the format the publisher actually ships
+# ==========================================================================
+
+def _fake_boundary_zip(tmp_path, *, prj: str, pol_type: str = "12NM"):
+    """A real shapefile, zipped the way Marine Regions ships one."""
+    import zipfile
+
+    shapefile = pytest.importorskip("shapefile")
+    base = tmp_path / "ts"
+    w = shapefile.Writer(str(base))
+    w.field("MRGID", "N")
+    w.field("GEONAME", "C", 60)
+    w.field("POL_TYPE", "C", 20)
+    ring = [(x, y) for x, y in circle_polygon(17.3, 73.1, 40_000.0).exterior.coords]
+    w.poly([ring])
+    w.record(1234, "Indian 12 NM", pol_type)
+    w.close()
+    base.with_suffix(".prj").write_text(prj)
+    zp = tmp_path / "World_12NM_v4_20231025.zip"
+    with zipfile.ZipFile(zp, "w") as z:
+        for ext in (".shp", ".dbf", ".shx", ".prj"):
+            z.write(base.with_suffix(ext), f"ts{ext}")
+    return zp
+
+
+def test_the_connector_reads_a_zipped_shapefile(tmp_path):
+    """**Marine Regions ships shapefile, GeoPackage and KML — not GeoJSON.**
+
+    The connector was GeoJSON-only on its first pass, which made it a door
+    nobody could walk through: the operator downloaded exactly the file the
+    docstring told them to and the connector could not open it. Read with
+    `pyshp`, which is pure Python — no GDAL, so `pip install -e .` on a Windows
+    laptop stays a download rather than a compiler problem.
+    """
+    from maritime_isr.ingest.zones import (_features_from_shapefile,
+                                           conform_features)
+    zp = _fake_boundary_zip(tmp_path, prj='GEOGCS["GCS_WGS_1984"]')
+    feats = _features_from_shapefile(zp.read_bytes(), zp.name)
+    assert len(feats) == 1
+    assert feats[0]["properties"]["POL_TYPE"] == "12NM"
+
+    zones, skipped = conform_features(feats, default_kind=None, authority="t",
+                                      source_ref=zp.name, confidence=0.9)
+    assert not skipped, skipped
+    assert [z.kind for z in zones] == ["territorial_sea"], (
+        "POL_TYPE 12NM did not map to a territorial sea")
+    assert contains(geom_from_wkt(zones[0].wkt), 17.3, 73.1)
+
+
+def test_the_connector_refuses_a_projected_shapefile(tmp_path):
+    """Landing metres as degrees would put the Indian territorial sea in the
+    Gulf of Guinea while every row looked perfectly well-formed.
+
+    Worse than useless: a partially-overlapping projection lands SOME rows in
+    plausible positions, which is the silent-corruption shape this project
+    exists to engineer against. Cheap check, expensive failure.
+    """
+    from maritime_isr.ingest.zones import _features_from_shapefile
+    zp = _fake_boundary_zip(
+        tmp_path, prj='PROJCS["WGS_1984_UTM_Zone_43N",GEOGCS["GCS_WGS_1984"]]')
+    with pytest.raises(SystemExit) as e:
+        _features_from_shapefile(zp.read_bytes(), zp.name)
+    assert "PROJECTED" in str(e.value)
+    assert "EPSG:4326" in str(e.value), "the refusal does not say how to fix it"
+
+
+def test_a_geopackage_is_refused_with_the_format_that_does_work(tmp_path):
+    """A wrong-format file must not produce a JSON parse error and nothing else.
+
+    The operator has just downloaded 50 MB from a page offering four formats;
+    the message has to name the one that works.
+    """
+    from maritime_isr.ingest import zones as zconn
+    p = tmp_path / "World_12NM_v4.gpkg"
+    p.write_bytes(b"SQLite format 3\x00" + b"\x00" * 64)
+    with pytest.raises(SystemExit) as e:
+        zconn.run(p)
+    msg = str(e.value)
+    assert "Shapefile" in msg and "GeoPackage" in msg
