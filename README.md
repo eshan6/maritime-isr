@@ -344,6 +344,54 @@ where it reappeared, and how long it was silent, could a Sentinel-1 pass have
 photographed it?* Bounding vessel speed gives the area it must have been inside
 at the moment of each pass; that area is compared against the scene footprint.
 
+**3d. Maritime geography, and drawing your own (ADR-030).**
+
+```bash
+maritime-isr zones build                     # the operational layer
+maritime-isr zones status                    # what is loaded, and what is not
+```
+
+The system used to understand four hardcoded circles. It now holds a real
+geography layer: port areas, anchorages, oil terminals and single point
+moorings, customary shipping lanes, and whatever areas you draw on the map —
+each a landed row with provenance, each toggleable independently, and each able
+to answer *who was inside you, when, coming in from where and leaving to where*.
+Zone entry and exit are events in their own right, on the same footing as
+encounters and gaps.
+
+**What is deliberately missing.** The exclusive economic zone, the contiguous
+zone, the territorial sea and the India–Pakistan maritime boundary line are
+**not built**, and that is a decision rather than an omission. Deriving them from
+a coastline and the UNCLOS distances was implemented, measured and discarded:
+UNCLOS measures from *declared straight baselines*, not from the coast, so a
+derived territorial sea sits inside the real one exactly where the traffic is
+densest — and there is no median line with any neighbour. The IMBL is *disputed*
+and undelimited seaward of Sir Creek. A plausible-looking boundary that is
+quietly wrong is worse than no boundary, so:
+
+```bash
+maritime-isr ingest zones --path territorial_seas_v4.geojson
+```
+
+Marine Regions (VLIZ) publishes all four as GeoJSON. Load one and the analysis
+that depends on it starts working with no code change. Until then the pipeline,
+the API and the map all say which kinds are absent — an empty EEZ layer and an
+EEZ layer nobody loaded look identical otherwise.
+
+**The sentence this earns:** *"Draw a box anywhere. I'll tell you who was in
+it."* It is answered on demand in about eight seconds, because a box drawn
+ninety seconds ago has no precomputed transitions and "nobody was here" would be
+a lie. The zone's H3 covering hash-joins against the cells already stamped on
+every position at ingest, and only the vessels that were near are walked —
+through the same code the pipeline uses, so a drawn box and a statutory boundary
+really are one kind of object.
+
+**The port gazetteer gained 25 west-coast facilities** — Mormugao, Okha, Dwarka,
+Ratnagiri, New Mangalore, Dahej, Veraval, Diu, Karwar, Beypore, Vizhinjam and
+more. A stop at any of them used to produce no port call and no `docked-at`
+edge: the vessel appeared to stop in empty water. The before/after effect is
+measured on the corpus by the same code path, not asserted.
+
 **3c. Coastal radar, and the first dark contacts (no download, ADR-028).**
 
 ```bash

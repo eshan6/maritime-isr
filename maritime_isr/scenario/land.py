@@ -31,6 +31,7 @@ from ..ingest.landing import land_table, stamp_envelope, stamp_h3
 from ..fusion.radar_ais import (CONTACT_TABLE as T_RADAR_CONTACT,
                                 CORRELATION_TABLE as T_RADAR_CORR)
 from ..ingest.radar import TABLE as T_RADAR
+from ..zones.transitions import ZONE_TRANSITION_TABLE as T_ZONE_TRANSITION
 from ..ingest.sanctions_match import MATCH_TABLE
 from .identifiers import SYNTHETIC_SOURCE_ID
 from .nulls import NullMask, _draw as _draw01
@@ -71,6 +72,15 @@ ALL_TABLES = (T_IDENTITY, *EVENT_TABLES.values(), T_POSITIONS, T_DETECTIONS,
               # removes them too — a clear that silently missed a
               # table would leave orphan synthetic rows behind.
               T_RADAR_CORR, T_RADAR_CONTACT,
+              # Zone transitions (ADR-030), for exactly the same reason and
+              # after exactly the same bug: the first pipeline run over a
+              # regenerated corpus landed 11,110 rows where it had computed
+              # 5,654, because the previous corpus's transitions were still
+              # there under different ids. `maritime_zone` and
+              # `maritime_zone_cell` are deliberately NOT here — the geometry
+              # layer is not scenario data, and clearing it would delete the
+              # operator's own drawn areas every time the corpus is rebuilt.
+              T_ZONE_TRANSITION,
               TRUTH_TABLE, RADAR_TRUTH_TABLE)
 
 

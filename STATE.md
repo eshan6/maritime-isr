@@ -8,7 +8,16 @@ session. `CLAUDE.md`, `ARCHITECTURE.md`, `DECISIONS.md` are stable contracts;
 > between status buckets, record what was verified vs assumed, log anything now
 > broken, and set "Next up." If you don't update it, the next session starts blind.
 
-**Last updated:** 2026-08-16 (second session) — **Build 1 closed** (ADR-029):
+**Last updated:** 2026-08-16 (third session) — **Build 2: the maritime zone
+layer** (ADR-030). The system understood four hardcoded circles; it now holds a
+provenance-carrying geography layer that is queryable rather than merely
+drawable, with zone entry/exit as first-class events, operator-drawn geofences
+that are the same kind of object as a statutory boundary, four new analyses and
+25 west-coast ports the gazetteer had never heard of. **The statutory limits —
+EEZ, contiguous zone, territorial sea, IMBL — are deliberately NOT built**; see
+the section at the end of this file.
+
+Earlier the same day — **Build 1 closed** (ADR-029):
 the transponder-shutdown position now reaches the queue, three API routes and a
 Radar tab make it visible, the published "1 radar track in 9" correlation figure
 was **wrong and is withdrawn** (the real number is 98.2% of resolvable tracks),
@@ -125,6 +134,7 @@ on Eshan's machine.
 | 1.0 → 6.3 | Phases 1–6 (synthetic prototype) | 🟡 | Implemented and green on the synthetic suites. Every metric is synthetic-only. |
 | 6.0 → 6.3 | Phase 6 product surface (API + UI + export) | 🟡 | **The M6 demo definition is now fully built** (ADR-024/025): map, ranked findings, plain-English reason, one-click incident report. Sandbox-green and browser-verified; **never run against the real corpus**. Graph opens on the whole network and the scrubber no longer disappears (ADR-027). |
 | — | Coastal radar as a source (`ingest/radar`, `fusion/radar_ais`, `api/radar/*`, Radar tab) | 🟡 | **Not a spec unit** — ADR-028 + **ADR-029**. A simulated CSN picture over the same vessel truth as the AIS, landed through a real connector into `radar_track_report`, correlated by the existing association engine, filtered by the existing dark cascade, served over three API routes and drawn in the UI. **Precision 100%, recall 43% on the synthetic picture; correlation resolves 98.2% of resolvable tracks to the right hull.** Sandbox-green; **never run on the laptop**, and no real radar feed exists. |
+| — | Maritime zone layer (`zones/`, `ingest/zones`, `/api/zones`, map geography + draw tool) | 🟡 | **Not a spec unit** — ADR-030. Port areas, anchorages, terminals/SPMs, customary lanes, the four migrated sensitive areas and operator geofences, as landed rows with provenance and an H3 cell index. Zone entry/exit are landed events. **The four statutory limits are absent by decision** and arrive only through the connector. Sandbox-green; **never run on the laptop**. |
 | — | Imaging opportunities over AIS gaps (`overpass`) | 🟡 | **Not a spec unit** — ADR-026, outside the 0.0–6.3 numbering. The first determination that is ours rather than GFW's. Needs no pixels; joins the 636 landed scene footprints against flagged gaps. Sandbox-green; **never run against the real corpus**. |
 
 **Ingest rework detail (units 0.1 / 0.3 / 0.4), 2026-07-29:**
@@ -2617,3 +2627,191 @@ measuring a rule change. Re-running the pipeline after tightening
 the previous run's looser rule, and the final table scored **both rule sets**.
 `run_scenario_pipeline.py` now prints a NOTE when the store already holds
 alerts. **Delete `data/graph.sqlite` before measuring a detector change.**
+
+---
+
+## The maritime zone layer (2026-08-16, ADR-030)
+
+### What was built
+
+The system understood four circular areas, hardcoded in `anomaly/library.py`.
+It now holds a geography layer: **port areas, anchorages, oil terminals and
+single point moorings, customary shipping lanes, the four migrated sensitive
+areas, and whatever the operator draws** — every one a landed row with the full
+provenance envelope, an H3 res-6 cell index, and an explicit claim about what it
+is worth.
+
+The layer is **queryable, not merely drawable**. Any zone answers *who was
+inside you, during which window, entering from where and leaving to where*, and
+zone entry/exit is a first-class landed event on the same footing as an
+encounter or a gap.
+
+### What is deliberately NOT built, and why
+
+**EEZ, contiguous zone, territorial sea and the India–Pakistan IMBL are
+absent.** Deriving the first three from a public coastline mask and the UNCLOS
+distances was implemented, measured and **discarded**:
+
+- UNCLOS measures from **declared straight baselines**, not from the low-water
+  line. India has declared them across the Gulf of Kachchh and the Gulf of
+  Khambhat, so a coastline-derived territorial sea sits *inside* the real one
+  exactly where the traffic is densest.
+- There is **no median line** with Pakistan, Oman, the Maldives or Sri Lanka, so
+  a 200 nm envelope from the Indian coast runs straight through four other
+  states' waters.
+- The IMBL is **disputed**: the Sir Creek terminus is unresolved and the
+  maritime boundary seaward of it has never been delimited by agreement.
+
+A boundary that looks surveyed and is not is worse than no boundary. So these
+four arrive through `maritime-isr ingest zones` from a published file, or they
+do not arrive — and **the system says which kinds are missing** in the pipeline
+output, the `/api/zones` response and the map's layer box, because an empty EEZ
+layer and an EEZ nobody loaded look identical otherwise.
+
+Marine Regions (VLIZ) publishes all four as GeoJSON at
+`marineregions.org/downloads.php`. That host was not reachable from the
+environment this was built in; it should be reachable from the laptop.
+
+### The measured result — SYNTHETIC, through the landed pipeline
+
+| | |
+|---|---|
+| zones landed | **63** — 41 port areas, 9 anchorages, 5 terminals/SPMs, 4 lanes, 4 sensitive areas |
+| statutory limits landed | **0** — by decision, see above |
+| cell index rows | 13,997 (res 6) |
+| zone transitions | **4,720** over 1,517 tracks, in 20 s |
+| ... of which entry is censored | **1,208 (26%)** — the track was already inside when it began |
+| by kind | shipping_lane 1,588 · anchorage 1,507 · port_limit 1,507 · sensitive_area 116 · oil_terminal 2 |
+| a drawn box, answered on demand | **~8 s**, 93 vessels in a 0.7° × 0.6° box off Mumbai |
+| area_visit | 4,720 presence rows (a query — emits no alerts by design) |
+| maiden_zone_visit | **77 alerts** |
+| lane_deviation | **36 alerts** |
+| anchored_outside_limits | **IDLE** — no territorial sea loaded |
+
+### Group Z, scored against scenario truth
+
+| | |
+|---|---|
+| Z1 maiden visit | **DETECTED** — `maiden_zone_visit` |
+| Z2 lane deviation | **DETECTED** — `lane_deviation` |
+| Z3 anchored outside limits | **MISSED** — unfindable, no territorial sea loaded |
+| Z4 settled liner (decoy) | correctly quiet |
+| Z5 anchorage waiter (decoy) | correctly quiet |
+| Z6 high-seas hold (decoy) | correctly quiet |
+
+**All three new decoys held.** Both findable new anomalies were found. Z3 is a
+miss the detector did not earn — the pipeline names the missing boundary.
+
+### The precision regression these two rules caused — NOT resolved
+
+**Scenario-level precision fell from 100% to 50%.** Eight decoys fired that
+should not have: **five on `lane_deviation`** (C4, DX3, DX9, DX10 ×24, E5 ×2)
+and **three on `maiden_zone_visit`** (D4, DX2, DX5 ×2). Separately, 72 alerts
+landed on background traffic with no truth row — 71 of them maiden visits.
+
+ADR-004 sets the gate at 70% and this is below it. **It is recorded rather than
+tuned away, because every threshold that would fix it is one I cannot defend.**
+The measurements:
+
+* the novelty distance for maiden visit has a genuine structural break — 75% of
+  candidate fires are within 28 km, the next is 558 km, and any threshold from
+  100 to 300 km selects the same set. That one is defensible and is in;
+* a *history* requirement would cut 77 → 17 at 14 days and 77 → **1** at 21
+  days. The 1 is Z1. That is fitting to the answer key, not a threshold, and
+  the distribution is smooth (77 → 69 → 48 → 35 → 17 → 1) with no break to
+  anchor on. **I will not pick it.**
+
+The honest reading is that **"first visit to a zone" is not an anomaly at an
+eight-week history length** — it is a fact about our observation window. The
+likely correct resolution is to demote `maiden_zone_visit` to a query like
+`area_visit`, which would need Z1's truth row rewritten to expect a query
+result rather than an alert. `lane_deviation`'s decoy fires need separate
+diagnosis; DX10 firing 24 times suggests one long off-route passage being
+re-reported rather than 24 findings.
+
+**Until that is settled, Build 2 lands with a precision figure below the
+ADR-004 gate, stated here rather than hidden.**
+
+### Four analyses, and the honest state of each
+
+| Analysis | State |
+|---|---|
+| **Area visit** | Runs. Deliberately emits no alerts — "which vessels visited this area" is a question an operator asks, not a judgement the system makes, and dressing it as an anomaly would put a hundred lawful port calls in a queue ADR-004 spends its whole budget keeping short. |
+| **Maiden visit** | Runs. Needs a history qualifier or it is a list of the fleet: over eight weeks a vessel's first appearance anywhere is her first appearance in every zone she passes through. `MAIDEN_MIN_PRIOR_ZONES = 3`. Declines to claim anything about a radar contact — "she has never been here before" is a statement about a hull, and a station track number is recycled in minutes. |
+| **Lane deviation** | Runs, and **the synthetic figure is optimistic by construction**. The generator routes its vessels with the same land-avoiding router the lane centrelines were drawn from, so generated traffic sits on the lanes almost by definition and only a vessel a scenario deliberately sends off-route deviates. This number says very little about real traffic. |
+| **Anchored outside port limits** | **IDLE until a territorial sea is loaded**, and says so by name rather than returning an empty list. The code path is proven by `test_an_imported_territorial_sea_makes_the_idle_analysis_run`, which writes a GeoJSON, lands it through the real connector, and watches the analysis start firing with no code change. |
+
+### The port gazetteer gap, closed
+
+**25 west-coast facilities the gazetteer did not know** — Mormugao, Okha,
+Dwarka, Ratnagiri, New Mangalore, Dahej, Veraval, Diu, Karwar, Beypore,
+Vizhinjam, Jakhau, Navlakhi, Bedi, Mangrol, Dahanu, Murud, Dabhol, Vengurla,
+Redi, Honnavar, Malpe, Kannur, Alappuzha, Kollam. A stop at any of them produced
+no port call, no `docked-at` edge and no port-risk signal: the vessel simply
+appeared to stop in empty water.
+
+`GAZETTEER_V1_NAMES` records the old sixteen-name list **in the source**, so the
+before/after figure does not depend on which commit is checked out, and
+`gazetteer_recall()` measures it on the same corpus through the same
+`port_at()` call the feature extractor uses. No anchorages were added for the
+new ports: `ANCHORAGES` holds *charted waiting areas* and this project does not
+have the charts.
+
+### Things worth knowing before changing anything here
+
+- **The cell covering is an index, not the geometry, and it is dilated on
+  purpose.** A res-6 cell is ~7 km across and a 2 km single point mooring
+  contains no cell centre, so an undilated covering is the empty set — and a
+  zone indexed by the empty set is a zone no vessel is ever inside. Membership
+  is always cell lookup *then* exact `contains`.
+- **28% of transitions have a censored entry** (1,543 of 5,518 on the first
+  run): the track was already inside when it began, so the entry position is
+  where we picked her up rather than where she crossed. Anything reasoning about
+  entry direction must respect `entry_censored` or it will report the middle of
+  a zone as a boundary crossing.
+- **A drawn box is answered on demand** in about eight seconds, because it has
+  no precomputed transitions and "nobody was here" would be a lie. The answer
+  covers **AIS only** and says so; radar tracks are built by the track engine
+  from a different table and reconstructing them per request would take minutes.
+- **`loiter-in-zone` was never a registered edge type.** It has been emitted
+  since Phase 5 against a `zone:<name>` destination that was not a node type,
+  and validated only because nothing checked. Both halves now exist.
+
+### What Eshan needs to run
+
+```
+maritime-isr zones build
+maritime-isr zones status
+```
+
+*Success* for the first is `landed N row(s) into maritime_zone` and
+`maritime_zone_cell`. *Success* for the second is a table of kinds and counts
+followed by a **NOT PRESENT** block naming the four statutory limits — that
+block is correct output, not an error.
+
+To load a real boundary, on a machine that can reach Marine Regions:
+
+```
+maritime-isr ingest zones --path territorial_seas_v4.geojson
+maritime-isr ingest zones --path eez_v12.geojson --kind eez
+```
+
+*Success* is `[zones] landed N zone(s) into maritime_zone` with a skipped count
+of zero. A non-zero skip count is printed with a reason per feature; paste it
+back rather than ignoring it, because a connector that quietly drops a third of
+its input leaves a hole nobody notices until an analysis is inexplicably quiet.
+
+Then re-run `python tools/run_scenario_pipeline.py` and the
+`anchored_outside_limits` analysis stops reporting itself idle.
+
+### Status, stated precisely
+
+- 🟡 **Built, sandbox-green.** The layer builds, lands, indexes, answers
+  queries, renders and draws in Claude's sandbox — the draw-a-box flow was
+  driven in a real Chromium against a real uvicorn process and screenshotted.
+  **None of it has ever run on Eshan's machine.**
+- ⬜ **No real boundary file has ever been loaded.** `ingest/zones.py` is tested
+  against a GeoJSON this project wrote, not against a Marine Regions download.
+  The `POL_TYPE` mapping is written from that publication's documented
+  vocabulary and is **untested against the real file**.
+- Every figure is synthetic.

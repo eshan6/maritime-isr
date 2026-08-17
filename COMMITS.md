@@ -572,3 +572,73 @@ python tools/run_scenario_pipeline.py            # stages 3b and 4b, then the
 python -m pytest -q tests/test_radar.py          # 34 passed
 python -m uvicorn maritime_isr.api.app:app --port 8000   # then /radar
 ```
+
+---
+
+## feat: the maritime zone layer, and the boundaries this project refuses to invent (ADR-030)
+
+**Why.** The system understood four hardcoded circles. Five named analyses in
+the requirement are unbuildable without real maritime geography and
+straightforward once it exists — the highest coverage-per-effort item in the
+brief.
+
+**The decision that shaped everything else: the statutory limits are not built.**
+Deriving the 12/24/200 nm limits from a public coastline mask was implemented,
+measured and **discarded**. UNCLOS measures from *declared straight baselines*,
+not from the coast, and India has declared them across the Gulf of Kachchh and
+the Gulf of Khambhat — so a coastline-derived territorial sea sits inside the
+real one exactly where the traffic is densest, with no median line against any
+neighbour. The India–Pakistan IMBL is *disputed* and undelimited seaward of Sir
+Creek. A boundary that looks surveyed and is not is worse than no boundary.
+
+So EEZ, contiguous zone, territorial sea and IMBL arrive through
+`ingest/zones.py` from a published file or they do not arrive — and everything
+downstream is built and tested against them anyway, with the gap named out loud
+rather than showing as an empty layer.
+
+**What landed.**
+
+- `maritime_isr/zones/` — `model` (schemas + the closed kind vocabulary),
+  `geometry` (one containment test, one cell-index rule, true-metre circles and
+  corridors), `derive` (the operational set and the argument against the rest),
+  `store` (landing + the two-stage `ZoneIndex`), `transitions`, `query`,
+  `analyses`.
+- `ingest/zones.py` — the connector. GeoJSON, Marine Regions' `POL_TYPE`
+  vocabulary mapped explicitly, AOI clipping, and a feature it cannot classify
+  is **skipped and counted** rather than guessed into the wrong kind.
+- `zone_transition` — entry/exit as a landed event table with bearings. The
+  crossing is interpolated onto the boundary (a vessel at 15 kn covers 4.6 km
+  between fixes) and a track that began inside reports `entry_censored` with a
+  null bearing rather than a fabricated direction.
+- Four analyses: area visit (a query, no alerts by design), maiden visit, lane
+  deviation, anchored outside port limits — the last idle until a territorial
+  sea is loaded, and saying so by name.
+- API: `/api/zones`, `/api/zones/{id}/vessels`, `POST`/`DELETE /api/geofences`.
+  A drawn box is answered **on demand in ~8 s** via the H3 hash join, through
+  the same `transitions_for_track` the pipeline uses.
+- UI: ten independently-toggleable geography layers with a back-to-front visual
+  hierarchy, a polygon draw tool, and a panel that shows each zone's authority,
+  method and caveat before it shows the answer.
+- `ports.py` — **25 west-coast facilities added**, `GAZETTEER_V1_NAMES` recorded
+  so the before/after figure is reproducible, and `gazetteer_recall()` to
+  measure it on the same corpus by the same code path.
+- The four hardcoded circles became landed rows; `detect_sensitive_loitering`
+  now watches operator geofences too when given a `ZoneIndex`, and behaves
+  identically without one.
+- Group Z: six scenarios — three true anomalies, three decoys, one decoy per
+  condition of the anchoring rule. **No scenario asserts that crossing the IMBL
+  is an offence**; that would bake a contested legal claim into the answer key.
+- `tests/test_zones.py` — 35 tests, every one driving code: geometry accuracy,
+  the sub-cell indexing case, crossing interpolation, censoring, the refusal to
+  derive statutory limits, each analysis with its own decoy, the connector's
+  skip-rather-than-guess behaviour, and the API round trip including the refusal
+  to delete a standing zone.
+
+Verify:
+
+```
+maritime-isr zones build          # 64 zones; names the four kinds it lacks
+maritime-isr zones status
+python -m pytest -q tests/test_zones.py       # 35 passed
+python tools/run_scenario_pipeline.py         # stages 3c and 7b
+```

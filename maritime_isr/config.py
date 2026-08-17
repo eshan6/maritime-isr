@@ -296,6 +296,16 @@ ANOMALY_THRESHOLDS = {
     "loitering_sensitive":  0.60,
     "identity_then_anomaly":0.45,
     "port_risk_propagation":0.50,
+    # --- the zone layer (ADR-030) ---------------------------------------
+    # Higher gates than the older rules, deliberately. These three run over a
+    # geometry layer whose own confidence is 0.35-0.55 — derived limits,
+    # circles standing in for declared port limits, customary routes standing
+    # in for adopted ones — so a finding built on them starts from weaker
+    # ground and has to clear a higher bar to reach a queue ADR-004 spends its
+    # whole budget keeping short.
+    "maiden_zone_visit":    0.60,
+    "lane_deviation":       0.65,
+    "anchored_outside_limits": 0.60,
 }
 RISK_HALF_LIFE_DAYS = 30.0        # anomaly contributions to risk decay
 RISK_SANCTION_HOPS = 3            # graph proximity search depth for risk
@@ -310,6 +320,47 @@ GEOFENCE_LOITER_MIN_HOURS = 1.5   # loitering near sensitive geometry
 #: wide on purpose — a transfer and the pass that catches one party silent need
 #: not be simultaneous — and it is only defensible now that it is paired with a
 #: distance.
+#: --- the zone layer (ADR-030) -------------------------------------------
+#:
+#: **Maiden visit needs a history qualifier or it is a list of the fleet.**
+#: Over eight weeks of corpus, a vessel's first appearance anywhere is also her
+#: first appearance in every zone she passes through, so an unqualified
+#: "no prior presence" rule fires once per hull and carries no information.
+#: Measured before this constant existed: 168 alerts, one per vessel. Requiring
+#: three zones already visited means the subject is a hull we have watched
+#: working this coast, now somewhere she has never been.
+MAIDEN_MIN_PRIOR_ZONES = 3
+
+#: And the new zone has to be somewhere genuinely else. Without this the rule
+#: fires every time a vessel adds the next berth along to her rotation, which on
+#: this coast is most weeks.
+#:
+#: **Chosen at a structural break, not by taste.** Measured over every candidate
+#: fire on the corpus, the distance from the new zone to the nearest zone the
+#: vessel had already visited is bimodal: 75% fall under 28 km — the adjacent
+#: facility — and the next value above that is 558 km. Any threshold from 100 to
+#: 300 km selects exactly the same 110 fires, which is what makes 300 defensible
+#: rather than fitted. The gap is real geography: the facilities on this coast
+#: come in clusters (Gulf of Kachchh, Mumbai, Konkan, Kerala) with hundreds of
+#: kilometres between them.
+MAIDEN_MIN_NOVELTY_KM = 300.0
+
+#: Lane deviation: how far outside every corridor, for how long, while making
+#: way. All three together, because each alone is noise — position error puts
+#: fixes outside a corridor, a drifting vessel is the loitering rule's finding
+#: rather than this one, and a single diversion round weather is seamanship.
+LANE_DEVIATION_MIN_KM = 60.0
+LANE_DEVIATION_MIN_MINUTES = 180.0
+LANE_DEVIATION_MIN_SOG_KN = 6.0
+
+#: Anchored outside port limits: stopped this long, this slow, inside
+#: territorial waters and outside every declared facility. Six hours is the
+#: threshold at which "waiting for a pilot" stops being the obvious
+#: explanation; 1.0 kn is the speed a vessel at anchor still shows as she
+#: swings on the tide.
+OUTSIDE_LIMITS_MIN_HOURS = 6.0
+OUTSIDE_LIMITS_MAX_SOG_KN = 1.0
+
 RENDEZVOUS_NEAR_KM = 3.0
 RENDEZVOUS_WINDOW_S = 12 * 3600.0
 

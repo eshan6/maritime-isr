@@ -31,13 +31,31 @@ async function get(path, params) {
   return r.json();
 }
 
+async function del(path) {
+  const r = await fetch(BASE + path, {
+    method: "DELETE",
+    headers: authHeaders({ Accept: "application/json" }),
+  });
+  if (!r.ok) {
+    const detail = await r.text().catch(() => "");
+    throw new Error(`${r.status} ${detail.slice(0, 300)}`);
+  }
+  return r.json();
+}
+
 async function post(path, body) {
   const r = await fetch(BASE + path, {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
   });
-  if (!r.ok) throw new Error(`${r.status} ${path}`);
+  if (!r.ok) {
+    // The detail matters here: creating a geofence fails with a readable
+    // reason ("a geofence needs a name", "invalid geometry — a self-crossing
+    // outline?") and swallowing it leaves the operator with a status code.
+    const detail = await r.text().catch(() => "");
+    throw new Error(`${r.status} ${detail.slice(0, 300)}`);
+  }
   return r.json();
 }
 
@@ -131,4 +149,12 @@ export const api = {
   radarStations: () => memo("radar-stations", () => get("/radar/stations")),
   radarContacts: (params) => get("/radar/contacts", params),
   radarTracks: (params) => get("/radar/tracks", params),
+  // ---- the maritime zone layer (ADR-030) -------------------------------
+  // NOT memoised, unlike the radar stations: the operator can add and remove
+  // geofences, so a cached zone list would show a box they just deleted.
+  zones: (params) => get("/zones", params),
+  zoneVessels: (id, params) =>
+    get(`/zones/${encodeURIComponent(id)}/vessels`, params),
+  createGeofence: (body) => post("/geofences", body),
+  deleteGeofence: (id) => del(`/geofences/${encodeURIComponent(id)}`),
 };

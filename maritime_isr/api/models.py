@@ -470,6 +470,67 @@ class RadarContact(BaseModel):
     is_synthetic: bool = True
 
 
+class MaritimeZone(BaseModel):
+    """One zone, with the claim about its origin attached.
+
+    `authority`, `method`, `confidence` and `note` are returned on every zone
+    and are not optional decoration. Three quite different kinds of geometry
+    share this table — published boundaries, working circles this project drew
+    at the right scale, and areas the operator drew — and a client that cannot
+    tell them apart will eventually render a 10 km circle labelled "port area"
+    as though it were a declared limit.
+    """
+    zone_id: str
+    kind: str
+    name: str
+    facility: Optional[str] = None
+    authority: str
+    method: str
+    note: str = ""
+    confidence: float
+    is_line: bool = False
+    render_order: int = 50
+    n_cells: int = 0
+    geometry: dict                    # GeoJSON
+    is_synthetic: bool = False
+
+
+class ZoneVisitRow(BaseModel):
+    """One vessel's presence in one zone.
+
+    `entry_censored` says the track was already inside when it began, so the
+    entry position is where we picked her up rather than where she crossed.
+    A client that ignores it will draw a boundary crossing in open water.
+    """
+    track_id: Optional[str] = None
+    track_key: Optional[str] = None
+    track_source: Optional[str] = None
+    mmsi: Optional[int] = None
+    t_enter: Optional[str] = None
+    t_exit: Optional[str] = None
+    dwell_min: Optional[float] = None
+    entry_lat: Optional[float] = None
+    entry_lon: Optional[float] = None
+    entry_bearing_deg: Optional[float] = None
+    exit_lat: Optional[float] = None
+    exit_lon: Optional[float] = None
+    exit_bearing_deg: Optional[float] = None
+    entry_censored: bool = False
+    exit_censored: bool = False
+    min_sog_kn: Optional[float] = None
+    mean_sog_kn: Optional[float] = None
+    n_fixes: Optional[int] = None
+    is_synthetic: bool = False
+
+
+class GeofenceRequest(BaseModel):
+    """An area the operator drew. GeoJSON geometry, because that is what a map
+    hands back and converting it twice is two chances to lose a ring."""
+    name: str
+    geometry: dict
+    note: str = ""
+
+
 class Stats(BaseModel):
     """Every figure the demo could quote, split real vs synthetic (ADR-019)."""
     vessels: SplitCount

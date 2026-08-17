@@ -289,6 +289,64 @@ def create_app() -> FastAPI:
         return service.list_radar_tracks(max_tracks=max_tracks,
                                          max_points=max_points)
 
+    # ---- the maritime zone layer (ADR-030) -------------------------------
+    @api.get("/zones", dependencies=guard)
+    def zones(kind: Optional[str] = Query(default=None)) -> dict:
+        """The zone layer as GeoJSON, ordered back to front for drawing.
+
+        `missing_kinds` names the statutory limits that are not loaded. A map
+        that simply does not draw an EEZ looks identical to one whose EEZ is
+        empty, and this system will not derive one — so the gap is reported
+        rather than left to be inferred.
+        """
+        res = service.list_zones([kind] if kind else None)
+        return {
+            "count": models.SplitCount(**res["count"]).model_dump(),
+            "missing_kinds": res["missing_kinds"],
+            "note": res.get("note"),
+            "items": [models.MaritimeZone(**z).model_dump()
+                      for z in res["items"]],
+        }
+
+    @api.get("/zones/{zone_id}/vessels", dependencies=guard)
+    def zone_vessels(zone_id: str,
+                     start: Optional[str] = Query(default=None),
+                     end: Optional[str] = Query(default=None),
+                     limit: int = Query(default=500, ge=1, le=5000)) -> dict:
+        """Who was inside, when, entering from where and leaving to where.
+
+        The sentence this whole layer exists to earn. `basis` is `landed` or
+        `none`; `none` means no transitions have been computed for this zone
+        yet, which is not the same as nobody having been there.
+        """
+        res = service.zone_vessels(zone_id, start=start, end=end, limit=limit)
+        if res.get("error"):
+            raise HTTPException(status_code=404, detail=res["error"])
+        return {
+            "zone": res["zone"], "basis": res["basis"],
+            "n_vessels": res["n_vessels"],
+            "count": models.SplitCount(**res["count"]).model_dump(),
+            "note": res.get("note"),
+            "items": [models.ZoneVisitRow(**v).model_dump()
+                      for v in res["items"]],
+        }
+
+    @api.post("/geofences", dependencies=guard)
+    def create_geofence(req: models.GeofenceRequest) -> dict:
+        """Save a drawn area as a zone like any other."""
+        try:
+            return service.create_geofence(req.name, req.geometry, req.note)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+
+    @api.delete("/geofences/{zone_id}", dependencies=guard)
+    def delete_geofence(zone_id: str) -> dict:
+        """Remove an operator-drawn area. Standing zones are refused."""
+        try:
+            return service.delete_geofence(zone_id)
+        except PermissionError as e:
+            raise HTTPException(status_code=403, detail=str(e)) from e
+
     # ---- stats -----------------------------------------------------------
     @api.get("/stats", dependencies=guard)
     def stats() -> dict:

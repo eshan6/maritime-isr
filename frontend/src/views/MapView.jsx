@@ -14,6 +14,7 @@ import { useNavigate } from "react-router-dom";
 import { api } from "../api.js";
 import { fmtDate } from "../lib/format.js";
 import { VesselPanel } from "../components/VesselPanel.jsx";
+import { ZonePanel } from "../components/ZonePanel.jsx";
 
 // AOI v1 — Arabian Sea / Indian west coast (config.py AOI_V1).
 const AOI = { lonMin: 60, latMin: 5, lonMax: 78, latMax: 25 };
@@ -59,6 +60,23 @@ const LAYERS = [
   { id: "radar_contacts", label: "Radar dark contacts (synthetic)", color: "#d33682" },
 ];
 
+// The maritime zone layer (ADR-030), toggled INDEPENDENTLY by kind — a
+// watchkeeper needs to see boundaries without losing the traffic underneath
+// them, and "zones on/off" is not that. Ordered back to front: big statutory
+// areas are washes at the back, small facilities are outlines at the front.
+const ZONE_LAYERS = [
+  { id: "eez", label: "Exclusive economic zone", color: "#3b6ea5" },
+  { id: "contiguous_zone", label: "Contiguous zone", color: "#4d7fb8" },
+  { id: "territorial_sea", label: "Territorial sea", color: "#5f92cb" },
+  { id: "imbl", label: "Maritime boundary line", color: "#8a2f2f" },
+  { id: "shipping_lane", label: "Shipping lanes", color: "#5b7a52" },
+  { id: "sensitive_area", label: "Sensitive areas", color: "#8a5a2f" },
+  { id: "port_limit", label: "Port areas", color: "#3f6f7a" },
+  { id: "anchorage", label: "Anchorages", color: "#6a5aa0" },
+  { id: "oil_terminal", label: "Terminals / SPMs", color: "#a0526a" },
+  { id: "geofence", label: "My drawn areas", color: "#c2410c" },
+];
+
 const EVENT_COLOR = { encounter: "#b0221b", loitering: "#9a6300", port_visit: "#1f7a4d", gap: "#b0221b" };
 
 //: Events requested for the individual-dot layers. The dots are the detail
@@ -87,16 +105,26 @@ export function MapView() {
     // misreading. The 1,200-odd track polylines are off: they are a dense mat
     // over the whole coast and are for inspection, not for the headline.
     radar_coverage: true, radar_tracks: false, radar_contacts: true,
+    // Zones default OFF except the operator's own work and the facility
+    // outlines. Turning the whole geography on by default would bury the
+    // traffic, which is the failure the visual hierarchy exists to prevent.
+    z_eez: false, z_contiguous_zone: false, z_territorial_sea: false,
+    z_imbl: true, z_shipping_lane: false, z_sensitive_area: true,
+    z_port_limit: true, z_anchorage: true, z_oil_terminal: true,
+    z_geofence: true,
   });
   const [data, setData] = useState({
     events: [], ports: [], scenes: [], alerts: [], density: [], detections: [],
-    radarStations: [], radarContacts: [],
+    radarStations: [], radarContacts: [], zones: [], missingKinds: [],
   });
   // What the API told us it could not fit in the events response, and what the
   // detections response is. Surfaced in the corner rather than swallowed.
   const [notes, setNotes] = useState({});
   const [tracks, setTracks] = useState([]);
   const [radarTracks, setRadarTracks] = useState([]);
+  const [selectedZone, setSelectedZone] = useState(null);
+  const [drawing, setDrawing] = useState(null);   // null | {points: [[lon,lat]]}
+  const [zoneNote, setZoneNote] = useState(null);
   const [window_, setWindow] = useState(null); // {start,end} epoch ms
   const [windowError, setWindowError] = useState(null);
   const [t, setT] = useState(1); // 0..1 across the window
@@ -174,8 +202,16 @@ export function MapView() {
     api.radarTracks({ max_tracks: 600, max_points: 40 })
       .then((r) => live && setRadarTracks(r.items || []))
       .catch(() => {});
+    loadZones(set, (n) => live && setZoneNote(n));
     return () => { live = false; };
   }, []);
+
+  // Reloaded on demand rather than only at mount, because drawing or deleting
+  // an area has to change the map immediately — a geofence you cannot see is
+  // a geofence you will draw again.
+  function reloadZones() {
+    loadZones((patch) => setData((d) => ({ ...d, ...patch })), setZoneNote);
+  }
 
   const clockMs = useMemo(() => {
     if (!window_) return null;
@@ -189,7 +225,26 @@ export function MapView() {
     renderStatic(map.current, data, tracks, visible, (id) => setSelected(id));
     renderDensity(map.current, data.density, visible.density);
     renderRadar(map.current, data, radarTracks, visible);
+    renderZones(map.current, data.zones, visible, (z) => setSelectedZone(z));
   }, [ready, data, tracks, radarTracks, visible]);
+
+  // ---- the draw tool ----
+  useEffect(() => {
+    if (!ready || !map.current) return;
+    const m = map.current;
+    if (!drawing) {
+      renderDraft(m, null);
+      m.getCanvas().style.cursor = "";
+      return;
+    }
+    m.getCanvas().style.cursor = "crosshair";
+    renderDraft(m, drawing.points);
+    const onClick = (e) => {
+      setDrawing((d) => ({ points: [...d.points, [e.lngLat.lng, e.lngLat.lat]] }));
+    };
+    m.on("click", onClick);
+    return () => m.off("click", onClick);
+  }, [ready, drawing]);
 
   // ---- moving vessels: interpolate each track to the clock and glide ----
   useEffect(() => {
@@ -218,7 +273,7 @@ export function MapView() {
     <div style={{ position: "absolute", inset: 0 }}>
       <div ref={mapEl} style={{ position: "absolute", inset: 0 }} />
 
-      <div className="layerbox">
+      <div className="layerbox" style={{ maxHeight: "72vh", overflowY: "auto" }}>
         <h4>Layers</h4>
         {LAYERS.map((l) => (
           <label className="layer-toggle" key={l.id}>
@@ -231,6 +286,75 @@ export function MapView() {
             {l.label}
           </label>
         ))}
+
+        <h4 style={{ marginTop: 12 }}>Maritime geography</h4>
+        {ZONE_LAYERS.map((l) => {
+          const missing = (data.missingKinds || []).includes(l.id);
+          return (
+            <label
+              className="layer-toggle"
+              key={l.id}
+              title={missing
+                ? "Not loaded — a statutory limit this system will not derive. "
+                  + "Load a published file with `maritime-isr ingest zones`."
+                : l.label}
+              style={{ opacity: missing ? 0.42 : 1 }}
+            >
+              <input
+                type="checkbox"
+                disabled={missing}
+                checked={!missing && !!visible[`z_${l.id}`]}
+                onChange={(e) =>
+                  setVisible((v) => ({ ...v, [`z_${l.id}`]: e.target.checked }))}
+              />
+              <span className="layer-swatch" style={{ background: l.color }} />
+              {l.label}
+              {missing && <span className="muted"> — not loaded</span>}
+            </label>
+          );
+        })}
+
+        {/* Draw. The requirement's "draw a box anywhere and I'll tell you who
+            was in it" begins here, and the control stays in the layer box
+            rather than floating, so the drawn area reads as one more layer
+            rather than as a mode the map is stuck in. */}
+        <div style={{ marginTop: 10, borderTop: "1px solid var(--line,#e3e8ec)",
+                      paddingTop: 8 }}>
+          {!drawing ? (
+            <button className="btn btn-sm" onClick={() => setDrawing({ points: [] })}>
+              Draw an area
+            </button>
+          ) : (
+            <DrawControls
+              points={drawing.points}
+              onUndo={() => setDrawing((d) => ({ points: d.points.slice(0, -1) }))}
+              onCancel={() => setDrawing(null)}
+              onSave={async (name) => {
+                const ring = [...drawing.points, drawing.points[0]];
+                const r = await api.createGeofence({
+                  name,
+                  geometry: { type: "Polygon", coordinates: [ring] },
+                });
+                setDrawing(null);
+                reloadZones();
+                // Open it immediately: the point of drawing is the answer, and
+                // making the operator hunt for their own box on the map first
+                // is a step that exists only because it was easier to build.
+                setSelectedZone({
+                  zone_id: r.zone_id, name: r.name, kind: "geofence",
+                  authority: "operator", method: "drawn by the operator",
+                  confidence: 1.0, note: "",
+                });
+              }}
+            />
+          )}
+        </div>
+        {(data.missingKinds || []).length > 0 && (
+          <div className="muted" style={{ fontSize: 10.5, marginTop: 8,
+                                          lineHeight: 1.45 }}>
+            {zoneNote}
+          </div>
+        )}
       </div>
 
       {/* What the map is NOT showing, in the operator's line of sight. Every
@@ -289,7 +413,24 @@ export function MapView() {
         </span>
       </div>
 
-      {selected && (
+      {selectedZone && (
+        <div className="drawer">
+          <div className="drawer-head">
+            <div className="eyebrow">Area</div>
+            <button className="iconbtn" onClick={() => setSelectedZone(null)}>
+              ×
+            </button>
+          </div>
+          <div className="drawer-body">
+            <ZonePanel
+              zone={selectedZone}
+              onDelete={() => { setSelectedZone(null); reloadZones(); }}
+            />
+          </div>
+        </div>
+      )}
+
+      {selected && !selectedZone && (
         <div className="drawer">
           <div className="drawer-head">
             <div className="eyebrow">Vessel</div>
@@ -490,6 +631,170 @@ function renderDensity(m, cells, on) {
   }
   if (m.getLayer("density"))
     m.setLayoutProperty("density", "visibility", on ? "visible" : "none");
+}
+
+// ---- the maritime zone layer (ADR-030) -----------------------------------
+
+async function loadZones(set, setNote) {
+  try {
+    const r = await api.zones();
+    set({ zones: r.items || [], missingKinds: r.missing_kinds || [] });
+    setNote?.(r.note || null);
+  } catch {
+    set({ zones: [], missingKinds: [] });
+  }
+}
+
+// One source and one pair of layers PER KIND, so each can be toggled on its
+// own and each keeps its own colour. A single layer with data-driven paint
+// would have been fewer lines and would have made independent toggling
+// impossible — which is the requirement, not a nicety.
+function renderZones(m, zones, visible, onSelect) {
+  const byKind = new Map();
+  for (const z of zones || []) {
+    if (!byKind.has(z.kind)) byKind.set(z.kind, []);
+    byKind.get(z.kind).push(z);
+  }
+  for (const layer of ZONE_LAYERS) {
+    const on = !!visible[`z_${layer.id}`];
+    const list = byKind.get(layer.id) || [];
+    const feats = list.map((z) => ({
+      type: "Feature",
+      geometry: z.geometry,
+      properties: {
+        zone_id: z.zone_id, name: z.name, kind: z.kind,
+        authority: z.authority, method: z.method, note: z.note,
+        confidence: z.confidence,
+      },
+    }));
+    // `is_line` comes from the API (it is a property of the KIND, and the
+    // server owns that vocabulary); the constant is the fallback for a kind
+    // the server has not told us about yet.
+    const isLine = list.length ? !!list[0].is_line : layer.id === "imbl";
+    upsertZoneLayer(m, `zone-${layer.id}`, feats, layer.color, on,
+                    isLine, onSelect, zones);
+  }
+}
+
+function upsertZoneLayer(m, id, feats, color, on, isLine, onSelect, zones) {
+  const fc = { type: "FeatureCollection", features: feats };
+  const src = m.getSource(id);
+  if (src) src.setData(fc);
+  else {
+    m.addSource(id, { type: "geojson", data: fc });
+    if (!isLine) {
+      // A wash, not a fill. The boundaries have to be legible without hiding
+      // the traffic under them, so the interior is barely tinted and the work
+      // is done by the outline.
+      m.addLayer({
+        id: `${id}-fill`, type: "fill", source: id,
+        paint: { "fill-color": color, "fill-opacity": 0.06 },
+      });
+    }
+    m.addLayer({
+      id: `${id}-line`, type: "line", source: id,
+      paint: {
+        "line-color": color,
+        "line-width": isLine ? 2 : 1.2,
+        "line-opacity": isLine ? 0.9 : 0.65,
+        ...(isLine ? { "line-dasharray": [4, 2] } : {}),
+      },
+    });
+    const clickable = isLine ? `${id}-line` : `${id}-fill`;
+    m.on("click", clickable, (e) => {
+      const p = e.features[0].properties;
+      const z = (zones || []).find((x) => x.zone_id === p.zone_id);
+      onSelect(z || {
+        zone_id: p.zone_id, name: p.name, kind: p.kind,
+        authority: p.authority, method: p.method, note: p.note,
+        confidence: Number(p.confidence),
+      });
+    });
+    m.on("mouseenter", clickable, () => (m.getCanvas().style.cursor = "pointer"));
+    m.on("mouseleave", clickable, () => (m.getCanvas().style.cursor = ""));
+  }
+  for (const suff of ["-fill", "-line"]) {
+    if (m.getLayer(id + suff))
+      m.setLayoutProperty(id + suff, "visibility", on ? "visible" : "none");
+  }
+}
+
+// The polygon under construction. Drawn as a line while it has fewer than
+// three points and as a closed shape after, so the operator can see what they
+// are about to save rather than discovering it on the next reload.
+function renderDraft(m, points) {
+  const feats = [];
+  if (points && points.length >= 1) {
+    feats.push({
+      type: "Feature",
+      geometry: points.length >= 3
+        ? { type: "Polygon", coordinates: [[...points, points[0]]] }
+        : { type: "LineString", coordinates: points.length >= 2 ? points
+                                                                : [points[0], points[0]] },
+      properties: {},
+    });
+    for (const p of points) {
+      feats.push({ type: "Feature", geometry: { type: "Point", coordinates: p },
+                   properties: {} });
+    }
+  }
+  const fc = { type: "FeatureCollection", features: feats };
+  const src = m.getSource("draft");
+  if (src) src.setData(fc);
+  else {
+    m.addSource("draft", { type: "geojson", data: fc });
+    m.addLayer({ id: "draft-fill", type: "fill", source: "draft",
+                 filter: ["==", ["geometry-type"], "Polygon"],
+                 paint: { "fill-color": "#c2410c", "fill-opacity": 0.12 } });
+    m.addLayer({ id: "draft-line", type: "line", source: "draft",
+                 filter: ["!=", ["geometry-type"], "Point"],
+                 paint: { "line-color": "#c2410c", "line-width": 2,
+                          "line-dasharray": [2, 1] } });
+    m.addLayer({ id: "draft-pt", type: "circle", source: "draft",
+                 filter: ["==", ["geometry-type"], "Point"],
+                 paint: { "circle-radius": 4, "circle-color": "#c2410c",
+                          "circle-stroke-width": 1.5,
+                          "circle-stroke-color": "#fff" } });
+  }
+}
+
+function DrawControls({ points, onUndo, onCancel, onSave }) {
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const enough = points.length >= 3;
+  return (
+    <div style={{ fontSize: 12 }}>
+      <div className="muted" style={{ marginBottom: 6 }}>
+        Click the map to place corners. {points.length} placed
+        {!enough && " — three or more makes an area"}.
+      </div>
+      <input
+        className="input"
+        placeholder="Name this area"
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        style={{ width: "100%", marginBottom: 6, fontSize: 12, padding: "4px 6px" }}
+      />
+      {err && <div style={{ color: "#b0221b", marginBottom: 6 }}>{err}</div>}
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        <button className="btn btn-sm btn-primary"
+                disabled={!enough || !name.trim() || busy}
+                onClick={async () => {
+                  setBusy(true); setErr(null);
+                  try { await onSave(name.trim()); }
+                  catch (e) { setErr(String(e.message || e)); }
+                  finally { setBusy(false); }
+                }}>
+          {busy ? "Saving…" : "Save and ask"}
+        </button>
+        <button className="btn btn-sm" disabled={!points.length} onClick={onUndo}>
+          Undo point
+        </button>
+        <button className="btn btn-sm" onClick={onCancel}>Cancel</button>
+      </div>
+    </div>
+  );
 }
 
 // ---- coastal radar (ADR-028) ---------------------------------------------

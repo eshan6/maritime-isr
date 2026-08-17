@@ -2,24 +2,34 @@
 
 Proves the storage path the whole prototype stands on, with dedup verified
 (re-writing identical rows must not duplicate). Uses a tmp data root.
+
+**Why this redirects the config singleton in place rather than reloading it.**
+The first version of this test did `importlib.reload(maritime_isr.config)` to
+pick up a tmp `MISR_DATA_ROOT`. Reloading rebinds `config.cfg` to a *new*
+`Config` object, but every module that did `from ..config import cfg` — the
+landing layer among them — keeps a reference to the old one. From that point on
+the process has two config objects, and `monkeypatch.setattr(config.cfg,
+"data_root", tmp)` in any later test silently redirects nothing: the writer
+still reads the stale object and lands rows in the operator's real `data/`.
+That is not hypothetical; it is how test fixtures ended up in the real zone
+layer, and it only shows up in full-suite ordering because this module sorts
+last.
+
+`store`, `writer` and `db` all read `cfg.<attr>` at call time — none of them
+caches a derived path at import — so there is nothing a reload buys here.
+Setting the attributes on the one singleton keeps the process to exactly one
+config object and lets monkeypatch undo it.
 """
-import os
 from datetime import datetime, timezone
 
 
 def test_ais_write_and_query(tmp_path, monkeypatch):
-    monkeypatch.setenv("MISR_DATA_ROOT", str(tmp_path))
-    monkeypatch.setenv("MISR_STORE_BACKEND", "local")
-    # reload config singletons bound to new env
-    import importlib
     import maritime_isr.config as cfgmod
-    importlib.reload(cfgmod)
-    import maritime_isr.store as storemod
-    importlib.reload(storemod)
-    import maritime_isr.writer as wr
-    importlib.reload(wr)
     import maritime_isr.db as dbmod
-    importlib.reload(dbmod)
+    import maritime_isr.writer as wr
+
+    monkeypatch.setattr(cfgmod.cfg, "data_root", tmp_path)
+    monkeypatch.setattr(cfgmod.cfg, "store_backend", "local")
 
     ts = datetime(2026, 7, 1, 12, 30, tzinfo=timezone.utc)
     row = {"mmsi": 419000001, "lat": 15.0, "lon": 68.0, "sog": 12.0, "cog": 90.0,
