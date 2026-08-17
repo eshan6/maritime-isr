@@ -191,6 +191,64 @@ def _natural_key(row: dict, key_fields: Sequence[str]) -> str:
     return "|".join(parts)
 
 
+def _type_conflict_error(table: str, day: str, existing: list[dict],
+                         incoming: list[dict], exc: Exception) -> ValueError:
+    """Turn Arrow's "Expected bytes, got a 'int' object" into a usable report.
+
+    A type disagreement between rows already on disk and rows being landed must
+    stay **loud** — silently casting an int MMSI to a string would change the
+    value's textual form and break every join that uses it. That decision is
+    right and is not what this changes.
+
+    What it changes is that the operator learns *which column*. Arrow reports
+    only the pair of Python types, with no table, no column and no example, so
+    the message names nothing anyone can act on: the same seven words appear
+    whether the culprit is `imo`, `port_id` or a scenario prop. This walks both
+    sides, finds the columns whose non-null Python types actually disagree, and
+    says so with a value from each.
+    """
+    def _types(rows: list[dict]) -> dict[str, set]:
+        seen: dict[str, set] = defaultdict(set)
+        for r in rows:
+            for k, v in r.items():
+                if v is not None:
+                    seen[k].add(type(v).__name__)
+        return seen
+
+    on_disk, coming = _types(existing), _types(incoming)
+
+    def _example(rows, col):
+        for r in rows:
+            if r.get(col) is not None:
+                return repr(r[col])
+        return "None"
+
+    clashes = []
+    for col in sorted(set(on_disk) & set(coming)):
+        if on_disk[col] & coming[col]:
+            continue                       # they agree on at least one type
+        clashes.append(
+            f"  {col}: on disk {sorted(on_disk[col])} e.g. "
+            f"{_example(existing, col)}   |   incoming {sorted(coming[col])} "
+            f"e.g. {_example(incoming, col)}")
+
+    if not clashes:
+        # Nothing disagreed column-by-column, so the conflict is inside a
+        # nested value. Say that rather than inventing a column.
+        return ValueError(
+            f"{table} (day={day}): Arrow rejected the merged partition and no "
+            f"top-level column disagrees — the conflict is nested. {exc}")
+
+    return ValueError(
+        f"{table} (day={day}): {len(clashes)} column(s) disagree between the "
+        f"{len(existing):,} row(s) already on disk and the {len(incoming):,} "
+        f"row(s) being landed:\n" + "\n".join(clashes) +
+        "\n  Synthetic and real rows share these tables by design, so both "
+        "sides must emit the same type for a column. Fix the producer, not "
+        "the value — coercing here would change what the identifier says."
+    )
+
+
 def _normalise_for_arrow(rows: list[dict]) -> list[dict]:
     """Give every row the same key set so Arrow can infer one schema.
 
@@ -290,7 +348,13 @@ def land_table(
             merged[_natural_key(r, key_fields)] = r
 
         out = _normalise_for_arrow(list(merged.values()))
-        pq.write_table(pa.Table.from_pylist(out), path, compression="zstd")
+        try:
+            arrow = pa.Table.from_pylist(out)
+        # ArrowInvalid as well as ArrowTypeError: a str in a float column
+        # raises the former, and both are the same defect to an operator.
+        except (pa.ArrowTypeError, pa.ArrowInvalid) as exc:
+            raise _type_conflict_error(table, day, existing, drows, exc) from exc
+        pq.write_table(arrow, path, compression="zstd")
 
         written[day] = len(mine)
         written.replaced[day] = len(before & mine.keys())
