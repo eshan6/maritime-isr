@@ -1481,8 +1481,8 @@ def _zone_note(missing: list[str]) -> Optional[str]:
         return None
     return ("Not loaded: " + ", ".join(missing) + ". These are statutory "
             "limits and this system will not derive or transcribe them — load "
-            "a published file with `maritime-isr ingest zones`. Until then any "
-            "analysis that needs them is idle, not clean.")
+            "a published file with `maritime-isr ingest zones --path <file>`. "
+            "Until then any analysis that needs them is idle, not clean.")
 
 
 def zone_vessels(zone_id: str, start: Optional[str] = None,

@@ -409,7 +409,9 @@ def run_zone_analyses(store, all_tracks: list, zone_out: dict) -> dict:
     if zone_out.get("anchoring_ok"):
         print(f"  anchored_outside_l.: {len(anch):,} alert(s)")
     else:
-        print(f"  anchored_outside_l.: IDLE — {zone_out['anchoring_why']}")
+        # `anchoring_why` already opens with "IDLE — "; prefixing another one
+        # printed "IDLE — IDLE — no territorial_sea zone is loaded".
+        print(f"  anchored_outside_l.: {zone_out['anchoring_why']}")
     return dict(area_visits=visits, maiden=maiden, lane=lane, anchored=anch)
 
 

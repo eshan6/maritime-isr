@@ -28,7 +28,7 @@ from ..ingest.landing import (conformed_dir, read_table, split_real_synthetic,
                               table_day_partitions)
 from .cast import (FISHING_FLEET_SIZE, PRINCIPALS, RADAR_PRINCIPALS,
                    build_cast)
-from .identifiers import assert_no_collisions
+from .identifiers import assert_no_collisions, reserve_against_corpus
 from .land import ALL_TABLES, land_world
 from .profile import CorpusProfile
 from .radar import format_report as format_radar, generate_radar_picture
@@ -66,6 +66,19 @@ def generate(seed: int = 7, *, land: bool = True, radar: bool = True,
     if land:
         clear()
     profile = CorpusProfile.load(profile_path)
+
+    # Before a single hull is named, find out which reserved-band identifiers
+    # the real corpus on THIS machine already uses, so the cast can be minted
+    # around them. Done here rather than inside the mint functions because it
+    # reads the landed tables once, and because the operator has to be told:
+    # hull assignment depends on the corpus present at generation time.
+    taken = reserve_against_corpus()
+    if taken["imos"] or taken["mmsis"]:
+        print(f"[scenario] {len(taken['imos'])} reserved IMO(s) and "
+              f"{len(taken['mmsis'])} reserved MMSI(s) are already used by the "
+              f"{taken['source']} — minting around them: "
+              f"{taken['imos'][:5]}{taken['mmsis'][:5]}")
+
     world = ScenarioWorld.new(seed, profile)
     build_cast(world)
     ran = run_all(world)

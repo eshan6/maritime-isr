@@ -340,3 +340,63 @@ def test_expectations_name_real_tables():
               gfw_vessels.CURRENT_TABLE, sanctions_match.MATCH_TABLE}
     unknown = set(checks.COVERAGE_EXPECTATIONS) - known
     assert not unknown, f"expectations declared for unknown tables: {unknown}"
+
+
+# ==========================================================================
+# 4. an empty view must name a command that exists
+# ==========================================================================
+
+def test_the_empty_state_hints_name_commands_the_cli_actually_accepts():
+    """An operator followed an empty view's instructions and it worked.
+
+    The Radar view says `no landed radar correlation — run
+    'maritime-isr radar correlate --write'`, and that hint is the only thing
+    standing between an empty panel and the conclusion that the product is
+    broken — `run_scenario_pipeline.py` correlates radar in memory to report
+    the stage but never lands the result, so the view is legitimately empty
+    after a full pipeline run and the hint is the whole fix.
+
+    A hint naming a verb the CLI no longer has is worse than no hint: it sends
+    someone to a command-not-found and makes the empty panel look like a bug in
+    two places instead of one. So this parses each quoted command against the
+    real argument parser rather than checking that a string is present.
+    """
+    import re
+    import shlex
+
+    from maritime_isr.cli import build_parser
+
+    def _normalise(raw: str) -> str:
+        """A hint wrapped across source lines is still one command.
+
+        These strings are built by Python concatenation, so a captured hint can
+        carry quote characters, comment markers and indentation from the source
+        it was written in. None of that reaches the operator's screen, so none
+        of it should reach the parser.
+        """
+        s = re.sub(r'["\n#]', " ", raw)
+        # `<file.geojson>` is the operator's to fill in, but dropping it would
+        # leave `--path` with no value and fail for the wrong reason.
+        s = re.sub(r"<[^>]*>", "PLACEHOLDER", s)
+        return " ".join(s.split())
+
+    hints = []
+    for mod in ("maritime_isr/api/service.py", "maritime_isr/zones/analyses.py"):
+        src = pathlib.Path(REPO / mod).read_text(encoding="utf-8")
+        hints += re.findall(r"`maritime-isr ([^`]+)`", src, flags=re.S)
+    hints = sorted({_normalise(h) for h in hints})
+    assert hints, "no operator-facing command hints found to check"
+    assert any("radar correlate" in h for h in hints), (
+        "the Radar view's hint is the one that has actually misdirected "
+        "someone; if it moved, point this test at its new home")
+
+    parser = build_parser()
+    bad = []
+    for hint in hints:
+        try:
+            parser.parse_args(shlex.split(hint))
+        except SystemExit:
+            bad.append(hint)
+    assert not bad, (
+        f"these hints name commands the CLI will not accept: {bad}. "
+        "An empty view that misdirects is worse than an empty view.")

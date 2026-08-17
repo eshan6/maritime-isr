@@ -629,7 +629,17 @@ def cmd_live_ingest(args):
                    clip_to_aoi=not args.no_clip)
     raise SystemExit(f"unknown ingest source {args.source!r}")
 
-def main():
+def build_parser() -> argparse.ArgumentParser:
+    """Every verb this CLI accepts, with no dispatch attached.
+
+    Split out of `main` so the parser can be asked what it accepts without
+    running anything. Several operator-facing messages tell someone to run a
+    specific command — the Radar view's "run `maritime-isr radar correlate
+    --write`" is the one that matters most, because it is the only thing
+    between an empty panel and the conclusion that the product is broken. A
+    test parses those hints against this, so a renamed verb fails here instead
+    of sending an operator to a command that no longer exists.
+    """
     ap = argparse.ArgumentParser(prog="maritime_isr")
     sub = ap.add_subparsers(required=True)
 
@@ -821,7 +831,11 @@ def main():
     p = sub.add_parser("status")
     p.set_defaults(fn=cmd_status)
 
-    args = ap.parse_args()
+    return ap
+
+
+def main():
+    args = build_parser().parse_args()
     args.fn(args)
 
 
