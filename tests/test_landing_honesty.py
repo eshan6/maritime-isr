@@ -39,12 +39,25 @@ def test_report_landed_explains_a_gap_without_headlining_the_built_count(capsys)
     out = capsys.readouterr().out
     assert "landed 127" in out, "the landed count is the headline"
     assert "landed 173" not in out, "the built count must never be the headline"
-    assert "173 built" in out and "46 merged" in out, "the gap must be explained"
+    assert "173 built" in out and "46 collapsed" in out, "the gap must be explained"
 
 
 def test_report_landed_returns_what_it_printed():
     line = checks.report_landed("tag", "t", {"d": 1}, built=1)
     assert "landed 1" in line
+
+
+def test_report_landed_never_prints_a_negative_count(capsys):
+    """`5 built, -63 merged` reached an operator's terminal.
+
+    It came from `land_table` returning the partition's size after the merge
+    while `report_landed` subtracted that from the built count. Any arithmetic
+    over a count that can go negative is arithmetic over the wrong number, so
+    this asserts on the shape rather than on the one phrasing that broke.
+    """
+    checks.report_landed("zones", "maritime_zone", {"day=2026-08-17": 5}, built=5)
+    out = capsys.readouterr().out
+    assert not re.search(r"-\d", out), f"negative count in operator output: {out!r}"
 
 
 #: Modules that may legitimately print a count that is not a land_table return.
@@ -94,6 +107,122 @@ def test_every_module_that_lands_a_table_reports_through_the_helper():
     assert not missing, (
         f"these modules land tables but never report a landed count: {missing}"
     )
+
+
+# ==========================================================================
+# 1b. what a landing reports is what THIS call put on disk
+# ==========================================================================
+
+def _rows(prefix: str, n: int, day: str = "2026-08-17"):
+    from maritime_isr.ingest.landing import stamp_envelope
+    from datetime import datetime, timezone
+    at = datetime.fromisoformat(day).replace(hour=12, tzinfo=timezone.utc)
+    out = []
+    for i in range(n):
+        r = {"zone_id": f"{prefix}:{i}", "name": f"{prefix} {i}"}
+        stamp_envelope(r, source_id=prefix, source_ref="v1", acquired_at=at,
+                       confidence=0.9, is_synthetic=False)
+        out.append(r)
+    return out
+
+
+@pytest.fixture
+def _isolated(tmp_path, monkeypatch):
+    from maritime_isr.config import cfg
+    from maritime_isr.ingest.landing import conformed_dir
+    monkeypatch.setattr(cfg, "data_root", tmp_path)
+    assert tmp_path in conformed_dir("probe").parents, "redirect did not take"
+    return tmp_path
+
+
+def test_a_landing_counts_its_own_rows_not_the_partitions(_isolated, capsys):
+    """The defect an operator hit, reproduced exactly.
+
+    Two producers write into one day partition: `zones build` derives 63 zones,
+    then `ingest zones` lands 5 territorial seas from a downloaded shapefile.
+    The import announced `landed 68` — it claimed the other producer's 63 rows
+    as its own — and then reported `5 built, -63 merged`.
+    """
+    from maritime_isr.ingest.landing import land_table
+
+    land_table(_rows("derived", 63), table="t", key_fields=("zone_id",))
+    written = land_table(_rows("imported", 5), table="t", key_fields=("zone_id",))
+
+    assert checks.landed(written) == 5, (
+        "the import landed 5 rows; anything else is another producer's work "
+        "being counted as this one's")
+    assert sum(written.partition_rows.values()) == 68, (
+        "the partition total is still available — it is just not the headline")
+
+    checks.report_landed("zones", "t", written, built=5, noun="zone")
+    out = capsys.readouterr().out
+    assert "landed 5 zone(s)" in out
+    assert "68" not in out.split("now holds")[0], "68 must not read as landed"
+
+
+def test_a_converged_rerun_says_so_instead_of_repeating_itself(_isolated, capsys):
+    """Running the import twice printed byte-identical output.
+
+    From the outside that is indistinguishable from a stuck command, and the
+    operator read it as a loop. An idempotent connector has to say that the
+    second run changed nothing, or its correctness looks like a hang.
+    """
+    from maritime_isr.ingest.landing import land_table
+
+    first = land_table(_rows("imported", 5), table="t", key_fields=("zone_id",))
+    assert sum(first.replaced.values()) == 0, "nothing was on disk to replace"
+
+    second = land_table(_rows("imported", 5), table="t", key_fields=("zone_id",))
+    assert checks.landed(second) == 5
+    assert sum(second.replaced.values()) == 5, "every row replaced its own key"
+
+    checks.report_landed("zones", "t", second, built=5, noun="zone")
+    out = capsys.readouterr().out
+    assert "the re-run converged" in out, (
+        f"a re-run must announce that it changed nothing; got {out!r}")
+
+    from maritime_isr.ingest.landing import read_table
+    assert len(read_table("t")) == 5, "and it must not have duplicated"
+
+
+def test_a_partly_new_batch_separates_the_new_rows_from_the_replaced_ones(
+        _isolated, capsys):
+    from maritime_isr.ingest.landing import land_table
+
+    land_table(_rows("imported", 3), table="t", key_fields=("zone_id",))
+    written = land_table(_rows("imported", 5), table="t", key_fields=("zone_id",))
+    assert checks.landed(written) == 5
+    assert sum(written.replaced.values()) == 3
+
+    checks.report_landed("zones", "t", written, built=5, noun="zone")
+    out = capsys.readouterr().out
+    assert "3 of those replaced a row already on disk, 2 new" in out, out
+
+
+def test_the_ais_writer_reports_its_own_rows_too(_isolated):
+    """`writer.py` carried the same defect independently of `land_table`.
+
+    `noaa_ais` prints `landed {sum(w.values())} AOI rows` straight from this
+    return, so leaving one writer honest and the other not would put the bug
+    back in an operator's terminal by a different route.
+    """
+    from datetime import datetime, timezone
+
+    from maritime_isr.writer import write_position_reports
+
+    ts = datetime(2026, 7, 1, 12, 30, tzinfo=timezone.utc)
+    base = {"lat": 15.0, "lon": 68.0, "sog": 12.0, "timestamp": ts,
+            "source_id": "t", "source_ref": "r", "acquired_at": ts,
+            "ingested_at": ts, "pipeline_version": "abc", "confidence": None}
+
+    w1 = write_position_reports([dict(base, mmsi=419000001)])
+    assert sum(w1.values()) == 1
+
+    # A second vessel in the same hour: this call landed one row, and the
+    # partition now holds two. The report must say one.
+    w2 = write_position_reports([dict(base, mmsi=419000002)])
+    assert sum(w2.values()) == 1, (
+        "the second call landed 1 row; reporting 2 counts the first call's row")
 
 
 # ==========================================================================

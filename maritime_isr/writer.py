@@ -26,7 +26,12 @@ def write_position_reports(rows: Iterable[dict], store: str = "ais") -> dict[str
 
     Each row must have: mmsi, lat, lon, timestamp (tz-aware), plus optional
     kinematics and a nested/flattened provenance envelope. H3 indices are
-    stamped here if absent. Returns {hour_key: rows_written}.
+    stamped here if absent.
+
+    Returns {hour_key: rows *this call* landed}, deduped on the natural key.
+    Not the partition's size after the merge — that counts rows this call never
+    wrote and reports them as its own, which is the same defect `land_table`
+    carried until an import announced 68 rows for 5.
 
     Dedup is per-partition on (mmsi, timestamp, rounded lat/lon): re-running a
     backfill over the same window never duplicates.
@@ -40,15 +45,20 @@ def write_position_reports(rows: Iterable[dict], store: str = "ais") -> dict[str
     written: dict[str, int] = {}
     for hour, hrows in by_hour.items():
         path = local_partition_path(store, hour)
-        merged = _merge_dedup(path, hrows)
+        merged, mine = _merge_dedup(path, hrows)
         table = pa.Table.from_pylist(merged)
         pq.write_table(table, path, compression="zstd")
-        written[hour] = len(merged)
+        written[hour] = mine
     return written
 
 
-def _merge_dedup(path: Path, new_rows: list[dict]) -> list[dict]:
-    """Merge new rows with any existing partition, dedup on natural key."""
+def _merge_dedup(path: Path, new_rows: list[dict]) -> tuple[list[dict], int]:
+    """Merge new rows with any existing partition, dedup on natural key.
+
+    Returns the merged partition and how many distinct rows came from
+    `new_rows` — the caller needs the second number to report what it landed
+    rather than what happens to be sitting in the file.
+    """
     existing: list[dict] = []
     if path.exists():
         existing = pq.read_table(path).to_pylist()
@@ -61,7 +71,7 @@ def _merge_dedup(path: Path, new_rows: list[dict]) -> list[dict]:
     seen: dict[str, dict] = {}
     for r in existing + new_rows:
         seen[key(r)] = r  # last-write-wins; identical rebroadcasts collapse
-    return list(seen.values())
+    return list(seen.values()), len({key(r) for r in new_rows})
 
 
 def partition_stats(store: str, hour_key: str) -> dict:

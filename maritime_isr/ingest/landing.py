@@ -207,6 +207,30 @@ def _normalise_for_arrow(rows: list[dict]) -> list[dict]:
     return out
 
 
+class LandResult(dict):
+    """{day: rows this call landed} — plus what it replaced and what is there now.
+
+    A plain `dict[str, int]` of per-day counts is what every caller already
+    sums and what `checks.landed()` adds up, so this stays one and nothing
+    downstream has to change. The two extra attributes hang off the side
+    because the landed count alone cannot answer the question an operator
+    actually asks when they re-run a connector and see the same output twice:
+    *did anything change?*
+
+    - `replaced` — of the rows this call landed, how many overwrote a row of
+      the same natural key already on disk. All of them means the re-run
+      converged, which is the connector working, not the connector stuck.
+    - `partition_rows` — how many rows the partition holds now, from every
+      producer. Useful, and deliberately not the headline: it is the number
+      that used to be printed as "landed".
+    """
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.replaced: dict[str, int] = {}
+        self.partition_rows: dict[str, int] = {}
+
+
 def land_table(
     rows: Iterable[dict],
     *,
@@ -220,7 +244,16 @@ def land_table(
     it rather than appending, so re-running a backfill over an overlapping
     window converges instead of duplicating.
 
-    Returns {day: row_count_in_that_partition_after_merge}.
+    Returns a `LandResult`: {day: rows *this call* landed}.
+
+    **It used to return the partition's size after the merge, and that was a
+    lie every caller repeated.** Everything downstream sums these values and
+    prints the total as "landed", so a connector writing into a partition that
+    already held rows announced them as its own. Importing five territorial
+    seas into the day partition holding the 63 derived zones reported `landed
+    68`, and `report_landed` then computed `5 - 68` and offered `-63 merged`.
+    A negative provenance count is the visible end of a systemic error: the
+    number an operator carries away has to be what this run put on disk.
     """
     rows = list(rows)
     if not rows:
@@ -240,12 +273,17 @@ def land_table(
     for r in rows:
         by_day[_day_of(r, day_field)].append(r)
 
-    written: dict[str, int] = {}
+    written = LandResult()
     for day, drows in by_day.items():
         path = _partition_path(table, day)
         existing: list[dict] = []
         if path.exists():
             existing = pq.read_table(path).to_pylist()
+
+        before = {_natural_key(r, key_fields) for r in existing}
+        mine: dict[str, dict] = {}
+        for r in drows:
+            mine[_natural_key(r, key_fields)] = r
 
         merged: dict[str, dict] = {}
         for r in existing + drows:
@@ -253,7 +291,10 @@ def land_table(
 
         out = _normalise_for_arrow(list(merged.values()))
         pq.write_table(pa.Table.from_pylist(out), path, compression="zstd")
-        written[day] = len(out)
+
+        written[day] = len(mine)
+        written.replaced[day] = len(before & mine.keys())
+        written.partition_rows[day] = len(out)
 
     reconcile_null_columns(table)
     return written

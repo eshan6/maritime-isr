@@ -154,7 +154,14 @@ def test_synthetic_rows_merge_into_a_real_partition(data_root):
     written = land_table([_synthetic_encounter_row(i) for i in range(3)],
                          table="gfw_encounters", key_fields=("event_id",),
                          day_field="start_time")
-    assert written[DAY] == 8, f"expected 8 rows after merge, got {written}"
+    # This call landed 3 rows and the partition holds 8. Both numbers matter and
+    # they are not the same number: asserting 8 here used to be the only check,
+    # which quietly encoded "landed" as "partition size after the merge" — the
+    # reading that let an import of 5 territorial seas announce `landed 68`.
+    assert written[DAY] == 3, f"this call landed 3 rows, got {written}"
+    assert written.partition_rows[DAY] == 8, (
+        f"the 5 real rows must survive the merge, got {written.partition_rows}")
+    assert written.replaced[DAY] == 0, "synthetic keys must not collide with real ones"
 
     rows = read_table("gfw_encounters")
     real, syn = split_real_synthetic(rows)
