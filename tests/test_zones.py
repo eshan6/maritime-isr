@@ -21,6 +21,7 @@ The load-bearing cases, in the order they would hurt if they broke:
 """
 from __future__ import annotations
 
+import contextlib
 import json
 
 import numpy as np
@@ -43,6 +44,36 @@ from maritime_isr.zones.geometry import (bearing_deg, distance_to_m,
 from maritime_isr.zones.transitions import transitions_for_track
 
 T0 = pd.Timestamp("2026-06-01 00:00:00", tz="UTC")
+
+@contextlib.contextmanager
+def _isolated_data_root(tmp_path):
+    """Point the landing layer at a temp directory — and PROVE it took.
+
+    Two tests here write zones, and `conftest.py` does not redirect the data
+    root; it snapshots the real corpus instead. So a redirect that silently
+    failed would land test fixtures in the operator's actual zone layer, which
+    is exactly what happened: a `Test TS` territorial sea and a `my box`
+    geofence turned up in the real store and broke a later test by making the
+    layer look like something had been imported.
+
+    The assertion is the point. A redirect you do not verify is a redirect you
+    are trusting, and this one is trusted by code that writes to disk.
+    """
+    import maritime_isr.config as cfg_mod
+    from maritime_isr.ingest.landing import conformed_dir
+
+    root = tmp_path / "isolated-data"
+    old = cfg_mod.cfg.data_root
+    object.__setattr__(cfg_mod.cfg, "data_root", root)
+    try:
+        got = conformed_dir("probe")
+        assert root in got.parents or got.is_relative_to(root), (
+            f"data-root redirect did not take: writes would go to {got}, not "
+            f"{root}. Refusing to run and pollute the real corpus.")
+        yield root
+    finally:
+        object.__setattr__(cfg_mod.cfg, "data_root", old)
+
 
 
 # --------------------------------------------------------------------------
@@ -527,16 +558,10 @@ def test_an_imported_territorial_sea_makes_the_idle_analysis_run(tmp_path):
     write a GeoJSON, land it, and the analysis that reported itself idle a
     moment ago now runs and fires — with no code change anywhere.
     """
-    import maritime_isr.config as cfg_mod
     from maritime_isr.ingest import zones as zconn
     from maritime_isr.zones import load_zones
 
-    # Point the whole landing layer at a temp root so the real corpus is
-    # untouched; this test writes.
-    root = tmp_path / "data"
-    old = cfg_mod.cfg.data_root
-    object.__setattr__(cfg_mod.cfg, "data_root", root)
-    try:
+    with _isolated_data_root(tmp_path):
         ring = list(circle_polygon(17.3, 73.1, 40_000.0).exterior.coords)
         doc = {"type": "FeatureCollection", "features": [{
             "type": "Feature",
@@ -564,8 +589,6 @@ def test_an_imported_territorial_sea_makes_the_idle_analysis_run(tmp_path):
                 "the analysis is still silent with a territorial sea loaded")
         finally:
             store.close()
-    finally:
-        object.__setattr__(cfg_mod.cfg, "data_root", old)
 
 
 # ==========================================================================
@@ -622,8 +645,23 @@ def test_the_zone_endpoint_names_the_kinds_it_does_not_have():
     body = r.json()
     if not body["items"]:
         pytest.skip("no landed zone layer — run `maritime-isr zones build`")
-    assert set(body["missing_kinds"]) == set(STATUTORY_KINDS)
-    assert "will not derive" in (body.get("note") or "")
+    # **Assert the REPORTING works, not that the layer is empty.** The first
+    # version asserted `missing_kinds == STATUTORY_KINDS`, which stops being
+    # true the moment somebody successfully runs the connector — so the test
+    # would fail on exactly the machine where the feature had just worked. What
+    # must hold is that only statutory kinds are ever reported missing, that a
+    # kind present in the layer is never reported missing, and that the note
+    # explains the refusal.
+    present = {z["kind"] for z in body["items"]}
+    missing = set(body["missing_kinds"])
+    assert missing <= set(STATUTORY_KINDS), (
+        f"a non-statutory kind is reported missing: {missing - set(STATUTORY_KINDS)}")
+    assert not (missing & present), (
+        f"reported missing while present in the layer: {missing & present}")
+    assert set(STATUTORY_KINDS) - present == missing, (
+        "a statutory kind is absent from the layer and not reported missing")
+    if missing:
+        assert "will not derive" in (body.get("note") or "")
     for z in body["items"]:
         assert z["authority"] and z["method"]
         assert z["geometry"]["type"] in ("Polygon", "MultiPolygon",
@@ -839,14 +877,10 @@ def test_rebuilding_the_standing_set_does_not_delete_an_imported_boundary(tmp_pa
     that came from outside, cannot be regenerated here, and on a download-only
     laptop cost a 50 MB download and a registration form to obtain.
     """
-    import maritime_isr.config as cfg_mod
     from maritime_isr.zones import build_operational_zones, load_zones
     from maritime_isr.zones.store import clear_standing_zones, land_zones
 
-    root = tmp_path / "data"
-    old = cfg_mod.cfg.data_root
-    object.__setattr__(cfg_mod.cfg, "data_root", root)
-    try:
+    with _isolated_data_root(tmp_path):
         imported = _zone("territorial_sea", "Indian 12 NM",
                          circle_polygon(17.3, 73.1, 40_000.0),
                          authority="imported:World_12NM_v4.zip")
@@ -866,5 +900,3 @@ def test_rebuilding_the_standing_set_does_not_delete_an_imported_boundary(tmp_pa
         assert after[imported.zone_id].authority.startswith("imported:")
         assert drawn.zone_id in after, "it also deleted the operator's own area"
         assert len(after) == len(zones) + 2
-    finally:
-        object.__setattr__(cfg_mod.cfg, "data_root", old)
