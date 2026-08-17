@@ -2074,6 +2074,28 @@ the detector to the test set. The lanes are customary centrelines and say so.
 
 **Consequences.**
 
+- **Measured, synthetic, through the landed pipeline:** 63 zones, 4,720 zone
+  transitions over 1,517 tracks (26% with a censored entry), 77
+  `maiden_zone_visit` alerts, 36 `lane_deviation` alerts,
+  `anchored_outside_limits` idle. Z1 and Z2 detected; all three new decoys
+  correctly quiet; Z3 unfindable without a territorial sea.
+- **These two rules broke the ADR-004 precision gate and it is not yet fixed.**
+  Scenario precision fell 100% → 50%: eight decoys fired, five on
+  `lane_deviation` and three on `maiden_zone_visit`, plus 72 alerts on
+  background traffic. Every threshold that would restore it is one I cannot
+  defend — a 21-day history requirement cuts maiden visit to exactly one alert,
+  which is Z1, and that is fitting to the answer key rather than choosing a
+  threshold. The distribution offers no break to anchor on. Recorded as an open
+  item with the numbers rather than tuned away; the likely resolution is that
+  "first visit to a zone" is a query at this history length and not an anomaly.
+  See STATE.md.
+- **The port circles overlapped on the first pass, and that was the real cause
+  of the 643-alert maiden-visit figure** — not the rule. Sikka and Vadinar are
+  11 km apart and both had a 10 km radius, so a vessel alongside at one was
+  inside five zones and the "three distinct zones already visited" qualifier was
+  met within an hour of arriving anywhere in the Gulf of Kachchh. Radii are now
+  capped at half the distance to the nearest neighbouring port. Overlapping
+  zones are not zones; they are one zone with several names.
 - **Lane deviation measured on synthetic data is optimistic by construction, and
   the scenario says so in its own truth row.** The generator routes its vessels
   with the same land-avoiding router the lane centrelines were drawn from, so

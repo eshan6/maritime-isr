@@ -2678,34 +2678,59 @@ environment this was built in; it should be reachable from the laptop.
 |---|---|
 | zones landed | **63** — 41 port areas, 9 anchorages, 5 terminals/SPMs, 4 lanes, 4 sensitive areas |
 | statutory limits landed | **0** — by decision, see above |
-| cell index rows | ~14,000 (res 6) |
-| zone transitions | **5,654** over 1,520 tracks, in 21 s |
-| ... of which entry is censored | **1,600 (28%)** — the track was already inside when it began |
-| by kind | port_limit 2,027 · anchorage 1,908 · shipping_lane 1,601 · sensitive_area 116 · oil_terminal 2 |
+| cell index rows | 13,997 (res 6) |
+| zone transitions | **4,720** over 1,517 tracks, in 20 s |
+| ... of which entry is censored | **1,208 (26%)** — the track was already inside when it began |
+| by kind | shipping_lane 1,588 · anchorage 1,507 · port_limit 1,507 · sensitive_area 116 · oil_terminal 2 |
 | a drawn box, answered on demand | **~8 s**, 93 vessels in a 0.7° × 0.6° box off Mumbai |
+| area_visit | 4,720 presence rows (a query — emits no alerts by design) |
+| maiden_zone_visit | **77 alerts** |
+| lane_deviation | **36 alerts** |
+| anchored_outside_limits | **IDLE** — no territorial sea loaded |
 
-### The port gazetteer before/after, and why the number is small
+### Group Z, scored against scenario truth
 
-**79.0% → 79.1% of stopped vessel-hours nameable, +31.** That is an honest
-number and it is **not** a measurement of what closing the gap is worth.
+| | |
+|---|---|
+| Z1 maiden visit | **DETECTED** — `maiden_zone_visit` |
+| Z2 lane deviation | **DETECTED** — `lane_deviation` |
+| Z3 anchored outside limits | **MISSED** — unfindable, no territorial sea loaded |
+| Z4 settled liner (decoy) | correctly quiet |
+| Z5 anchorage waiter (decoy) | correctly quiet |
+| Z6 high-seas hold (decoy) | correctly quiet |
 
-**The corpus is generated FROM the gazetteer.** The scenario places vessels at
-ports the gazetteer already knew, so a facility that was missing had no
-synthetic traffic to name, and closing the gap can only move this figure by the
-handful of stops that happened to land near a newly-added facility by
-coincidence (Mormugao ×21, Dwarka ×9, Bedi ×1). A synthetic corpus is
-structurally incapable of showing the value of a gazetteer it was built from,
-and the pipeline now prints that caveat next to the figure rather than letting
-the number stand alone.
+**All three new decoys held.** Both findable new anomalies were found. Z3 is a
+miss the detector did not earn — the pipeline names the missing boundary.
 
-What *is* directly countable: **25 real west-coast facilities were absent and
-now are not**, and at those 25 positions the old list names zero and the new one
-names all 25 (`test_the_gazetteer_gained_the_west_coast_and_the_gain_is_
-measurable`).
+### The precision regression these two rules caused — NOT resolved
 
-A valid before/after needs **real** port-visit positions — `maritime-isr ingest
-gfw` lands them — measured on a machine where the real corpus is present. That
-run has not happened and the figure it would produce is not guessed at here.
+**Scenario-level precision fell from 100% to 50%.** Eight decoys fired that
+should not have: **five on `lane_deviation`** (C4, DX3, DX9, DX10 ×24, E5 ×2)
+and **three on `maiden_zone_visit`** (D4, DX2, DX5 ×2). Separately, 72 alerts
+landed on background traffic with no truth row — 71 of them maiden visits.
+
+ADR-004 sets the gate at 70% and this is below it. **It is recorded rather than
+tuned away, because every threshold that would fix it is one I cannot defend.**
+The measurements:
+
+* the novelty distance for maiden visit has a genuine structural break — 75% of
+  candidate fires are within 28 km, the next is 558 km, and any threshold from
+  100 to 300 km selects the same set. That one is defensible and is in;
+* a *history* requirement would cut 77 → 17 at 14 days and 77 → **1** at 21
+  days. The 1 is Z1. That is fitting to the answer key, not a threshold, and
+  the distribution is smooth (77 → 69 → 48 → 35 → 17 → 1) with no break to
+  anchor on. **I will not pick it.**
+
+The honest reading is that **"first visit to a zone" is not an anomaly at an
+eight-week history length** — it is a fact about our observation window. The
+likely correct resolution is to demote `maiden_zone_visit` to a query like
+`area_visit`, which would need Z1's truth row rewritten to expect a query
+result rather than an alert. `lane_deviation`'s decoy fires need separate
+diagnosis; DX10 firing 24 times suggests one long off-route passage being
+re-reported rather than 24 findings.
+
+**Until that is settled, Build 2 lands with a precision figure below the
+ADR-004 gate, stated here rather than hidden.**
 
 ### Four analyses, and the honest state of each
 
