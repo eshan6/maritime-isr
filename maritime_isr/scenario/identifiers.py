@@ -95,14 +95,97 @@ def imo_check_digit(prefix6: int) -> int:
     return sum(d[i] * (7 - i) for i in range(6)) % 10
 
 
+#: Numbers inside the reserved bands that a real landed corpus already uses.
+#: Empty until `reserve_against_corpus()` runs. See that function for why this
+#: is not always empty despite the bands being "unreachable".
+_BLOCKED_IMO_PREFIXES: set[int] = set()
+_BLOCKED_MMSIS: set[int] = set()
+
+
+def _nth_unblocked(first: int, n: int, blocked: set[int]) -> int:
+    """The nth value at or after `first`, skipping `blocked`.
+
+    Walking past a blocked value has to shift *every* later serial too,
+    otherwise two serials land on one number — which is the "two scenario
+    vessels, one hull" failure `mint_imo` already refused to allow.
+    """
+    v = first + n
+    for b in sorted(blocked):
+        if b <= v:
+            v += 1
+        else:
+            break
+    return v
+
+
+def reserve_against_corpus(real_imos=None, real_mmsis=None) -> dict:
+    """Exclude reserved-band numbers a real corpus on this machine already uses.
+
+    **The reserved bands are a reservation, not a fact about other people's
+    data.** IMO 1xxxxxx is outside the Lloyd's assignment series, so no
+    correctly-registered vessel wears one — but Global Fishing Watch publishes
+    identity records straight from AIS static messages, and a transmitter can
+    broadcast any seven digits its operator typed. A GFW corpus therefore does
+    contain numbers in our band, and on the operator's laptop one of them
+    (`1000320`) is exactly the hull serial 32 would have been given.
+
+    Before this existed, `assert_no_collisions` caught that and refused to
+    generate — correctly, since a synthetic hull wearing an identity that
+    appears in a real table is the false-accusation risk this module exists to
+    prevent. But it left the machine unable to generate a corpus at all, and no
+    seed could help: `mint_imo` is seeded by serial, not by the RNG, so every
+    run produced the identical clash.
+
+    Skipping the taken numbers keeps the guarantee and restores generation. It
+    does mean hull assignment depends on the corpus present at generation time,
+    which is why this returns a report the caller is expected to print rather
+    than doing it silently.
+    """
+    global _BLOCKED_IMO_PREFIXES, _BLOCKED_MMSIS
+    if real_imos is None and real_mmsis is None:
+        found = _real_identifiers_from_corpus()
+        if found is None:
+            _BLOCKED_IMO_PREFIXES, _BLOCKED_MMSIS = set(), set()
+            return {"source": "no landed corpus", "imos": [], "mmsis": []}
+        real_imos, real_mmsis, ofac = found
+        real_imos = set(real_imos) | set(ofac)
+
+    imos = set()
+    for v in (real_imos or ()):
+        try:
+            i = int(str(v).strip())
+        except (TypeError, ValueError):
+            continue
+        if IMO_MIN <= i <= IMO_MAX:
+            imos.add(i // 10)          # the six-digit prefix serial walks over
+
+    mmsis = set()
+    for v in (real_mmsis or ()):
+        try:
+            m = int(str(v).strip())
+        except (TypeError, ValueError):
+            continue
+        if MMSI_MIN <= m <= MMSI_MAX:
+            mmsis.add(m)
+
+    _BLOCKED_IMO_PREFIXES, _BLOCKED_MMSIS = imos, mmsis
+    return {"source": "landed corpus",
+            "imos": sorted(p * 10 + imo_check_digit(p) for p in imos),
+            "mmsis": sorted(mmsis)}
+
+
 def mint_imo(serial: int) -> int:
     """A checksum-valid IMO inside the reserved band, from a 0-based serial.
 
     `serial` indexes the band deterministically, so the same cast always gets
     the same hulls. Raises rather than wrapping if the band is exhausted —
     silently reusing a number would give two scenario vessels one hull.
+
+    Numbers a real corpus already uses are skipped (see
+    `reserve_against_corpus`), so the mapping is deterministic *given a
+    corpus*, not absolutely.
     """
-    prefix = 100_000 + serial
+    prefix = _nth_unblocked(100_000, serial, _BLOCKED_IMO_PREFIXES)
     if prefix > 199_999:
         raise ValueError(f"reserved IMO band exhausted at serial {serial}")
     imo = prefix * 10 + imo_check_digit(prefix)
@@ -115,7 +198,7 @@ def mint_imo(serial: int) -> int:
 
 def mint_mmsi(serial: int) -> int:
     """An MMSI inside the reserved 999 block, from a 0-based serial."""
-    mmsi = MMSI_MIN + serial
+    mmsi = _nth_unblocked(MMSI_MIN, serial, _BLOCKED_MMSIS)
     if mmsi > MMSI_MAX:
         raise ValueError(f"reserved MMSI band exhausted at serial {serial}")
     return mmsi

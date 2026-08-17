@@ -939,3 +939,65 @@ def test_afloat_validator_catches_a_passage_over_land():
     assert "vessel:good" not in flagged, (
         "the routed passage was flagged — the tolerance is too tight to "
         "distinguish a berth from a peninsula")
+
+
+# ==========================================================================
+# minting around identifiers a real corpus already uses
+# ==========================================================================
+
+def test_generation_is_not_blocked_by_a_real_corpus_using_the_reserved_band():
+    """The operator's laptop could not generate a corpus at all.
+
+    `scenario generate` died with `collision — imo=['1000320']`. That number is
+    exactly what serial 32 mints, and it appears in his landed GFW identity
+    table: GFW publishes identity straight from AIS static messages, so a
+    transmitter broadcasting seven arbitrary digits puts numbers inside our
+    "unreachable" band into a real table.
+
+    No seed could work around it — `mint_imo` is indexed by serial, not by the
+    RNG, so every run produced the identical clash. The guard was right to
+    refuse; the generator was wrong to have no way through.
+    """
+    from maritime_isr.scenario.identifiers import reserve_against_corpus
+
+    try:
+        blocked = mint_imo(32)
+        assert blocked == 1000320, (
+            f"serial 32 mints {blocked}; this test is pinned to the number "
+            "that actually collided on the operator's machine")
+
+        report = reserve_against_corpus(real_imos={"1000320"}, real_mmsis=set())
+        assert report["imos"] == [1000320]
+
+        minted = [mint_imo(s) for s in range(60)]
+        assert 1000320 not in minted, "the taken hull must be skipped"
+        assert len(set(minted)) == len(minted), (
+            "skipping must shift every later serial too — otherwise two "
+            "scenario vessels share one hull")
+        for i in minted:
+            assert imo_checksum_ok(str(i)) and IMO_MIN <= i <= IMO_MAX
+    finally:
+        reserve_against_corpus(real_imos=set(), real_mmsis=set())
+
+
+def test_the_collision_guard_passes_once_the_taken_hull_is_skipped():
+    """End to end: reserve, mint, then run the guard that used to fail."""
+    from maritime_isr.scenario.identifiers import reserve_against_corpus
+
+    try:
+        reserve_against_corpus(real_imos={"1000320"}, real_mmsis=set())
+        imos = [mint_imo(s) for s in range(60)]
+        rep = assert_no_collisions(imos, [mint_mmsi(0)], [],
+                                   raise_on_collision=False)
+        assert not rep.imo_collisions, rep.describe()
+    finally:
+        reserve_against_corpus(real_imos=set(), real_mmsis=set())
+
+
+def test_an_empty_reservation_leaves_the_original_hull_numbers_untouched():
+    """The skip must cost nothing on a machine with no real corpus."""
+    from maritime_isr.scenario.identifiers import reserve_against_corpus
+
+    reserve_against_corpus(real_imos=set(), real_mmsis=set())
+    assert [mint_imo(s) for s in range(5)] == [
+        1000007, 1000019, 1000021, 1000033, 1000045]
