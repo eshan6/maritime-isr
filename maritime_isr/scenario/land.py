@@ -149,6 +149,68 @@ def _anchorage_record(name: str | None, aid: str | None, prefix: str,
     }
 
 
+def conform_to_landed_types(rows: list[dict], table: str) -> list[str]:
+    """Map scenario values onto the types the real connector already landed.
+
+    **Why the generator conforms, and the landing layer still refuses to.**
+    Synthetic rows share tables with real ones by design, so a column whose
+    type disagrees breaks the merge outright — on the operator's laptop
+    `scenario generate` died inside pyarrow with `Expected bytes, got a 'int'
+    object`, and with it went the AIS corpus, the radar picture and the graph.
+
+    `land_table` must not paper over that: it cannot know which side is right,
+    and quietly casting a real identifier would change what it says. But the
+    scenario **is a connector** (CLAUDE.md §4.5), and a connector's job is to
+    map into the canonical schema rather than to emit whatever Python types its
+    author reached for. The types already on disk are that schema, observed.
+    So the producer conforms, the landing layer stays strict, and anything
+    genuinely irreconcilable still raises with the column named.
+
+    Returns the columns it changed, so the run says so instead of doing it
+    silently. Empty on a machine with no landed corpus — there is nothing to
+    conform to, and the scenario's own types become the schema.
+    """
+    from datetime import date, datetime
+
+    import pyarrow as pa
+
+    from ..ingest.landing import _type_hints
+
+    hints = _type_hints(table)
+    if not hints:
+        return []
+
+    changed: set[str] = set()
+    for r in rows:
+        for col, t in hints.items():
+            v = r.get(col)
+            # A timestamp is never something to stringify on a type hint, and
+            # bool is an int subclass that must not be dragged into either.
+            if v is None or isinstance(v, (bool, datetime, date)):
+                continue
+            try:
+                if (pa.types.is_string(t) or pa.types.is_large_string(t)) \
+                        and not isinstance(v, str):
+                    r[col] = str(v)
+                    changed.add(col)
+                elif pa.types.is_integer(t) and isinstance(v, str):
+                    r[col] = int(v)
+                    changed.add(col)
+                elif pa.types.is_integer(t) and isinstance(v, float) \
+                        and float(v).is_integer():
+                    r[col] = int(v)
+                    changed.add(col)
+                elif pa.types.is_floating(t) and isinstance(v, int):
+                    r[col] = float(v)
+                    changed.add(col)
+            except (TypeError, ValueError):
+                # Not convertible. Leave it and let `land_table` raise with the
+                # column named — a guess here would be the silent cast this
+                # whole design refuses.
+                continue
+    return sorted(changed)
+
+
 def assign_visit_structures(rows: list[dict], profile) -> None:
     """Give a batch of port visits the real structure mix, in place.
 
@@ -322,6 +384,10 @@ def land_world(world: ScenarioWorld) -> dict[str, int]:
         if not rows:
             written.setdefault(table, 0)
             return
+        fixed = conform_to_landed_types(rows, table)
+        if fixed:
+            print(f"[scenario] {table}: conformed {', '.join(fixed)} to the "
+                  "type the real corpus already uses")
         w = land_table(rows, table=table, key_fields=key_fields,
                        day_field=day_field)
         written[table] = written.get(table, 0) + sum(w.values())

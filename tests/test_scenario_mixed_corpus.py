@@ -201,8 +201,16 @@ def test_a_type_conflict_between_real_and_synthetic_is_loud(data_root):
     with pytest.raises(Exception) as exc:
         land_table([bad], table="gfw_encounters", key_fields=("event_id",),
                    day_field="start_time")
-    assert "mmsi" in str(exc.value) or "int" in str(exc.value).lower(), (
-        f"a type conflict must name the offending column; got {exc.value}")
+
+    # This assertion used to accept `"int" in str(exc)`, which Arrow's bare
+    # "Expected bytes, got a 'int' object" satisfies while naming neither the
+    # table nor the column. It passed green while the operator got a message he
+    # could do nothing with. The column name is the whole point of the check.
+    msg = str(exc.value)
+    assert "mmsi" in msg, f"a type conflict must name the column; got {msg}"
+    assert "gfw_encounters" in msg, f"...and the table; got {msg}"
+    assert "str" in msg and "int" in msg, (
+        f"...and both sides of the disagreement; got {msg}")
 
 
 def test_clear_removes_synthetic_and_leaves_real_intact(data_root):
@@ -270,3 +278,59 @@ def test_analytics_tools_exclude_synthetic_rows():
         assert "def real_rows(" in src, (
             f"tools/{name} has no real_rows() helper; it would blend scenario "
             f"rows into a quoted figure")
+
+
+def test_the_generator_conforms_to_the_real_corpus_rather_than_breaking(data_root):
+    """`scenario generate` died on the operator's laptop and took everything.
+
+    His corpus holds real GFW events; the generator emitted a column with a
+    different Python type; pyarrow refused the merged partition with `Expected
+    bytes, got a 'int' object`. Generation aborted, so there was no AIS corpus,
+    which meant no radar correlation and no graph — three empty views, one
+    cause.
+
+    The scenario is a connector (CLAUDE.md §4.5) and must map into the
+    canonical schema. The types already landed are that schema, observed.
+    """
+    from maritime_isr.scenario.land import conform_to_landed_types
+
+    _land_real_partition(data_root, "gfw_encounters", [_real_encounter_row(0)])
+
+    syn = _synthetic_encounter_row(0)
+    syn["mmsi"] = 999000000                  # int where the real rows hold str
+
+    changed = conform_to_landed_types([syn], "gfw_encounters")
+    assert "mmsi" in changed, f"mmsi should have been conformed; got {changed}"
+    assert syn["mmsi"] == "999000000", "conforming must preserve the value"
+
+    # And the merge that used to abort now completes.
+    land_table([syn], table="gfw_encounters", key_fields=("event_id",),
+               day_field="start_time")
+    rows = read_table("gfw_encounters")
+    real, synth = split_real_synthetic(rows)
+    assert (len(real), len(synth)) == (1, 1)
+
+
+def test_conforming_is_a_no_op_without_a_landed_corpus(data_root):
+    """On a bare machine the scenario's own types become the schema."""
+    from maritime_isr.scenario.land import conform_to_landed_types
+
+    syn = _synthetic_encounter_row(0)
+    syn["mmsi"] = 999000000
+    assert conform_to_landed_types([syn], "gfw_encounters") == []
+    assert syn["mmsi"] == 999000000, "nothing to conform to, nothing changed"
+
+
+def test_an_irreconcilable_type_still_raises_with_the_column_named(data_root):
+    """Conforming must not become a silent cast for things it cannot map."""
+    from maritime_isr.scenario.land import conform_to_landed_types
+
+    _land_real_partition(data_root, "gfw_encounters", [_real_encounter_row(0)])
+    syn = _synthetic_encounter_row(0)
+    syn["duration_hours"] = "not-a-number"   # float column, unparseable string
+
+    conform_to_landed_types([syn], "gfw_encounters")
+    with pytest.raises(Exception) as exc:
+        land_table([syn], table="gfw_encounters", key_fields=("event_id",),
+                   day_field="start_time")
+    assert "duration_hours" in str(exc.value), str(exc.value)
