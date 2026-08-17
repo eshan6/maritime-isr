@@ -827,3 +827,44 @@ def test_a_geopackage_is_refused_with_the_format_that_does_work(tmp_path):
         zconn.run(p)
     msg = str(e.value)
     assert "Shapefile" in msg and "GeoPackage" in msg
+
+
+def test_rebuilding_the_standing_set_does_not_delete_an_imported_boundary(tmp_path):
+    """**`zones build` must not destroy the one thing this project cannot make.**
+
+    The clear step exists because `land_zones` merges cells on
+    `(zone_id, h3_r6)`, so a shrinking zone keeps the cells its larger self
+    claimed. The first version cleared "everything not drawn by the operator" —
+    which would have deleted an imported territorial sea, a published boundary
+    that came from outside, cannot be regenerated here, and on a download-only
+    laptop cost a 50 MB download and a registration form to obtain.
+    """
+    import maritime_isr.config as cfg_mod
+    from maritime_isr.zones import build_operational_zones, load_zones
+    from maritime_isr.zones.store import clear_standing_zones, land_zones
+
+    root = tmp_path / "data"
+    old = cfg_mod.cfg.data_root
+    object.__setattr__(cfg_mod.cfg, "data_root", root)
+    try:
+        imported = _zone("territorial_sea", "Indian 12 NM",
+                         circle_polygon(17.3, 73.1, 40_000.0),
+                         authority="imported:World_12NM_v4.zip")
+        drawn = _zone("geofence", "my box", circle_polygon(18.0, 72.0, 20_000.0),
+                      authority="operator")
+        land_zones([imported, drawn])
+        land_zones(build_operational_zones())
+
+        # ... now rebuild the standing set, as `zones build` does.
+        zones = build_operational_zones()
+        clear_standing_zones({z.zone_id for z in zones})
+        land_zones(zones)
+
+        after = {z.zone_id: z for z in load_zones()}
+        assert imported.zone_id in after, (
+            "rebuilding the standing set deleted an imported boundary")
+        assert after[imported.zone_id].authority.startswith("imported:")
+        assert drawn.zone_id in after, "it also deleted the operator's own area"
+        assert len(after) == len(zones) + 2
+    finally:
+        object.__setattr__(cfg_mod.cfg, "data_root", old)

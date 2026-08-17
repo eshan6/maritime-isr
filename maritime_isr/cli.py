@@ -224,13 +224,15 @@ def cmd_zones(args):
 
     if args.action == "build":
         from .zones.store import clear_standing_zones
-        # Replace, do not merge. See `clear_standing_zones` — a shrinking zone
-        # otherwise keeps every cell its larger self claimed.
-        dropped = clear_standing_zones()
-        if dropped:
-            print(f"  cleared {dropped:,} row(s) from the previous standing set "
-                  f"(operator geofences kept)")
+        # Build FIRST, then clear exactly the ids we are about to write.
+        # Clearing by "everything not drawn by the operator" would delete an
+        # imported territorial sea — a published boundary this project cannot
+        # regenerate. See `clear_standing_zones`.
         zones = build_operational_zones()
+        dropped = clear_standing_zones({z.zone_id for z in zones})
+        if dropped:
+            print(f"  replaced {dropped:,} row(s) of the previous standing set "
+                  f"(imported boundaries and drawn areas untouched)")
         written = land_zones(zones)
         for table, days in sorted(written.items()):
             print(f"  landed {sum(days.values()):,} row(s) into {table}")
