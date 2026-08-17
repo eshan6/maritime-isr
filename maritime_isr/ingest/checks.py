@@ -129,13 +129,28 @@ def report_landed(tag: str, table: str, written: Mapping[str, int],
     The landed count comes first and the built count appears only as the
     explanation for a gap. That order is the whole point: the number a reader
     carries away should be the one that is on disk.
+
+    **The re-run line is not decoration.** An idempotent connector run twice
+    prints identical output, which from the outside is indistinguishable from a
+    connector that is stuck — an operator watching `ingest zones` repeat itself
+    has no way to tell convergence from a hang. Saying how many of the landed
+    rows replaced something already there answers that in the output itself.
     """
     n = landed(written)
     line = f"[{tag}] landed {n:,} {noun}(s) into {table} " \
            f"({len(written)} day partition(s))"
     if built != n:
-        line += (f"\n[{tag}]   {built:,} built, {built - n:,} merged onto rows already "
-                 "there by natural key — landed is the count that is real")
+        line += (f"\n[{tag}]   {built:,} built, {built - n:,} collapsed onto a natural "
+                 "key already in this batch — landed is the count that is real")
+    replaced = sum(getattr(written, "replaced", {}).values())
+    if replaced:
+        line += (f"\n[{tag}]   {replaced:,} of those replaced a row already on disk"
+                 + (f", {n - replaced:,} new" if n != replaced
+                    else " — nothing new, the re-run converged"))
+    total = sum(getattr(written, "partition_rows", {}).values())
+    if total and total != n:
+        line += (f"\n[{tag}]   {table} now holds {total:,} {noun}(s) "
+                 "in those partitions, from every source")
     print(line)
     return line
 

@@ -20,19 +20,25 @@ def _hour_key(ts: datetime) -> str:
 
 
 def write_detections(rows: Iterable[dict], store: str = "detections") -> dict[str, int]:
+    """Land detections into hourly partitions, deduped on `detection_id`.
+
+    Returns {hour_key: rows *this call* landed}, for the reason spelled out in
+    `writer.write_position_reports`: the partition's size after the merge
+    includes rows this call never wrote.
+    """
     by_hour: dict[str, list[dict]] = defaultdict(list)
     for r in rows:
         by_hour[_hour_key(r["acquired_at"])].append(r)
     written: dict[str, int] = {}
     for hour, hrows in by_hour.items():
         path = local_partition_path(store, hour)
-        merged = _merge_dedup(path, hrows)
+        merged, mine = _merge_dedup(path, hrows)
         pq.write_table(pa.Table.from_pylist(merged), path, compression="zstd")
-        written[hour] = len(merged)
+        written[hour] = mine
     return written
 
 
-def _merge_dedup(path: Path, new_rows: list[dict]) -> list[dict]:
+def _merge_dedup(path: Path, new_rows: list[dict]) -> tuple[list[dict], int]:
     existing = pq.read_table(path).to_pylist() if path.exists() else []
     seen = {r["detection_id"]: r for r in existing + new_rows}
-    return list(seen.values())
+    return list(seen.values()), len({r["detection_id"] for r in new_rows})
