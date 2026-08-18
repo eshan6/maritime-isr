@@ -2,20 +2,15 @@
 // "finding vs candidate" and "risk" is defined once.
 import { useState } from "react";
 import { api } from "../api.js";
-import {
-  NA,
-  num,
-  riskBand,
-  riskLabel,
-  RISK_COMPONENT_COLOR,
-  RISK_COMPONENT_LABEL,
-} from "../lib/format.js";
+import { NA, num, riskBand, riskLabel, RISK_COMPONENT_LABEL } from "../lib/format.js";
 
 export function NAtext() {
   return <span className="na">{NA}</span>;
 }
 
-// Renders a value or the italic "not available" — the graceful-null contract.
+// Renders a value or a grey "not available" — the graceful-null contract.
+// Upright, never italic: the absence is carried by colour, which stays legible
+// at 12px where a slant does not.
 export function Value({ v, suffix = "" }) {
   if (v === null || v === undefined || v === "") return <NAtext />;
   return (
@@ -26,15 +21,6 @@ export function Value({ v, suffix = "" }) {
   );
 }
 
-// Data-provenance marking is intentionally not surfaced in the UI: the
-// distinction is preserved in the data layer (is_synthetic on every row, split
-// counts on every total) and is communicated outside the product. Kept as a
-// no-op component so restoring the badge is a one-line change here rather than
-// an edit at every call site.
-export function SyntheticBadge() {
-  return null;
-}
-
 // Sanctions treatment keys on is_finding, never on mere presence: a name-only
 // candidate must never wear the red "finding" mark (ADR-018).
 export function SanctionsBadge({ sanctioned, isFinding, tier }) {
@@ -42,12 +28,12 @@ export function SanctionsBadge({ sanctioned, isFinding, tier }) {
   if (isFinding)
     return (
       <span className="badge badge-finding" title={`match tier: ${tier || "imo"}`}>
-        SANCTIONS FINDING
+        Sanctions finding
       </span>
     );
   return (
     <span className="badge badge-candidate" title={`match tier: ${tier || "name"}`}>
-      sanctions candidate
+      Sanctions candidate
     </span>
   );
 }
@@ -86,9 +72,7 @@ export function RiskPill({ score }) {
     <span className={`risk-pill risk-${band}`}>
       <span className="risk-dot" />
       {score === null || score === undefined ? "—" : num(score, 2)}
-      <span className="muted" style={{ fontWeight: 500, fontSize: 11 }}>
-        {riskLabel(band)}
-      </span>
+      <span className="risk-band">{riskLabel(band)}</span>
     </span>
   );
 }
@@ -110,7 +94,7 @@ export function ProvChip({ prov }) {
     .filter(Boolean)
     .join(" ");
   return (
-    <span className="mono muted" style={{ fontSize: 11 }} title="provenance envelope">
+    <span className="mono muted t-micro" title="provenance envelope">
       {bits}
     </span>
   );
@@ -127,47 +111,76 @@ export function StatTile({ label, real, synthetic }) {
   );
 }
 
+// The decomposed risk score.
+//
+// Two bugs lived here and both showed on screen as "the bars do not work":
+//
+//   1. `.rbar-fill` was an inline <span>, and an inline box ignores `height`.
+//      Every bar rendered as an empty track regardless of the numbers beside
+//      it. Fixed in the stylesheet (both track and fill are block-level).
+//   2. The width was `weighted / max(weighted)`, which normalises the largest
+//      component to a full bar no matter how small it is. A vessel scoring
+//      0.037 on one component and zero on the rest drew one FULL bar and three
+//      empty ones — a picture of "maximum flag risk" for a hull barely above
+//      zero. Each bar now shows the component's own value on its own 0–1
+//      scale, which is the thing the weight is applied to, and the number
+//      beside it is the weighted contribution to the composite.
 export function RiskDecomposition({ risk }) {
   if (!risk) return <div className="empty">No risk graph for this vessel.</div>;
-  const comps = Object.entries(risk.components);
-  const maxW = Math.max(0.001, ...comps.map(([, c]) => c.weighted));
+  const comps = Object.entries(risk.components || {});
   return (
     <div>
-      <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 12 }}>
-        <span style={{ fontSize: 26, fontWeight: 700 }}>{num(risk.risk_score, 3)}</span>
-        <span className="muted">composite risk (0–1), decomposed below</span>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 14 }}>
+        <span className="t-hero">{num(risk.risk_score, 3)}</span>
+        <span className="muted t-meta">composite risk (0–1), decomposed below</span>
       </div>
+
       <div className="risk-decomp">
-        {comps.map(([name, c]) => (
-          <div className="rbar-row" key={name}>
-            <span>{RISK_COMPONENT_LABEL[name] || name}</span>
-            <span className="rbar-track">
+        {comps.map(([name, c]) => {
+          // `value` is the component on its own 0–1 scale; `weighted` is what
+          // it contributed to the composite. Older payloads carried only the
+          // weighted figure, so fall back to it rather than drawing nothing.
+          const weight = Number(c.weight) || 0;
+          const value = c.value != null
+            ? Number(c.value)
+            : weight > 0 ? Number(c.weighted) / weight : 0;
+          const pct = Math.max(0, Math.min(1, value || 0)) * 100;
+          return (
+            <div className={`rbar-row ${pct === 0 ? "is-zero" : ""}`} key={name}>
+              <span className="rbar-label">
+                {RISK_COMPONENT_LABEL[name] || name}
+              </span>
               <span
-                className="rbar-fill"
-                style={{
-                  width: `${(c.weighted / maxW) * 100}%`,
-                  background: RISK_COMPONENT_COLOR[name] || "#1a5fb4",
-                }}
-              />
-            </span>
-            <span className="mono" style={{ textAlign: "right" }}>
-              {num(c.weighted, 3)}
-            </span>
-          </div>
-        ))}
+                className="rbar-track"
+                title={`${RISK_COMPONENT_LABEL[name] || name}: ${num(value, 2)} of 1`
+                  + (weight ? ` × weight ${num(weight, 2)}` : "")}
+              >
+                {/* A non-zero component keeps a visible sliver: a 1% bar that
+                    renders as nothing is indistinguishable from a zero, and
+                    those mean different things. */}
+                <span className="rbar-fill" style={{ width: `${pct === 0 ? 0 : Math.max(2, pct)}%` }} />
+              </span>
+              <span className="rbar-value mono">{num(c.weighted, 3)}</span>
+            </div>
+          );
+        })}
       </div>
+
       {risk.evidence?.length > 0 && (
-        <ul style={{ margin: "12px 0 0", paddingLeft: 18, color: "var(--ink-2)", fontSize: 12.5 }}>
+        <ul className="prose t-meta muted-2" style={{ margin: "14px 0 0", paddingLeft: 18 }}>
           {risk.evidence.map((e, i) => (
             <li key={i}>
-              <b>{RISK_COMPONENT_LABEL[e.kind] || e.kind}:</b> {e.detail}{" "}
-              <span className="muted">(+{num(e.contribution, 3)})</span>
+              <span className="t-med">{RISK_COMPONENT_LABEL[e.kind] || e.kind}:</span>{" "}
+              {e.detail} <span className="muted">(+{num(e.contribution, 3)})</span>
             </li>
           ))}
         </ul>
       )}
-      <p className="muted" style={{ fontSize: 12, marginTop: 10, marginBottom: 0 }}>
-        Score is the weighted sum of the components above — never a bare number.
+
+      <p className="muted t-meta" style={{ marginTop: 12, marginBottom: 0 }}>
+        The bar is the component on its own 0–1 scale; the figure beside it is
+        what that component contributed after its weight. The score is their
+        sum — never a bare number.
       </p>
     </div>
   );

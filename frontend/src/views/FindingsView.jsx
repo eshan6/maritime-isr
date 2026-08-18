@@ -40,26 +40,36 @@ export function FindingsView() {
   if (err) return <div className="pad"><div className="empty">{err}</div></div>;
   if (!data) return <div className="pad"><div className="empty">Loading findings…</div></div>;
 
-  const total = data.count.real + data.count.synthetic;
+  // Every collection here is read defensively. A payload missing an optional
+  // key — `notes` on a corpus with nothing to caveat, `basis_legend` from an
+  // older build — used to throw inside render and white-screen the whole view,
+  // turning a missing sentence into "the product is broken".
+  const total = (data.count?.real || 0) + (data.count?.synthetic || 0);
+  const notes = data.notes || [];
+  const items = data.items || [];
+  const basisLegend = data.basis_legend || [];
 
   return (
     <div className="scroll-y">
-      <div className="pad">
-        <div className="eyebrow">Findings</div>
-        <h2 style={{ margin: "2px 0 6px", fontSize: 20 }}>
-          {total} vessel{total === 1 ? "" : "s"} worth an analyst's time
-        </h2>
+      {/* Capped, because these cards are mostly prose: the headline sentence is
+          the product, and a headline set across 1,300 px is a line the eye
+          loses on the way back. */}
+      <div className="pad" style={{ maxWidth: 1000 }}>
+        <div className="page-head">
+          <div className="eyebrow">Findings</div>
+          <h2>{total} vessel{total === 1 ? "" : "s"} worth an analyst's time</h2>
+        </div>
 
         {/* The honesty block. Deliberately above the table, not below it. */}
-        <div className="card" style={{ padding: "12px 14px", marginBottom: 14 }}>
-          {data.notes.map((n, i) => (
-            <p key={i} className="muted" style={{ margin: i ? "8px 0 0" : 0, fontSize: 12.5 }}>
+        <div className="card card-pad" style={{ marginBottom: 14 }}>
+          {notes.map((n, i) => (
+            <p key={i} className="muted t-meta" style={{ margin: i ? "8px 0 0" : 0 }}>
               {n}
             </p>
           ))}
         </div>
 
-        {data.items.length === 0 && (
+        {items.length === 0 && (
           <div className="empty">
             Nothing in this corpus clears the bar for a finding. That is a result,
             not an error — a name-only sanctions match is a lead for the Vessels
@@ -67,19 +77,18 @@ export function FindingsView() {
           </div>
         )}
 
-        {data.items.map((f) => {
+        {items.map((f) => {
           const isOpen = !!open[f.id];
-          const findings = f.sanctions.filter((s) => s.is_finding);
-          const candidates = f.sanctions.filter((s) => !s.is_finding);
+          const sanctions = f.sanctions || [];
+          const findings = sanctions.filter((s) => s.is_finding);
+          const candidates = sanctions.filter((s) => !s.is_finding);
           return (
-            <div className="card" key={f.id} style={{ marginBottom: 10, padding: "14px 16px" }}>
+            <div className="card card-pad" key={f.id} style={{ marginBottom: 10 }}>
               <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
-                <span style={{ fontWeight: 600, fontSize: 15 }}>
-                  {f.name || shortId(f.id)}
-                </span>
+                <span className="t-lead">{f.name || shortId(f.id)}</span>
                 {f.has_dark_gap && (
                   <span className="badge badge-finding" title="Global Fishing Watch's assessment, not ours">
-                    GFW: INTENTIONAL AIS DISABLING
+                    GFW: intentional AIS disabling
                   </span>
                 )}
                 {/* The badge must not outrun the sentence under it. When the
@@ -88,24 +97,24 @@ export function FindingsView() {
                     is precisely what the headline goes on to deny. */}
                 {f.sanctions_is_finding && (
                   <span className="badge badge-finding">
-                    {f.registries.join(" + ")}{" "}
+                    {(f.registries || []).join(" + ")}{" "}
                     {findings.every((s) => s.listed_entity_type === "organisation")
-                      ? "DESIGNATED OWNER"
-                      : "SANCTIONS FINDING"}
+                      ? "designated owner"
+                      : "sanctions finding"}
                   </span>
                 )}
                 <div className="nav-spacer" />
-                <span className="mono muted" style={{ fontSize: 11.5 }} title="sum of the named signals below — not a probability">
+                <span className="mono muted t-meta" title="sum of the named signals below — not a probability">
                   priority {f.priority}
                 </span>
               </div>
 
               {/* The plain-English sentence. This is the product (CLAUDE.md §0). */}
-              <p style={{ margin: "8px 0 10px", fontSize: 13.5, lineHeight: 1.5 }}>
+              <p className="t-body" style={{ margin: "10px 0 12px" }}>
                 {f.headline}
               </p>
 
-              <div className="kv" style={{ fontSize: 12.5 }}>
+              <div className="kv">
                 <span className="field-label">MMSI</span>
                 <span className="mono">{f.mmsi || <NAtext />}</span>
                 <span className="field-label">IMO</span>
@@ -116,12 +125,12 @@ export function FindingsView() {
                 <span>{f.vessel_type || <NAtext />}</span>
               </div>
 
-              <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>
-                {Object.entries(f.event_counts)
+              <div className="muted t-meta" style={{ marginTop: 10 }}>
+                {Object.entries(f.event_counts || {})
                   .filter(([, n]) => n > 0)
                   .map(([k, n]) => `${n} ${KIND_LABEL[k] || k}`)
                   .join(" · ") || "no behaviour events observed"}
-                {f.ports.length > 0 && <> · called at {f.ports.join(", ")}</>}
+                {f.ports?.length > 0 && <> · called at {f.ports.join(", ")}</>}
               </div>
 
               <div className="btn-group" style={{ marginTop: 10 }}>
@@ -141,17 +150,17 @@ export function FindingsView() {
               </div>
 
               {isOpen && (
-                <div style={{ marginTop: 12, borderTop: "1px solid var(--line)", paddingTop: 12 }}>
+                <div style={{ marginTop: 14, borderTop: "1px solid var(--border)", paddingTop: 14 }}>
                   <div className="eyebrow">Why it ranks here</div>
-                  <ul style={{ margin: "6px 0 12px", paddingLeft: 18, fontSize: 12.5, lineHeight: 1.6 }}>
-                    {f.basis.map((b) => (
+                  <ul className="prose t-meta" style={{ margin: "8px 0 14px", paddingLeft: 18 }}>
+                    {(f.basis || []).map((b) => (
                       <li key={b.signal}>
                         {b.explanation} <span className="mono muted">(+{b.weight})</span>
                       </li>
                     ))}
                   </ul>
 
-                  {f.dark_gaps.length > 0 && (
+                  {f.dark_gaps?.length > 0 && (
                     <>
                       <div className="eyebrow">AIS gaps assessed by Global Fishing Watch</div>
                       <table className="table" style={{ marginBottom: 12 }}>
@@ -173,7 +182,7 @@ export function FindingsView() {
                           ))}
                         </tbody>
                       </table>
-                      <p className="muted" style={{ fontSize: 12, marginTop: -6, marginBottom: 12 }}>
+                      <p className="muted t-meta" style={{ marginTop: -6, marginBottom: 12 }}>
                         {f.dark_gaps[0].attribution}. We did not compute this and
                         have no receiver-coverage model at these positions — a
                         silence where we cannot hear is not evidence of intent.
@@ -215,7 +224,7 @@ export function FindingsView() {
                   {candidates.length > 0 && (
                     <>
                       <div className="eyebrow">Candidates — not findings</div>
-                      <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>
+                      <p className="muted t-meta" style={{ margin: "6px 0 0" }}>
                         {candidates.length} weaker match
                         {candidates.length === 1 ? "" : "es"} on this hull
                         ({candidates.map((c) => c.match_tier).join(", ")}). Names
@@ -225,7 +234,7 @@ export function FindingsView() {
                     </>
                   )}
 
-                  <p className="muted" style={{ fontSize: 12, marginTop: 12, marginBottom: 0 }}>
+                  <p className="muted t-meta" style={{ marginTop: 14, marginBottom: 0 }}>
                     {f.attribution}.
                   </p>
                 </div>
@@ -234,17 +243,17 @@ export function FindingsView() {
           );
         })}
 
-        {data.items.length > 0 && (
-          <div className="card" style={{ padding: "12px 14px", marginTop: 4 }}>
+        {items.length > 0 && (
+          <div className="card card-pad" style={{ marginTop: 4 }}>
             <div className="eyebrow">How rows are ordered</div>
-            <ul style={{ margin: "6px 0 0", paddingLeft: 18, fontSize: 12.5, lineHeight: 1.6 }}>
-              {data.basis_legend.map((b) => (
+            <ul className="prose t-meta" style={{ margin: "8px 0 0", paddingLeft: 18 }}>
+              {basisLegend.map((b) => (
                 <li key={b.signal}>
                   <span className="mono">+{b.weight}</span> — {b.explanation}
                 </li>
               ))}
             </ul>
-            <p className="muted" style={{ fontSize: 12, marginTop: 10, marginBottom: 0 }}>
+            <p className="muted t-meta" style={{ marginTop: 12, marginBottom: 0 }}>
               Priority is the sum of the signals a vessel actually carries. It is
               an ordering, not a probability, and it is never shown without the
               signals behind it.

@@ -82,8 +82,8 @@ export function VesselsView() {
           Sanctioned only
         </label>
         <div className="nav-spacer" />
-        <span className="muted" style={{ fontSize: 12.5 }}>
-          {count.real + count.synthetic} vessels
+        <span className="muted t-meta mono">
+          {(count.real + count.synthetic).toLocaleString()} vessels
         </span>
       </div>
 
@@ -107,8 +107,8 @@ export function VesselsView() {
                   onClick={() => nav(`/vessels/${encodeURIComponent(v.id)}`)}
                   style={{ cursor: "pointer" }}
                 >
-                  <td style={{ fontWeight: 500 }}>
-                    {v.name || <span className="na">unnamed</span>}
+                  <td className="t-med">
+                    {v.name || <span className="na">Unnamed</span>}
                   </td>
                   <td className="mono">{v.mmsi || "—"}</td>
                   <td>{v.flag || "—"}</td>

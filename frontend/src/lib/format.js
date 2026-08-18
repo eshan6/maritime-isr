@@ -44,18 +44,17 @@ export function riskLabel(band) {
   return { high: "High", elevated: "Elevated", low: "Low", none: "—" }[band];
 }
 
-export const RISK_COMPONENT_COLOR = {
-  anomaly_history: "#1a5fb4",
-  sanction_proximity: "#b0221b",
-  flag_opacity: "#9a6300",
-  fingerprint_deviation: "#1f7a4d",
-};
-
+// One label table for both the component rows and the evidence list under
+// them. The evidence entries use shorter kind names than the components they
+// belong to (`anomaly`, `fingerprint_dev`), and an unmapped kind used to print
+// the raw enum straight into an analyst-facing sentence.
 export const RISK_COMPONENT_LABEL = {
   anomaly_history: "Anomaly history",
+  anomaly: "Anomaly history",
   sanction_proximity: "Sanction proximity",
   flag_opacity: "Flag opacity",
   fingerprint_deviation: "Fingerprint deviation",
+  fingerprint_dev: "Fingerprint deviation",
 };
 
 // Anomaly type -> a plain-English label + severity hue class.

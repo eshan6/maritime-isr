@@ -36,7 +36,7 @@ export function AlertsView() {
       <div className="toolbar">
         <div>
           <div className="eyebrow">Alert queue</div>
-          <div className="muted" style={{ fontSize: 12.5 }}>
+          <div className="muted t-meta">
             {count.real + count.synthetic} open. Deliberately short — high precision over volume.
           </div>
         </div>
@@ -63,11 +63,12 @@ function AlertCard({ a, onDispose, busy, nav }) {
   const tone = ANOMALY_META[a.anomaly_type]?.tone || "neutral";
   const toneColor = { finding: "var(--red)", candidate: "var(--amber)", neutral: "var(--ink-2)" }[tone];
   return (
-    <div className="card" style={{ padding: 16, marginBottom: 12 }}>
+    <div className="card card-pad" style={{ marginBottom: 12 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-        <span style={{ width: 9, height: 9, borderRadius: "50%", background: toneColor }} />
-        <h3 style={{ fontSize: 15 }}>{anomalyLabel(a.anomaly_type)}</h3>
-        <span className="muted mono" style={{ fontSize: 12 }}>
+        <span style={{ width: 9, height: 9, borderRadius: "50%", background: toneColor,
+                       flex: "0 0 auto" }} />
+        <h3>{anomalyLabel(a.anomaly_type)}</h3>
+        <span className="muted mono t-meta">
           conf {num(a.confidence, 2)}
           {a.score != null ? ` · score ${num(a.score, 2)}` : ""}
         </span>
@@ -79,18 +80,17 @@ function AlertCard({ a, onDispose, busy, nav }) {
         </span>
       </div>
 
-      <div style={{ marginTop: 4 }}>
+      <div style={{ marginTop: 5 }}>
         <button
-          className="navlink"
-          style={{ padding: 0, background: "none", border: "none", color: "var(--blue)" }}
+          className="btn-link"
           onClick={() => nav(`/vessels/${encodeURIComponent(a.subject)}`)}
         >
           {a.subject_name || a.subject}
         </button>
       </div>
 
-      <div style={{ marginTop: 12 }}>
-        <div className="eyebrow" style={{ marginBottom: 8 }}>Evidence chain</div>
+      <div style={{ marginTop: 14 }}>
+        <div className="eyebrow" style={{ marginBottom: 9 }}>Evidence chain</div>
         <div className="chain">
           {a.evidence.map((h, i) => (
             <div className="hop" key={i}>

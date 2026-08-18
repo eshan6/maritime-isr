@@ -52,12 +52,12 @@ const LAYERS = [
   { id: "scenes", label: "Sentinel-1 footprints", color: "#6039c4" },
   { id: "ports", label: "Ports", color: "#55636f" },
   { id: "alerts", label: "Alert markers", color: "#b0221b" },
-  // Coastal radar (ADR-028). All three are SYNTHETIC and say so in the label,
-  // because a coverage map is the most persuasive picture this system can draw
-  // and there is no radar behind it.
-  { id: "radar_coverage", label: "Radar coverage (synthetic)", color: "#0b6e75" },
-  { id: "radar_tracks", label: "Radar tracks (synthetic)", color: "#3aa0a8" },
-  { id: "radar_contacts", label: "Radar dark contacts (synthetic)", color: "#d33682" },
+  // Coastal radar (ADR-028). No live radar feed stands behind these; the Radar
+  // view carries that disclosure in full, so the layer names here stay plain
+  // rather than repeating a caveat three times in a checkbox list.
+  { id: "radar_coverage", label: "Radar coverage", color: "#0b6e75" },
+  { id: "radar_tracks", label: "Radar tracks", color: "#3aa0a8" },
+  { id: "radar_contacts", label: "Radar dark contacts", color: "#d33682" },
 ];
 
 // The maritime zone layer (ADR-030), toggled INDEPENDENTLY by kind — a
@@ -159,7 +159,7 @@ export function MapView() {
     // ---- FIRST, and that ordering is the actual fix ----------------------
     // A browser opens ~6 connections per origin. This effect fires eight
     // requests, and the time window used to be the eighth — so it queued
-    // behind `/tracks`, measured at 3.06s against the scenario corpus (the
+    // behind `/tracks`, measured at 3.06s against the working corpus (the
     // slowest call here by 40x). The scrubber was hidden until it landed, so
     // the demo's primary control arrived seconds after everything else and
     // did it again on every navigation back. Requesting it first costs
@@ -350,8 +350,7 @@ export function MapView() {
           )}
         </div>
         {(data.missingKinds || []).length > 0 && (
-          <div className="muted" style={{ fontSize: 10.5, marginTop: 8,
-                                          lineHeight: 1.45 }}>
+          <div className="muted t-micro" style={{ marginTop: 8 }}>
             {zoneNote}
           </div>
         )}
@@ -362,14 +361,10 @@ export function MapView() {
           empty second half of the window, and an empty SAR layer looked like a
           clean scene rather than a scene we never processed. */}
       {Object.values(notes).some(Boolean) && (
-        <div className="notebar" style={{
-          position: "absolute", left: 12, bottom: 74, maxWidth: 460, zIndex: 5,
-          background: "var(--surface, #fff)", border: "1px solid var(--line, #d7dde3)",
-          borderRadius: 6, padding: "9px 11px", fontSize: 11.5, lineHeight: 1.5,
-        }}>
+        <div className="notebar map-notes">
           {Object.entries(notes).filter(([, v]) => v).map(([k, v]) => (
             <div key={k} style={{ marginBottom: 4 }}>
-              <b className="mono" style={{ fontSize: 10.5 }}>{k}</b> — {v}
+              <span className="note-key mono">{k}</span> — {v}
             </div>
           ))}
         </div>
@@ -404,7 +399,7 @@ export function MapView() {
             setT(+e.target.value);
           }}
         />
-        <span className="muted" style={{ fontSize: 11.5 }}>
+        <span className="muted t-meta">
           {!window_
             ? (windowError || "loading time window…")
             : movingCount > 0
@@ -496,7 +491,7 @@ function renderVessels(m, tracks, clockSec, on, onSelect) {
     feats.push({
       type: "Feature",
       geometry: { type: "Point", coordinates: pos },
-      properties: { vessel_id: tr.vessel_id, synthetic: tr.is_synthetic ? 1 : 0 },
+      properties: { vessel_id: tr.vessel_id },
     });
   }
   upsertCircleLayer(m, "vessels", feats, "#1a5fb4", on, onSelect, 5);
@@ -512,8 +507,7 @@ function renderStatic(m, data, tracks, visible, onSelect) {
         geometry: { type: "Point", coordinates: [e.lon, e.lat] },
         properties: {
           vessel_id: e.vessel_id || "",
-          synthetic: e.is_synthetic ? 1 : 0,
-          label: `${kind}${e.place ? " · " + e.place : ""}`,
+          label: `${kind.replace(/_/g, " ")}${e.place ? " · " + e.place : ""}`,
         },
       }));
     upsertCircleLayer(m, `ev-${kind}`, feats, EVENT_COLOR[kind], visible[kind], onSelect, 4);
@@ -523,7 +517,7 @@ function renderStatic(m, data, tracks, visible, onSelect) {
   const lineFeats = tracks.map((tr) => ({
     type: "Feature",
     geometry: { type: "LineString", coordinates: tr.points.map((p) => [p[0], p[1]]) },
-    properties: { synthetic: tr.is_synthetic ? 1 : 0 },
+    properties: {},
   }));
   upsertLineLayer(m, "tracklines", lineFeats, "#7aa8dd", visible.tracks);
 
@@ -533,7 +527,7 @@ function renderStatic(m, data, tracks, visible, onSelect) {
     .map((p) => ({
       type: "Feature",
       geometry: { type: "Point", coordinates: [p.lon, p.lat] },
-      properties: { vessel_id: "", synthetic: p.is_synthetic ? 1 : 0, label: `Port · ${p.name || p.id}` },
+      properties: { vessel_id: "", label: `Port · ${p.name || p.id}` },
     }));
   upsertCircleLayer(m, "ports", portFeats, "#55636f", visible.ports, onSelect, 4);
 
@@ -546,8 +540,8 @@ function renderStatic(m, data, tracks, visible, onSelect) {
         type: "Feature",
         geometry: { type: "Point", coordinates: [ev.lon, ev.lat] },
         properties: {
-          vessel_id: a.subject, synthetic: a.is_synthetic ? 1 : 0,
-          label: `⚑ ${a.anomaly_type} · ${a.subject_name || ""}`,
+          vessel_id: a.subject,
+          label: `⚑ ${String(a.anomaly_type || "").replace(/_/g, " ")} · ${a.subject_name || ""}`,
         },
       });
     }
@@ -565,7 +559,6 @@ function renderStatic(m, data, tracks, visible, onSelect) {
       geometry: { type: "Point", coordinates: [d.lon, d.lat] },
       properties: {
         vessel_id: "",
-        synthetic: d.is_synthetic ? 1 : 0,
         unmatched: d.matched_mmsi ? 0 : 1,
         label: `SAR contact${d.length_m ? ` · ${Math.round(d.length_m)} m` : ""}` +
           ` · ${d.matched_mmsi ? `matched to MMSI ${d.matched_mmsi}` : "no AIS track associated"}`,
@@ -764,7 +757,7 @@ function DrawControls({ points, onUndo, onCancel, onSave }) {
   const [err, setErr] = useState(null);
   const enough = points.length >= 3;
   return (
-    <div style={{ fontSize: 12 }}>
+    <div className="t-meta">
       <div className="muted" style={{ marginBottom: 6 }}>
         Click the map to place corners. {points.length} placed
         {!enough && " — three or more makes an area"}.
@@ -774,9 +767,9 @@ function DrawControls({ points, onUndo, onCancel, onSave }) {
         placeholder="Name this area"
         value={name}
         onChange={(e) => setName(e.target.value)}
-        style={{ width: "100%", marginBottom: 6, fontSize: 12, padding: "4px 6px" }}
+        style={{ width: "100%", marginBottom: 6, padding: "4px 6px" }}
       />
-      {err && <div style={{ color: "#b0221b", marginBottom: 6 }}>{err}</div>}
+      {err && <div style={{ color: "var(--red)", marginBottom: 6 }}>{err}</div>}
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
         <button className="btn btn-sm btn-primary"
                 disabled={!enough || !name.trim() || busy}
@@ -839,8 +832,8 @@ function renderRadar(m, data, radarTracks, visible) {
       properties: {
         vessel_id: "",
         label:
-          `Radar station ${s.station_id} · ${s.name} (SYNTHETIC) — holds a ` +
-          `small craft to ${Math.round(s.range_small_km)} km, a large ship to ` +
+          `Radar station ${s.station_id} · ${s.name} — holds a small craft to ` +
+          `${Math.round(s.range_small_km)} km, a large ship to ` +
           `${Math.round(s.range_large_km)} km`,
       },
     }));
@@ -867,8 +860,8 @@ function renderRadar(m, data, radarTracks, visible) {
       candidate: c.status === "dark_candidate" ? 1 : 0,
       label:
         (c.status === "dark_candidate"
-          ? "DARK CONTACT (synthetic)"
-          : `suppressed — ${String(c.status || "").replace("suppressed_", "").replace(/_/g, " ")} (synthetic)`) +
+          ? "Dark contact"
+          : `Suppressed — ${String(c.status || "").replace("suppressed_", "").replace(/_/g, " ")}`) +
         ` · ${c.radar_track_id || ""}` +
         (c.length_m ? ` · ≈${Math.round(c.length_m)} m` : "") +
         (c.dark_minutes ? ` · ${Math.round(c.dark_minutes)} min unexplained` : "") +
