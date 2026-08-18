@@ -18,7 +18,13 @@ async function get(path, params) {
   const url = new URL(BASE + path, window.location.origin);
   if (params) {
     for (const [k, v] of Object.entries(params)) {
-      if (v !== undefined && v !== null && v !== "") url.searchParams.set(k, v);
+      if (v === undefined || v === null || v === "") continue;
+      // An array becomes a REPEATED parameter (`?context=flag&context=port`),
+      // which is what FastAPI's `List[str] = Query(None)` reads. Passing the
+      // array to `set` would stringify it to `flag,port` and arrive as one
+      // unrecognised family name.
+      if (Array.isArray(v)) v.forEach((item) => url.searchParams.append(k, item));
+      else url.searchParams.set(k, v);
     }
   }
   const r = await fetch(url.pathname + url.search, {
@@ -117,8 +123,15 @@ export const api = {
                               () => get("/graph/seeds", { limit })),
   // The whole web. Cached: it is the default view, so every return to the
   // Graph tab would otherwise re-fetch and re-run the force layout.
-  graphAll: (limit) => memo(`graph-all:${limit || 0}`,
-                            () => get("/graph/all", { limit })),
+  //
+  // `context` is part of the cache key — each combination is a different
+  // graph, and keying on `limit` alone would serve the ownership-only answer
+  // to a caller that had just switched the flag layer on.
+  graphAll: (limit, context) => {
+    const ctx = [...(context || [])].sort();
+    return memo(`graph-all:${limit || 0}:${ctx.join(",")}`,
+                () => get("/graph/all", { limit, context: ctx }));
+  },
   vessels: (params) => get("/vessels", params),
   vessel: (id) => get(`/vessels/${encodeURIComponent(id)}`),
   track: (id, params) => get(`/vessels/${encodeURIComponent(id)}/track`, params),
