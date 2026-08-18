@@ -127,16 +127,83 @@ def _web():
 def test_web_edge_count_agrees_with_the_dashboard():
     """The web and the stats panel must not report different graphs.
 
-    Filtering ended edges out here instead was measured to drop 191 of 344 on
-    the fixture graph — a view that quietly disagrees with every other number
-    in the product is worse than one that shows too much.
+    The web now draws the ownership network by default and hides the context
+    families, so it legitimately shows fewer edges than the dashboard counts.
+    The agreement being checked is that **nothing is lost** — ask for every
+    context family and the two numbers meet exactly.
+
+    Filtering ended edges out instead was measured to drop 191 of 344 on the
+    fixture graph — a view that quietly disagrees with every other number in
+    the product is worse than one that shows too much.
     """
-    g = _web()
+    g = gsvc.full_graph(context=list(gsvc.CONTEXT_EDGE_TYPES))
+    if not g["nodes"]:
+        pytest.skip("graph is empty")
     if g["truncated"]:
         pytest.skip("graph exceeds the cap; counts are a subset by design")
     with gsvc.open_graph() as store:
         dash = store.counts_by_synthetic()["edges_current"]
     assert len(g["edges"]) == dash["real"] + dash["synthetic"]
+
+
+def test_the_default_web_is_the_ownership_network_not_everything():
+    """The view is titled "ownership network" and used to be 10% ownership.
+
+    Measured on the fixture graph: 1,334 current edges, of which 133 were
+    `owned-by`/`operated-by` and 1,170 were context — 629 `identified-as`,
+    313 `docked-at`, 228 `flagged-to`. Context is also what produced the
+    crossings, since flags and ports are stars rather than links.
+    """
+    g = _web()
+    kinds = {e["edge_type"] for e in g["edges"]}
+    assert kinds <= set(gsvc.STRUCTURAL_EDGE_TYPES), (
+        f"context edges leaked into the default web: "
+        f"{kinds - set(gsvc.STRUCTURAL_EDGE_TYPES)}")
+
+
+def test_a_context_family_can_be_switched_back_on():
+    """Hidden must mean hidden, not dropped."""
+    base = _web()
+    withflag = gsvc.full_graph(context=["flag"])
+    assert len(withflag["edges"]) > len(base["edges"])
+    assert "flagged-to" in {e["edge_type"] for e in withflag["edges"]}
+    # And only that family arrives.
+    assert "docked-at" not in {e["edge_type"] for e in withflag["edges"]}
+
+
+def test_hidden_and_truncated_are_reported_as_different_numbers():
+    """An operator has to know whether a checkbox would bring something back.
+
+    `matched_*` is what survived the type filter; the gap up to `total_*` is
+    one checkbox away. The gap down to what was returned is the cap, and no
+    control recovers it. Collapsing them would send someone hunting a switch
+    that cannot help.
+    """
+    g = _web()
+    assert g["matched_nodes"] <= g["total_nodes"]
+    assert len(g["nodes"]) <= g["matched_nodes"]
+    # The fixture graph is mostly context, so the filter must actually bite.
+    assert g["matched_nodes"] < g["total_nodes"]
+
+
+def test_a_node_with_no_ownership_edge_is_dropped_not_drawn_isolated():
+    """100 of 226 fixture vessels carry no ownership edge at all.
+
+    Ranking by TOTAL degree and then hiding some edge types would keep them —
+    `flag:IND` has degree 156 and would win a place in the core while drawing
+    nothing. A field of unconnected circles is not information.
+    """
+    g = _web()
+    connected = {e["source"] for e in g["edges"]} | {e["target"] for e in g["edges"]}
+    orphans = [n["id"] for n in g["nodes"] if n["id"] not in connected]
+    assert not orphans, f"isolated nodes in the ownership web: {orphans[:5]}"
+
+
+def test_an_unknown_context_family_is_ignored_rather_than_fatal():
+    """This arrives from a query string; a stale bookmark must not 500."""
+    assert gsvc.resolve_edge_types(["nope"]) == list(gsvc.STRUCTURAL_EDGE_TYPES)
+    g = gsvc.full_graph(context=["nope"])
+    assert {e["edge_type"] for e in g["edges"]} <= set(gsvc.STRUCTURAL_EDGE_TYPES)
 
 
 def test_ended_edges_are_carried_and_flagged_not_dropped():

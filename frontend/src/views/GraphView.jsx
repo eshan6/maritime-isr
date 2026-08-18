@@ -45,13 +45,28 @@ const LABEL_PX = 11;
 // every wheel notch and trackpad pinch feel like wading. Back to full speed,
 // with a wider range so one gesture covers useful ground — the fit control is
 // what recovers the view, so a bounded-but-generous range is safe.
-const MIN_ZOOM = 0.25;
+// 0.25 was the floor when nodes and type scaled with the canvas: below it the
+// graph really did become a few unreadable pixels across. That failure mode no
+// longer exists — symbols and labels hold their size on screen, so zooming out
+// spreads the picture thinner without ever shrinking what you read.
+//
+// The floor had become the thing PREVENTING a readable view: the ownership
+// network settles at a fit zoom of about 0.14, so clamping at 0.25 left it
+// overflowing the viewport by ~300px on the left and ~245px on the right with
+// no way to pull back. Measured, not guessed — and the label budget barely
+// moves it, so this is the lever that matters.
+const MIN_ZOOM = 0.08;
 const MAX_ZOOM = 4;
 //: How far in the whole-network view is allowed to open. Framing the focus
 //: node's neighbourhood is right; letting that fit run to MAX_ZOOM when the
 //: focus has three neighbours is not — the operator lands on a handful of
 //: giant circles with no network around them.
 const OPENING_MAX_ZOOM = 1.1;
+//: How many labelled nodes a layout will measure boxes for. Label-aware
+//: spacing is what stops two company names sharing a spot; measuring 1,400 of
+//: them is what made it too slow to keep on. This is the count of nodes that
+//: actually draw text, not the node count.
+const LABEL_AWARE_MAX_LABELS = 300;
 
 //: Above this many elements the view stops doing the whole-graph interactions.
 //:
@@ -62,7 +77,28 @@ const OPENING_MAX_ZOOM = 1.1;
 //: is most of what made the tab feel dead after the network loaded. Below the
 //: threshold the same work costs a few milliseconds and the interaction is
 //: worth having.
+//: The default view is now far under this — the ownership network is ~160
+//: elements where the old everything-view was ~4,300 — so hover-isolation is
+//: back on where it matters. The ceiling stays for the case where an operator
+//: switches every context layer on, and the panel SAYS when it has engaged: an
+//: interaction that silently stops existing reads as a broken feature, which is
+//: exactly how it was reported.
 const INTERACTIVE_MAX_ELEMENTS = 600;
+
+//: The context families an operator can switch back on, with the node kind
+//: that carries their colour and the reason each is off by default. The counts
+//: are from the fixture graph and are the argument, not decoration.
+const CONTEXT_LAYERS = [
+  ["flag", "flag_state", "flag",
+   "228 edges. One node, flag:IND, joins 156 vessels — a single star that "
+   + "dominates the layout."],
+  ["port", "port", "port",
+   "313 edges. Ports are hubs: nine anchorages carry most of them, and every "
+   + "hull touches several."],
+  ["identity", "identity", "identity",
+   "629 edges to 603 leaf nodes — 67% of the graph is an identity record on a "
+   + "stick, and a name change is read on the vessel, not in the web."],
+];
 
 export function GraphView() {
   const elRef = useRef(null);
@@ -95,45 +131,172 @@ export function GraphView() {
   // The whole-web payload, kept so the panel can state what is on screen and
   // — when the graph is larger than the cap — what is not.
   const [web, setWeb] = useState(null);
+  // Which context families are switched on. Held in the URL so a view an
+  // operator has set up is a link they can send, and so a reload does not
+  // silently drop back to the default answer to a different question.
+  const context = (params.get("context") || "").split(",").filter(Boolean);
+
+  // Writing the change into the URL is the whole implementation: the loader
+  // effect already depends on `params`, so the refetch, the relayout and the
+  // panel copy all follow from one `setParams`. No second code path, and the
+  // back button undoes a layer the way it undoes anything else.
+  function toggleContext(key) {
+    const next = context.includes(key)
+      ? context.filter((c) => c !== key)
+      : [...context, key];
+    const p = new URLSearchParams(params);
+    if (next.length) p.set("context", next.join(","));
+    else p.delete("context");
+    // Turning a layer on is a question about the whole network, so it also
+    // leaves a seeded neighbourhood — otherwise the checkbox would appear to
+    // do nothing while a single hull is on screen.
+    p.delete("seed");
+    setParams(p);
+  }
 
   useEffect(() => {
     api.vessels({ limit: 1000 }).then((r) => setVessels(r.items)).catch(() => {});
   }, []);
 
-  // Hold label type at a constant on-screen size. Cytoscape font sizes are in
-  // model units, so without this the labels grow with the zoom and the view
-  // reads as though it uses a dozen different type sizes.
+  // **The canvas zooms; the symbols do not.**
   //
-  // **Applied as per-element bypasses, and at most once per animation frame.**
-  // The obvious implementation — `cy.style().selector(...).style(...).update()`
-  // — APPENDS a rule to the stylesheet on every call and then forces a full
-  // restyle and redraw of every element. A wheel gesture emits zoom events far
-  // faster than a frame, so that version rebuilt the stylesheet dozens of times
-  // a second and grew it without bound (measured: 16 rules -> 18 after eight
-  // zoom clicks). That is what made the view judder during any interaction.
-  // Bypass styles overwrite in place and never accumulate.
+  // Cytoscape sizes both type and nodes in model units, so zooming scales them
+  // with the picture. Labels were already pinned to the screen — which left
+  // the two halves of the visual system disagreeing: zoom in and the dots
+  // inflate while the text stays put, until a vessel is a saucer with a small
+  // word under it. That is the "icons become too big" an operator reported.
   //
-  // **Only the elements that actually carry a label.** Applying the bypass to
-  // all 1,500 nodes and 1,900 edges of the whole-network view cost ~175 ms per
-  // zoom event when at most a hundred of them draw text; scoping it to the
-  // labelled set is the difference between a smooth wheel gesture and a
-  // stuttering one.
+  // Pinning both means a zoom gesture changes only the SPACING. That is the
+  // right behaviour for a dense network — you zoom to pull a cluster apart and
+  // read it, not to magnify one circle — and it is what a map does with its
+  // labels. Node size is then free to mean one thing only: importance.
+  //
+  // Bucketed by diameter, because there are about six distinct sizes in
+  // `nodeTypeSize` and a per-element loop is what makes this expensive. Six
+  // collection-level style calls hold whether the graph has 161 nodes or 1,500.
+  //
+  // Two things carried over from the label version, both measured and both
+  // still load-bearing:
+  //
+  //   * **Per-element bypasses, not stylesheet rules.** The obvious
+  //     `cy.style().selector(...).style(...).update()` APPENDS a rule on every
+  //     call and forces a full restyle of every element. A wheel gesture emits
+  //     zoom events faster than a frame, so that version grew the stylesheet
+  //     without bound (16 rules -> 18 after eight zoom clicks) and made the
+  //     view judder. Bypasses overwrite in place.
+  //   * **At most once per animation frame**, and labels only on the elements
+  //     that draw one — applying the label bypass to all 1,500 nodes and 1,900
+  //     edges cost ~175 ms per zoom event when at most a hundred carry text.
   const rafRef = useRef(0);
-  const syncLabelScale = useCallback((cy) => {
+  const bucketRef = useRef(null);
+  const sizeBuckets = useCallback((cy) => {
+    if (bucketRef.current && bucketRef.current.n === cy.nodes().length) {
+      return bucketRef.current.buckets;
+    }
+    const by = new Map();
+    cy.nodes().forEach((n) => {
+      const d = n.data("diameter");
+      if (!by.has(d)) by.set(d, []);
+      by.get(d).push(n);
+    });
+    const buckets = [...by.entries()].map(([d, list]) => [d, cy.collection(list)]);
+    bucketRef.current = { n: cy.nodes().length, buckets };
+    return buckets;
+  }, []);
+
+  // Two widths in the whole graph — ownership and everything else — so this is
+  // two collection-level style calls per frame however large the web gets.
+  const edgeBucketRef = useRef(null);
+  const edgeWidthBuckets = useCallback((cy) => {
+    if (edgeBucketRef.current && edgeBucketRef.current.n === cy.edges().length) {
+      return edgeBucketRef.current.buckets;
+    }
+    const by = new Map();
+    cy.edges().forEach((e) => {
+      const w = e.data("width");
+      if (!by.has(w)) by.set(w, []);
+      by.get(w).push(e);
+    });
+    const buckets = [...by.entries()].map(([w, list]) => [w, cy.collection(list)]);
+    edgeBucketRef.current = { n: cy.edges().length, buckets };
+    return buckets;
+  }, []);
+
+  // Immediate, unthrottled. The layout needs the true sizes applied BEFORE it
+  // runs (see `settleLayout`), and a rAF-deferred version would hand it the
+  // previous pass's numbers.
+  const applyScreenScale = useCallback((cy) => {
+    if (cy.destroyed()) return;
+    const z = cy.zoom();
+    const px = LABEL_PX / z;
+    const nodes = cy.nodes(".labelled");
+    const labelledEdges = cy.edges(".labelled");
+    cy.batch(() => {
+      if (!nodes.empty()) nodes.style("font-size", px);
+      if (!labelledEdges.empty()) labelledEdges.style("font-size", px * 0.85);
+      for (const [d, coll] of sizeBuckets(cy)) {
+        const s = d / z;
+        coll.style({ width: s, height: s });
+      }
+      // Lines belong to the same visual system as the dots and the type. Left
+      // in model units they were the one thing that still shrank: the network
+      // settles around zoom 0.4, where a 2px ownership line draws at 0.8px and
+      // a 1.2px context line at half a pixel. The relationships — the entire
+      // point of a graph — faded to grey haze while the nodes stayed crisp,
+      // which is most of why the uncluttered version read as empty rather than
+      // clear.
+      for (const [w, coll] of edgeWidthBuckets(cy)) coll.style("width", w / z);
+    });
+  }, [sizeBuckets, edgeWidthBuckets]);
+
+  const syncScreenScale = useCallback((cy) => {
     if (rafRef.current) return;
     rafRef.current = requestAnimationFrame(() => {
       rafRef.current = 0;
-      if (cy.destroyed()) return;
-      const px = LABEL_PX / cy.zoom();
-      const nodes = cy.nodes(".labelled");
-      const edges = cy.edges(".labelled");
-      if (nodes.empty() && edges.empty()) return;
-      cy.batch(() => {
-        nodes.style("font-size", px);
-        edges.style("font-size", px * 0.85);
-      });
+      applyScreenScale(cy);
     });
-  }, []);
+  }, [applyScreenScale]);
+
+  // **Lay out, frame, then lay out again knowing how big the type ended up.**
+  //
+  // Pinning labels to the screen and fitting a graph to the viewport pull
+  // against each other. The layout spaces nodes in MODEL units using the
+  // stylesheet font (11). The fit then zooms out to show everything — measured
+  // at 0.30 on the ownership network — and the pin scales the type back up to
+  // stay 11px on screen, which in model units is 11/0.30 = 36.7. Every label is
+  // suddenly three times the size the layout allowed for, so they collide:
+  // 40 overlapping label pairs among 40 labelled nodes.
+  //
+  // Neither half is wrong. Constant-size type is what makes a zoomed-out graph
+  // readable, and fitting is what makes it whole. What was wrong is that the
+  // layout was told one thing and the renderer did another.
+  //
+  // So: run it, frame it, apply the type size that framing implies, and run it
+  // again against the real numbers. Measured on the ownership network the
+  // overlap count goes 40 -> 1 -> 0 and the zoom settles at 0.25, so a second
+  // pass is enough and a third changes nothing. It is a fixed point rather
+  // than a fudge: bigger labels spread the graph, spreading lowers the fit
+  // zoom, a lower zoom means bigger labels — and the loop converges because
+  // each round adds less than the last.
+  // The camera needs the same treatment as the layout, and for the same
+  // reason. `fitView` picks a zoom from the graph's bounding box, but that box
+  // includes labels whose size depends on the zoom it is about to replace — so
+  // one fit lands wrong, and the picture ends up overflowing every edge at a
+  // scale chosen for different type. Alternating fit and rescale converges on
+  // the same fixed point the layout does; three rounds is comfortably past it.
+  const settleCamera = useCallback((cy, frame) => {
+    for (let i = 0; i < 3; i++) {
+      frame();
+      applyScreenScale(cy);
+    }
+  }, [applyScreenScale]);
+
+  const settleLayout = useCallback((cy, nodeCount, frame) => {
+    for (let pass = 0; pass < 2; pass++) {
+      runLayout(cy, nodeCount);
+      settleCamera(cy, frame);
+    }
+  }, [applyScreenScale, settleCamera]);
 
   useEffect(() => {
     const cy = cytoscape({
@@ -150,6 +313,26 @@ export function GraphView() {
       textureOnViewport: true,
       hideEdgesOnViewport: true,
       motionBlur: false,
+      // **Dragging always pans; nodes are never dragged.**
+      //
+      // Cytoscape makes nodes grabbable by default, and a drag that starts on
+      // a node moves that node instead of the view. On a dense canvas nearly
+      // every drag starts on a node, so panning simply appeared not to work —
+      // reported as "the moving around feature where the cursor becomes a hand
+      // does not work". It was working; there was just almost nowhere left to
+      // grab.
+      //
+      // Nothing is lost by turning it off. Hand-placing a node in a
+      // force-directed layout is undone by the next expansion anyway, and the
+      // positions are meant to be deterministic (`randomize: false`) so the
+      // same graph is recognisable tomorrow. A drag that quietly destroys that
+      // is worse than no drag.
+      autoungrabify: true,
+      // Box-select on drag would re-introduce the same problem from the other
+      // side: a drag on empty canvas would draw a selection rectangle rather
+      // than pan. Selection here is by click, which is all the detail panel
+      // needs.
+      boxSelectionEnabled: false,
       style: [
         {
           selector: "node",
@@ -258,15 +441,25 @@ export function GraphView() {
     cy.on("tap", (e) => {
       if (e.target === cy) { setInfo(null); clearHl(); }
     });
-    cy.on("zoom", () => syncLabelScale(cy));
+    cy.on("zoom", () => syncScreenScale(cy));
 
     cyRef.current = cy;
+    // A read-only handle for verification. Every claim about this view — "the
+    // labels stopped colliding", "zoom no longer inflates the nodes" — is a
+    // claim about geometry, and without a handle the only way to check it is
+    // to look at a screenshot and decide it seems better. That is how the
+    // label-collision bug survived: it was inspected, not measured.
+    //
+    // Safe here and nowhere else: the API binds to 127.0.0.1 and this is a
+    // single-operator laptop surface (ADR-013). It exposes no data the page is
+    // not already drawing.
+    if (typeof window !== "undefined") window.__cy = cy;
     return () => {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
       rafRef.current = 0;
       cy.destroy();
     };
-  }, [syncLabelScale]);
+  }, [syncScreenScale]);
 
   // ---- seed the view ----
   // Arriving at /graph with no ?seed= used to leave an empty canvas and a
@@ -315,7 +508,7 @@ export function GraphView() {
     try {
       // Session-memoised, so a superseded call costs one map lookup rather
       // than a second trip to the server.
-      g = await api.graphAll();
+      g = await api.graphAll(undefined, context);
     } catch {
       if (current()) { setStatus(""); setAutoSeedFailed(true); }
       return;
@@ -358,38 +551,63 @@ export function GraphView() {
       });
       await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
       if (!current() || cy.destroyed()) return;
-      runLayout(cy, g.nodes.length);
+      // Labels FIRST, then layout. `cose` lays out around label boxes
+      // (`nodeDimensionsIncludeLabels`), and it was being handed a graph whose
+      // labels had not been assigned yet — so it spaced bare circles and the
+      // text landed on top of itself the moment the labels appeared. Every
+      // "Harrow Maritime Services" sitting across "MORNING BREEZE" came from
+      // these two lines being the wrong way round.
       markWebLabels(cy, focusId);
 
-      if (focusId) {
-        const node = cy.getElementById(focusId);
-        if (node.length) {
-          node.addClass("focus");
-          node.closedNeighborhood().addClass("focus-nbr");
-          // Frame the focus neighbourhood, not the whole web: opening zoomed
-          // all the way out shows a grey mass and nothing legible. The web is
-          // still all there — zoom out and it is one picture.
-          //
-          // Capped, because a fit is a fit to whatever is there: a focus with
-          // three neighbours fills the viewport with three enormous circles
-          // and no surrounding network at all, which reads as "the graph
-          // contains four things".
-          const nbr = node.closedNeighborhood();
-          cy.animate({ fit: { eles: nbr, padding: 90 } }, {
-            duration: 320,
-            complete: () => {
-              if (cy.destroyed() || cy.zoom() <= OPENING_MAX_ZOOM) return;
-              cy.zoom({ level: OPENING_MAX_ZOOM,
-                        renderedPosition: { x: cy.width() / 2, y: cy.height() / 2 } });
-              cy.center(nbr);
-              syncLabelScale(cy);
-            },
-          });
-        }
-      } else {
-        fitView(cy);
+      const node = focusId ? cy.getElementById(focusId) : cy.collection();
+      if (node.length) {
+        node.addClass("focus");
+        node.closedNeighborhood().addClass("focus-nbr");
       }
-      syncLabelScale(cy);
+      // **Open on the whole network when the whole network is legible.**
+      //
+      // Framing the focus neighbourhood was the right call when the default
+      // view was everything: fitting 1,500 nodes showed a grey mass, so the
+      // camera started somewhere readable and left the rest to be found by
+      // zooming out. But it also meant the view opened mid-graph with edges
+      // running off every side, which reads as a picture that has been cut off.
+      //
+      // The ownership network is ~325 elements and, with symbols pinned to the
+      // screen, fits whole and legible. Showing all of it is the honest opening
+      // — the panel's claim is "here is the ownership network", and the camera
+      // should agree with the sentence.
+      if (!node.length) {
+        settleLayout(cy, g.nodes.length, () => fitView(cy));
+      } else {
+        // **Open framed on a cluster, not fitted to everything.**
+        //
+        // Fitting the whole network was tried and is worse to look at. The
+        // ownership graph is a forest of about thirty small stars, and the
+        // whole of it at once is a field of identical dots too small to carry
+        // a name — tidy, and saying nothing. Framed, the same data reads the
+        // way it used to: substantial nodes, legible companies, edges you can
+        // follow. The fit control and a scroll wheel get you the overview when
+        // you want it, which is the right way round — an overview is something
+        // you ask for, a working view is what you land in.
+        //
+        // Un-animated because `settleLayout` runs the framing twice; animating
+        // a camera move that is about to be recomputed reads as a stutter, and
+        // there is nothing on screen yet to animate from.
+        //
+        // Capped, because a fit is a fit to whatever is there: a focus with
+        // three neighbours fills the viewport with three enormous circles and
+        // no surrounding network, which reads as "the graph contains four
+        // things".
+        const nbr = node.closedNeighborhood();
+        settleLayout(cy, g.nodes.length, () => {
+          cy.fit(nbr, 90);
+          if (cy.zoom() > OPENING_MAX_ZOOM) {
+            cy.zoom({ level: OPENING_MAX_ZOOM,
+                      renderedPosition: { x: cy.width() / 2, y: cy.height() / 2 } });
+            cy.center(nbr);
+          }
+        });
+      }
       setNodeCount(cy.nodes().length);
       setWeb(g);
     } finally {
@@ -424,7 +642,7 @@ export function GraphView() {
       runLayout(cy, cy.nodes().length);
       if (isSeed) cy.getElementById(nodeId).addClass("seed");
       fitView(cy);
-      syncLabelScale(cy);
+      syncScreenScale(cy);
       setNodeCount(cy.nodes().length);
       setStatus(nb.truncated ? "traversal budget reached — partial neighbourhood shown" : "");
     } catch {
@@ -478,19 +696,33 @@ export function GraphView() {
         {web && (
           <div className="graph-note muted">
             <div>
-              Showing <b>{web.nodes.length.toLocaleString()}</b> nodes and{" "}
-              <b>{web.edges.length.toLocaleString()}</b> relationships
+              Showing <b>{web.nodes.length.toLocaleString()}</b> entities and{" "}
+              <b>{web.edges.length.toLocaleString()}</b> ownership relationships
               {web.truncated ? (
                 <>
-                  {" "}of <b>{web.total_nodes.toLocaleString()}</b> and{" "}
-                  <b>{web.total_edges.toLocaleString()}</b> in the graph —{" "}
-                  this is a partial picture, the most-connected core.
-                  Seed a vessel above to see any hull's own network in full.
+                  {" "}of <b>{(web.matched_nodes ?? web.total_nodes).toLocaleString()}</b>{" "}
+                  and <b>{(web.matched_edges ?? web.total_edges).toLocaleString()}</b>{" "}
+                  that match — this is a partial picture, the most-connected
+                  core. Seed a vessel above to see any hull's own network in
+                  full.
                 </>
               ) : (
-                <> — the entire graph.</>
+                <> — every one that matches.</>
               )}
             </div>
+            {/* Hidden and truncated are different facts. A layer switched off
+                is one checkbox away; a node past the cap is not, and reporting
+                them as one number would tell an operator to go looking for a
+                control that would not help. */}
+            {web.total_nodes > (web.matched_nodes ?? web.total_nodes) && (
+              <div style={{ marginTop: 5 }}>
+                <b>{(web.total_nodes - web.matched_nodes).toLocaleString()}</b>{" "}
+                {web.total_nodes - web.matched_nodes === 1
+                  ? "more node carries" : "more nodes carry"}{" "}
+                only flag, port or identity links. They are hidden, not
+                missing — switch a Context layer on below to bring them back.
+              </div>
+            )}
             {web.focus_basis && (
               <div style={{ marginTop: 5 }}>
                 Centred on <b>{focusLabel(web)}</b> — {web.focus_basis}. That is
@@ -502,6 +734,16 @@ export function GraphView() {
               Dashed links are relationships that have ended; solid ones are
               current.
             </div>
+            {/* An interaction that stops existing without saying so reads as a
+                broken feature — which is exactly how it was reported. */}
+            {web.nodes.length + web.edges.length > INTERACTIVE_MAX_ELEMENTS && (
+              <div style={{ marginTop: 5 }}>
+                Hover-to-isolate is off above{" "}
+                {INTERACTIVE_MAX_ELEMENTS.toLocaleString()} elements — fading
+                this many costs about half a second per hover. Switch a Context
+                layer off to get it back.
+              </div>
+            )}
           </div>
         )}
         {/* Say that the view chose this hull, and on what basis. An operator
@@ -535,12 +777,27 @@ export function GraphView() {
               {lbl}
             </div>
           ))}
-          <div className="legend-group">Context</div>
-          {[["flag_state", "flag"], ["port", "port"], ["identity", "identity"]].map(([k, lbl]) => (
-            <div className="legendline" key={k}>
-              <span className="layer-swatch" style={{ background: nodeTypeColor(k), borderRadius: "50%" }} />
+          {/* Context is a CONTROL, not a key. These three families are 88% of
+              the edges and are what turned the view into a hairball, so they
+              are off by default — but "these forty hulls share a flag" is a
+              real question, and switching one back on is how you ask it.
+              Each toggle refetches: it is a different graph, not a filter over
+              the one on screen, so the layout is entitled to change. */}
+          <div className="legend-group">Context — off by default</div>
+          {CONTEXT_LAYERS.map(([key, nodeKind, lbl, why]) => (
+            <label className="legendline" key={key}
+                   title={why}
+                   style={{ cursor: "pointer", userSelect: "none" }}>
+              <input
+                type="checkbox"
+                checked={context.includes(key)}
+                disabled={!!busy}
+                onChange={() => toggleContext(key)}
+                style={{ marginRight: 6 }}
+              />
+              <span className="layer-swatch" style={{ background: nodeTypeColor(nodeKind), borderRadius: "50%" }} />
               {lbl}
-            </div>
+            </label>
           ))}
           <div className="legend-group">Risk</div>
           {[["sanctions_authority", "sanctions authority"], ["ais_gap", "AIS gap"]].map(([k, lbl]) => (
@@ -633,6 +890,17 @@ function nodeElement(n, { showLabel, scale = 1 }) {
   const designated = !!(n.props && n.props.designated)
     || n.node_type === "sanctions_authority";
   const size = nodeTypeSize(n.node_type);
+  // **Size carries the hierarchy.** With the context families off, every
+  // remaining node is a vessel or a company and the type table gives them all
+  // but the same diameter — 161 identical discs in identical little stars,
+  // which is a picture with nothing to look at and no way in. Weighting by
+  // connections puts the companies that control fleets, and the hulls that sit
+  // in several structures, where the eye goes first.
+  //
+  // Logarithmic and bounded: degree runs from 1 to 25 here, and scaling
+  // linearly would make one node twelve times another and swamp the layout.
+  const deg = Number(n.degree) || 0;
+  const weight = Math.min(2.2, Math.max(0.85, 0.85 + 0.30 * Math.log2(1 + deg)));
   return {
     data: {
       id: n.id,
@@ -641,7 +909,7 @@ function nodeElement(n, { showLabel, scale = 1 }) {
       kind: n.node_type,
       color: nodeTypeColor(n.node_type),
       size,
-      diameter: size * 2 * scale,
+      diameter: size * 2 * scale * weight,
       sanctioned: designated ? 1 : 0,
       degree: n.degree,
       props: n.props,
@@ -723,22 +991,44 @@ const clamp = (z) => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, z));
 const PANEL_L = 290;
 const PANEL_R = 60;
 
+//: Breathing room inside the available rectangle, in screen pixels.
+const FIT_PAD = 36;
+
+// Fit into the canvas the operator can actually SEE.
+//
+// `cy.fit()` fits the whole container, which is the whole window — the control
+// panel floats on top of it. The old compensation was to fit the full width and
+// then shove the picture right by half the panel: content stopped hiding under
+// the panel and started running off the right edge instead, because a pan moves
+// a picture without resizing it. Both symptoms were visible at once, a company
+// clipped by the panel on the left and a fleet cut off on the right.
+//
+// Fitting to the rectangle between the panels gets both: the scale is chosen
+// for the space that exists, and the centring puts the middle of the graph in
+// the middle of that space.
 function fitView(cy) {
-  if (cy.elements().length === 0) return;
-  cy.fit(cy.elements(), 60);
+  const eles = cy.elements();
+  if (eles.length === 0) return;
+  const bb = eles.boundingBox({ includeLabels: true, includeNodes: true });
+  if (!bb.w || !bb.h) return;
+
+  const availW = Math.max(120, cy.width() - PANEL_L - PANEL_R - FIT_PAD * 2);
+  const availH = Math.max(120, cy.height() - FIT_PAD * 2);
   // Never leave the view at an unusable scale — a single stray gesture used to
   // be able to leave the whole graph a few pixels across.
-  if (cy.zoom() < MIN_ZOOM) {
-    cy.zoom({ level: MIN_ZOOM, renderedPosition: { x: cy.width() / 2, y: cy.height() / 2 } });
-  }
-  cy.panBy({ x: (PANEL_L - PANEL_R) / 2, y: 0 });
+  const z = clamp(Math.min(availW / bb.w, availH / bb.h));
+  cy.zoom(z);
+  cy.pan({
+    x: PANEL_L + FIT_PAD + availW / 2 - (bb.x1 + bb.w / 2) * z,
+    y: FIT_PAD + availH / 2 - (bb.y1 + bb.h / 2) * z,
+  });
 }
 
 // Which nodes carry a label at rest in the whole-web view.
 //
 // The neighbourhood view labels everything, because "the graph should be
 // readable at rest" and it holds tens of nodes. The web holds up to 1,500, and
-// `syncLabelScale` pins label size to the SCREEN — so zooming out does not
+// `syncScreenScale` pins label size to the SCREEN — so zooming out does not
 // shrink text away, it stacks it. Labelling all of them produces a solid mat.
 //
 // So: name the things worth naming without the cursor — the focus and its
@@ -754,7 +1044,7 @@ function focusLabel(web) {
 // How many hubs to name at rest, given how many nodes share the canvas.
 //
 // A fixed 40 was tuned on a smaller web. Labels are pinned to a constant SCREEN
-// size (`syncLabelScale`), so zooming out to see the whole network does not
+// size (`syncScreenScale`), so zooming out to see the whole network does not
 // shrink them — it stacks them, and 40 hub names plus every organisation lands
 // as a mat of text over the dense core. Fewer names on a bigger graph is the
 // only lever, since the graph itself cannot get less dense.
@@ -830,6 +1120,19 @@ function runLayout(cy, nodeCount = 0) {
   // deterministically, so the same graph always looks the same — a web that
   // reshuffled on every visit would make it impossible to learn, and
   // re-finding a cluster you saw yesterday is most of the value.
+  //
+  // **The web always uses fcose, whatever its size.** The ownership network is
+  // structurally a forest — a company and the hulls it owns, with few links
+  // between companies — and `cose` lays disconnected components out in tidy
+  // rows. On 161 nodes that produced a grid of near-identical stars: honest
+  // about the data, and unreadable as a picture, because a regular grid has no
+  // shape to remember and nothing to draw the eye. fcose packs components
+  // organically, which is what made the old view look like a network.
+  // fcose was tried for the web and reverted. It packs disconnected components
+  // instead of laying them in rows, which sounded right for an ownership
+  // forest — but `packComponents` crams them into one diagonal band with the
+  // nodes touching, measured at 64 overlapping label pairs against cose's 9.
+  // Rows are not elegant; a blob is not readable.
   const big = nodeCount > FCOSE_ABOVE;
   // Diameters before positions: the layout reads node sizes when it separates
   // them, so shrinking after it ran would leave the spacing of the larger dots.
@@ -839,13 +1142,24 @@ function runLayout(cy, nodeCount = 0) {
     animate: false,
     // Draft quality with a SEEDED random source — see `withSeededRandom` for
     // why this is both the fast path and still a deterministic one.
-    quality: "draft",
-    randomize: true,
+    //
+    // The ownership web is the exception: at ~160 nodes the spectral seeding
+    // costs nothing and is worth a lot. Measured on it, draft settled to 274
+    // overlapping label pairs where `default` gives 15 — draft starts from
+    // scattered positions and, on a graph that is mostly small disconnected
+    // stars, never fully recovers. The size threshold is what keeps this from
+    // being a promise about the 29,000-node real graph.
+    quality: web && nodeCount <= 400 ? "default" : "draft",
+    randomize: !(web && nodeCount <= 400),
     padding: 50,
-    // Labels are only drawn on a minority of nodes in the web view (see
-    // `markWebLabels`), and measuring every one of 1,400 label boxes costs
-    // more than it buys when most are empty.
-    nodeDimensionsIncludeLabels: false,
+    // Measure label boxes when there are few enough to be worth measuring.
+    // Only a minority of nodes carry a label here (see `markWebLabels`), and
+    // measuring 1,400 of them costs more than it buys when most are empty —
+    // but with a couple of hundred it is what stops company names landing on
+    // top of each other. `markWebLabels` now runs BEFORE the layout, so this
+    // count is the real one rather than zero.
+    nodeDimensionsIncludeLabels:
+      cy.nodes(".labelled").length <= LABEL_AWARE_MAX_LABELS,
     // Left at the values tuned against the real corpus graph. Draft mode
     // starts from scattered positions rather than a spectral draft, so it
     // settles a little looser than the spectral path did — but retuning the

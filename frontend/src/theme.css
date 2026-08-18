@@ -488,7 +488,12 @@ p:last-child { margin-bottom: 0; }
 .page-head h2 { margin: 3px 0 0; }
 
 /* graph container */
-.graph-canvas { position: absolute; inset: 0; }
+/* Dragging the canvas pans it (nodes are deliberately not grabbable), but
+   nothing on screen said so — the pointer stayed an arrow, which is the
+   universal signal for "this does not move". The grab/grabbing pair is how a
+   map advertises the gesture. */
+.graph-canvas { position: absolute; inset: 0; cursor: grab; }
+.graph-canvas:active { cursor: grabbing; }
 .graph-help { position: absolute; top: 12px; left: 12px; z-index: 4; }
 .graph-note { font-size: var(--fs-meta); color: var(--ink-2); margin-top: 8px;
   line-height: 1.5; }

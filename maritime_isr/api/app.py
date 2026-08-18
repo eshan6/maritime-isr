@@ -15,7 +15,7 @@ are contract-level guarantees (see :mod:`.models`), not conventions.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -368,15 +368,23 @@ def create_app() -> FastAPI:
         return service.get_corpus_window()
 
     @api.get("/graph/all", dependencies=guard)
-    def graph_all(limit: int = Query(gsvc.FULL_GRAPH_MAX_NODES, ge=1, le=5000)) -> dict:
-        """Every current relationship as one web, most-connected core first.
+    def graph_all(limit: int = Query(gsvc.FULL_GRAPH_MAX_NODES, ge=1, le=5000),
+                  context: Optional[List[str]] = Query(None)) -> dict:
+        """The ownership network as one web, most-connected core first.
+
+        `context` adds a family of context relationships back — `flag`, `port`
+        or `identity`, repeatable. They are off by default because they are
+        true of nearly every vessel and are what turns the picture into a
+        hairball: on the fixture graph they were 88% of the edges, and the
+        single `flag:IND` node joined 156 hulls.
 
         `truncated`, `total_nodes` and `total_edges` are not optional decoration
         — the real corpus graph is an estimated ~19,000 nodes and this returns
         at most 1,500 of them, so a caller that ignores those fields will draw
-        a partial picture and present it as complete.
+        a partial picture and present it as complete. `matched_*` separates
+        what a filter hid from what the limit cut.
         """
-        return gsvc.full_graph(limit)
+        return gsvc.full_graph(limit, context=context)
 
     @api.get("/graph/seeds", dependencies=guard)
     def graph_seeds(limit: int = Query(12, ge=1, le=100)) -> dict:

@@ -22,6 +22,7 @@ import json
 import sqlite3
 import time
 from dataclasses import dataclass, field
+from typing import Sequence
 
 from ..config import DATA_ROOT, GRAPH_DB_NAME, PIPELINE_VERSION
 from .ontology import EDGE_TYPES_V1, NODE_TYPES_V1, ONTOLOGY_VERSION, validate_edge
@@ -324,9 +325,25 @@ class GraphStore:
         return [dict(node_id=r[0], node_type=r[1], props=json.loads(r[2]),
                      is_synthetic=bool(r[3]), degree=int(r[4])) for r in rows]
 
-    def subgraph_by_degree(self, limit: int) -> dict:
+    def subgraph_by_degree(self, limit: int,
+                           edge_types: Sequence[str] | None = None) -> dict:
         """The whole graph, or its most-connected `limit` nodes and the edges
         among them. Always reports the totals it was drawn from.
+
+        **`edge_types` filters the ranking, not just the result.** Ranking by
+        total degree and then hiding some edge types is the worst of both: on
+        the fixture graph `flag:IND` has degree 156 and would win a place in
+        the core while contributing nothing visible, displacing a company that
+        actually owns hulls. So the degree here is counted over the kept edge
+        types only, and a node left with no kept edge is dropped rather than
+        drawn as an isolated dot — 100 of 226 vessels carry no ownership edge
+        at all, and a field of unconnected circles is not information.
+
+        The counts distinguish the two reasons something is missing.
+        `total_*` is the whole graph; `matched_*` is what survived the type
+        filter; the difference between `matched_` and what is returned is
+        truncation. A caller that collapses those into one number cannot tell
+        an operator whether a relationship is hidden or merely off-screen.
 
         **Why degree and not a random slice.** A graph too large to draw has to
         be cut somewhere, and cutting arbitrarily produces a picture that is
@@ -347,13 +364,25 @@ class GraphStore:
         and an ended relationship may not be *drawn* as a current one.
         """
         total_nodes = self._con.execute("SELECT count(*) FROM nodes").fetchone()[0]
+
+        want = tuple(edge_types) if edge_types else ()
+        if want:
+            marks = ",".join("?" for _ in want)
+            join = (f"LEFT JOIN edges e ON (e.src = n.node_id OR e.dst = n.node_id) "
+                    f"AND e.edge_type IN ({marks})")
+            # HAVING, not WHERE: the join is a LEFT JOIN so an unmatched node
+            # survives it with degree 0, and that is exactly what has to go.
+            tail, args = "HAVING degree > 0", (*want, limit)
+        else:
+            join = "LEFT JOIN edges e ON (e.src = n.node_id OR e.dst = n.node_id)"
+            tail, args = "", (limit,)
+
         rows = self._con.execute(
             "SELECT n.node_id, n.node_type, n.props, n.is_synthetic, "
             "       count(e.rowid) AS degree "
-            "  FROM nodes n "
-            "  LEFT JOIN edges e ON (e.src = n.node_id OR e.dst = n.node_id) "
-            " GROUP BY n.node_id ORDER BY degree DESC LIMIT ?",
-            (limit,)).fetchall()
+            f"  FROM nodes n {join} "
+            f" GROUP BY n.node_id {tail} ORDER BY degree DESC LIMIT ?",
+            args).fetchall()
         nodes = [dict(node_id=r[0], node_type=r[1], props=json.loads(r[2]),
                       is_synthetic=bool(r[3]), degree=int(r[4])) for r in rows]
         keep = {n["node_id"] for n in nodes}
@@ -366,13 +395,23 @@ class GraphStore:
         for e in sorted(self._rows_to_edges(all_rows), key=lambda e: e.observed_at):
             latest[(e.edge_type, e.src, e.dst)] = e
         current = list(latest.values())
-        edges = [e for e in current if e.src in keep and e.dst in keep]
+        matched = [e for e in current if not want or e.edge_type in want]
+        matched_nodes = {x for e in matched for x in (e.src, e.dst)}
+        edges = [e for e in matched if e.src in keep and e.dst in keep]
         return {
             "nodes": nodes,
             "edges": edges,
             "total_nodes": int(total_nodes),
             "total_edges": len(current),
-            "truncated": len(nodes) < total_nodes or len(edges) < len(current),
+            "matched_nodes": len(matched_nodes) if want else int(total_nodes),
+            "matched_edges": len(matched),
+            "edge_types": list(want),
+            # Truncation is measured against what MATCHED, not against the whole
+            # graph. With a type filter on, `len(nodes) < total_nodes` is true
+            # by construction and would light this permanently — reporting a
+            # deliberate filter as an overflow.
+            "truncated": (len(nodes) < (len(matched_nodes) if want else total_nodes)
+                          or len(edges) < len(matched)),
         }
 
     def n_nodes(self, node_type: str | None = None) -> int:

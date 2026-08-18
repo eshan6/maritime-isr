@@ -20,7 +20,7 @@ from __future__ import annotations
 import time
 from collections import deque
 from contextlib import contextmanager
-from typing import Iterator
+from typing import Iterator, Sequence
 
 from ..config import GRAPH_DB_NAME, TRAVERSAL_MAX_NODES, cfg
 from ..graph import GraphStore
@@ -76,14 +76,61 @@ def graph_exists() -> bool:
 #: switched to `fcose` — see the note in GraphView.jsx.)
 FULL_GRAPH_MAX_NODES = 1500
 
+#: The relationships the whole-network view draws by default — the ones that
+#: say who controls a hull and who has been designated.
+#:
+#: **Measured on the fixture graph, the view named "ownership network" was 10%
+#: ownership.** Of 1,334 current edges, 133 were `owned-by`/`operated-by` and
+#: 1,170 were context: 629 `identified-as`, 313 `docked-at`, 228 `flagged-to`.
+#: Context is also what produced the crossings, because flags and ports are
+#: stars rather than links — a single `flag:IND` node joined 156 vessels, and
+#: ten such hubs carried 18% of all line ends. Restricted to these four types
+#: the same graph is 161 nodes and 164 edges instead of 891 and 1,334.
+STRUCTURAL_EDGE_TYPES = ("owned-by", "operated-by", "sanctioned-under", "met-with")
 
-def full_graph(limit: int = FULL_GRAPH_MAX_NODES) -> dict:
-    """Every current relationship in the graph, as one web — up to `limit`
-    nodes, most-connected first.
+#: Context relationships, available on request. Not junk — "these forty hulls
+#: share a flag" is a real pattern — but true of almost every vessel and so
+#: near-useless as a default, and ruinous to the layout. The view offers them
+#: per family so an operator can add back exactly the one they are asking about.
+CONTEXT_EDGE_TYPES = {
+    "identity": ("identified-as",),
+    "port": ("docked-at",),
+    "flag": ("flagged-to",),
+}
+
+
+def resolve_edge_types(context: Sequence[str] | None = None) -> list[str]:
+    """Structural types, plus whichever context families were asked for.
+
+    Unknown family names are ignored rather than raising: this arrives from a
+    query string, and a stale bookmark should show the default graph, not an
+    error page.
+    """
+    out = list(STRUCTURAL_EDGE_TYPES)
+    for name in context or ():
+        out.extend(CONTEXT_EDGE_TYPES.get(str(name).strip().lower(), ()))
+    return out
+
+
+def full_graph(limit: int = FULL_GRAPH_MAX_NODES,
+               context: Sequence[str] | None = None) -> dict:
+    """The ownership network as one web — up to `limit` nodes, most-connected
+    first, plus whichever context families `context` asks for.
 
     Returns the same node/edge shape as :func:`neighbourhood` so the view can
     render either without a second code path, plus the counts needed to state
-    honestly what is on screen: `total_nodes`, `total_edges`, `truncated`.
+    honestly what is on screen.
+
+    **Three different numbers, because there are three different reasons a
+    relationship is not on screen** and an operator has to be able to tell them
+    apart:
+
+      * `total_nodes` / `total_edges` — everything in the graph.
+      * `matched_nodes` / `matched_edges` — what survived the edge-type filter.
+        The gap to `total_` is *hidden*, and switching a context family on
+        brings it back.
+      * what is actually returned — the gap to `matched_` is *truncated*, and
+        nothing brings it back except a narrower question.
 
     **A truncated web must never be described as the whole graph.** On the real
     corpus this will be truncated by a wide margin, and a picture that looks
@@ -91,12 +138,15 @@ def full_graph(limit: int = FULL_GRAPH_MAX_NODES) -> dict:
     sparser than it is.
     """
     limit = max(1, min(5000, limit))
+    edge_types = resolve_edge_types(context)
     with open_graph() as g:
         if g is None:
             return {"nodes": [], "edges": [], "total_nodes": 0,
-                    "total_edges": 0, "truncated": False, "focus": None,
+                    "total_edges": 0, "matched_nodes": 0, "matched_edges": 0,
+                    "edge_types": edge_types, "context": list(context or ()),
+                    "truncated": False, "focus": None,
                     "focus_basis": None, "limit": limit}
-        sub = g.subgraph_by_degree(limit)
+        sub = g.subgraph_by_degree(limit, edge_types=edge_types)
 
     nodes = [{
         "id": n["node_id"],
@@ -122,6 +172,11 @@ def full_graph(limit: int = FULL_GRAPH_MAX_NODES) -> dict:
     return {
         "nodes": nodes, "edges": edges,
         "total_nodes": sub["total_nodes"], "total_edges": sub["total_edges"],
+        # Hidden-by-filter and cut-by-limit are different facts and the panel
+        # has to be able to say which. Collapsing them would let a filtered
+        # view read as an overflowing one.
+        "matched_nodes": sub["matched_nodes"], "matched_edges": sub["matched_edges"],
+        "edge_types": sub["edge_types"], "context": list(context or ()),
         "truncated": sub["truncated"], "limit": limit,
         "focus": focus, "focus_basis": basis,
     }
