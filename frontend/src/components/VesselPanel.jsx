@@ -3,15 +3,14 @@
 // TIMELINE, sanctions with explicit tier/confidence, port calls / encounters /
 // gaps with GFW attribution, and a DECOMPOSED risk score. Everything degrades
 // gracefully when a field is null.
+//
+// Type here follows the shared scale in theme.css and nothing else: no inline
+// font sizes, no italics, one family. Hierarchy is the section rule, the
+// eyebrow, and the weight of a value against its label.
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api.js";
-import {
-  fmtDate,
-  fmtDateTime,
-  num,
-  edgeTypeLabel,
-} from "../lib/format.js";
+import { fmtDate, fmtDateTime, num } from "../lib/format.js";
 import {
   Attribution,
   ExportButton,
@@ -19,7 +18,6 @@ import {
   ProvChip,
   RiskDecomposition,
   SanctionsBadge,
-  SyntheticBadge,
   Value,
 } from "./bits.jsx";
 
@@ -47,16 +45,15 @@ export function VesselPanel({ vesselId, onOpenGraph }) {
   return (
     <div>
       <div className="section">
-        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-          <h2>{c.name || <span className="na">unnamed vessel</span>}</h2>
-          <SyntheticBadge on={v.is_synthetic} />
+        <div className="entity-head">
+          <h2>{c.name || <span className="na">Unnamed vessel</span>}</h2>
           <SanctionsBadge
             sanctioned={v.sanctions?.length > 0}
             isFinding={v.sanctions?.some((s) => s.is_finding)}
             tier={v.sanctions?.[0]?.match_tier}
           />
         </div>
-        <dl className="kv" style={{ marginTop: 12 }}>
+        <dl className="kv" style={{ marginTop: 14 }}>
           <dt>MMSI</dt>
           <dd className="mono"><Value v={c.mmsi} /></dd>
           <dt>IMO</dt>
@@ -70,7 +67,7 @@ export function VesselPanel({ vesselId, onOpenGraph }) {
           <dt>Dimensions</dt>
           <dd>
             {c.length_m || c.width_m ? (
-              <span>
+              <span className="mono">
                 {c.length_m ? `${num(c.length_m, 0)} m` : "?"} ×{" "}
                 {c.width_m ? `${num(c.width_m, 0)} m` : "?"}
               </span>
@@ -79,9 +76,11 @@ export function VesselPanel({ vesselId, onOpenGraph }) {
             )}
           </dd>
           <dt>Tonnage</dt>
-          <dd><Value v={c.tonnage_gt && num(c.tonnage_gt, 0)} suffix=" GT" /></dd>
+          <dd className="mono">
+            <Value v={c.tonnage_gt && num(c.tonnage_gt, 0)} suffix=" GT" />
+          </dd>
         </dl>
-        <div style={{ marginTop: 10 }}>
+        <div style={{ marginTop: 12 }}>
           <ProvChip prov={v.prov} />
         </div>
       </div>
@@ -95,16 +94,18 @@ export function VesselPanel({ vesselId, onOpenGraph }) {
       {/* sanctions */}
       {v.sanctions?.length > 0 && (
         <div className="section">
-          <div className="eyebrow">Sanctions</div>
+          <div className="eyebrow">
+            Sanctions <span className="count">({v.sanctions.length})</span>
+          </div>
           {v.sanctions.map((s, i) => (
-            <div className="card" style={{ padding: 12, marginBottom: 8 }} key={i}>
+            <div className="card card-pad" style={{ marginBottom: 8 }} key={i}>
               <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                 <SanctionsBadge sanctioned isFinding={s.is_finding} tier={s.match_tier} />
-                <span className="mono muted" style={{ fontSize: 12 }}>
+                <span className="mono muted t-meta">
                   tier {s.match_tier} · confidence {num(s.confidence, 2)}
                 </span>
               </div>
-              <dl className="kv" style={{ marginTop: 8 }}>
+              <dl className="kv" style={{ marginTop: 10 }}>
                 <dt>OFAC name</dt>
                 <dd><Value v={s.ofac_name} /></dd>
                 <dt>Programme</dt>
@@ -112,10 +113,10 @@ export function VesselPanel({ vesselId, onOpenGraph }) {
                 <dt>Listed owner</dt>
                 <dd><Value v={s.ofac_owner} /></dd>
                 <dt>As of</dt>
-                <dd>{fmtDate(s.sanctions_as_of) || <NAtext />}</dd>
+                <dd className="mono">{fmtDate(s.sanctions_as_of) || <NAtext />}</dd>
               </dl>
               {!s.is_finding && (
-                <p className="muted" style={{ fontSize: 12, margin: "6px 0 0" }}>
+                <p className="muted t-meta" style={{ margin: "8px 0 0" }}>
                   Name-only match — a candidate, not a confirmed finding. Names collide;
                   only an IMO or call-sign+name match is treated as a finding.
                 </p>
@@ -129,12 +130,12 @@ export function VesselPanel({ vesselId, onOpenGraph }) {
       <div className="section">
         <div className="eyebrow">Identity history</div>
         {v.identity_history?.length <= 1 ? (
-          <p className="muted" style={{ fontSize: 12.5, marginTop: 6 }}>
+          <p className="section-note">
             One identity record on file — no recorded rename or reflag. (Real GFW
-            identity history averages ~1 record per vessel.)
+            identity history averages about one record per vessel.)
           </p>
         ) : (
-          <div className="timeline" style={{ marginTop: 8 }}>
+          <div className="timeline">
             {v.identity_history.map((iv, i) => (
               <div className="tl-item" key={i}>
                 <div className="tl-rail">
@@ -142,11 +143,11 @@ export function VesselPanel({ vesselId, onOpenGraph }) {
                   <span className="tl-line" />
                 </div>
                 <div className="tl-body">
-                  <div style={{ fontWeight: 600 }}>
-                    {iv.name || <span className="na">unnamed</span>}
+                  <div className="t-med">
+                    {iv.name || <span className="na">Unnamed</span>}
                     {iv.flag ? ` · ${iv.flag}` : ""}
                   </div>
-                  <div className="mono muted" style={{ fontSize: 12 }}>
+                  <div className="mono muted t-meta">
                     MMSI {iv.mmsi || "—"} · IMO {iv.imo || "—"}
                   </div>
                   <div className="tl-when">
@@ -170,13 +171,15 @@ export function VesselPanel({ vesselId, onOpenGraph }) {
             an analyst establishing whether a hull is worth flagging needs to be
             able to hand over what is known about it, and the report is
             available for any vessel rather than only for flagged ones. */}
-        <ExportButton id={vesselId} primary label="Export incident report" />{" "}
-        <button className="btn" onClick={() => onOpenGraph?.(vesselId)}>
-          Open graph neighbourhood →
-        </button>{" "}
-        <Link className="btn" to={`/vessels/${encodeURIComponent(vesselId)}`}>
-          Full entity page
-        </Link>
+        <div className="btn-group">
+          <ExportButton id={vesselId} primary label="Export incident report" />
+          <button className="btn btn-sm" onClick={() => onOpenGraph?.(vesselId)}>
+            Open graph neighbourhood →
+          </button>
+          <Link className="btn btn-sm" to={`/vessels/${encodeURIComponent(vesselId)}`}>
+            Full entity page
+          </Link>
+        </div>
       </div>
     </div>
   );
@@ -187,29 +190,29 @@ function EventList({ title, events, kind }) {
     return (
       <div className="section">
         <div className="eyebrow">{title}</div>
-        <p className="muted" style={{ fontSize: 12.5, marginTop: 6 }}>None on record.</p>
+        <p className="section-note">None on record.</p>
       </div>
     );
   }
   return (
     <div className="section">
       <div className="eyebrow">
-        {title} <span className="muted">({events.length})</span>
+        {title} <span className="count">({events.length})</span>
       </div>
-      <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 8 }}>
+      <div>
         {events.slice(0, 20).map((e, i) => (
-          <div className="card" style={{ padding: "9px 12px" }} key={i}>
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
-              <span style={{ fontWeight: 600 }}>
+          <div className="event-row" key={i}>
+            <div className="event-title">
+              <span>
                 {kind === "port"
-                  ? e.place || <span className="na">unnamed anchorage</span>
+                  ? e.place || <span className="na">Unnamed anchorage</span>
                   : kind === "encounter"
                   ? `with ${e.counterpart_name || "an unnamed vessel"}`
                   : e.classification}
               </span>
               <Attribution source={e.attribution} />
             </div>
-            <div className="mono muted" style={{ fontSize: 12, marginTop: 3 }}>
+            <div className="event-meta mono">
               {fmtDateTime(e.start_time) || "?"}
               {e.duration_hours ? ` · ${num(e.duration_hours, 1)} h` : ""}
               {e.distance_from_shore_km != null
@@ -217,12 +220,17 @@ function EventList({ title, events, kind }) {
                 : ""}
             </div>
             {kind === "gap" && (
-              <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>
+              <div className="event-meta">
                 {e.classification} — this is GFW's assessment, not our detection.
               </div>
             )}
           </div>
         ))}
+        {events.length > 20 && (
+          <p className="section-note" style={{ marginTop: 8 }}>
+            Showing the first 20 of {events.length}.
+          </p>
+        )}
       </div>
     </div>
   );

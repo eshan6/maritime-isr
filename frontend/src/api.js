@@ -61,10 +61,9 @@ async function post(path, body) {
 
 // The one-click incident report. It cannot be a plain <a href> — every /api
 // route is token-gated and a navigation sends no headers, so the browser would
-// get a 401 page instead of a file. Fetch it, then hand the blob to a synthetic
-// click, honouring the filename the server chose (it carries the SCENARIO-
-// prefix for generated vessels, which is the label that must survive being
-// forwarded).
+// get a 401 page instead of a file. Fetch it, then hand the blob to a
+// programmatic click, honouring the filename the server chose: the server owns
+// that name and whatever it encodes has to survive being forwarded.
 async function downloadReport(vesselId) {
   const path = `${BASE}/vessels/${encodeURIComponent(vesselId)}/report`;
   const r = await fetch(path, { headers: authHeaders() });
@@ -144,8 +143,8 @@ export const api = {
   ports: () => get("/ports"),
   // ---- coastal radar (ADR-028) -----------------------------------------
   // The station list cannot change while the process is up — it is compiled
-  // into the scenario module, not read from a table — so it is memoised like
-  // the corpus window. The contacts and tracks are landed data and are not.
+  // into the module, not read from a table — so it is memoised like the corpus
+  // window. The contacts and tracks are landed data and are not.
   radarStations: () => memo("radar-stations", () => get("/radar/stations")),
   radarContacts: (params) => get("/radar/contacts", params),
   radarTracks: (params) => get("/radar/tracks", params),

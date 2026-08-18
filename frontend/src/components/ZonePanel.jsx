@@ -60,15 +60,12 @@ export function ZonePanel({ zone, onDelete }) {
   const drawn = zone.authority === "operator";
 
   return (
-    <div style={{ fontSize: 13, lineHeight: 1.6 }}>
+    <div className="prose">
       <div className="eyebrow">{KIND_LABEL[zone.kind] || zone.kind}</div>
-      <h3 style={{ margin: "2px 0 8px", fontSize: 15 }}>{zone.name}</h3>
+      <h3 style={{ margin: "3px 0 10px" }}>{zone.name}</h3>
 
       {/* The provenance claim, always, never behind a click. */}
-      <div
-        className="notebar"
-        style={{ fontSize: 12, marginBottom: 10, lineHeight: 1.55 }}
-      >
+      <div className="notebar" style={{ marginBottom: 12 }}>
         <div>
           <span className="muted">Authority:</span> {zone.authority}
           {"  ·  "}
@@ -78,7 +75,7 @@ export function ZonePanel({ zone, onDelete }) {
           <span className="muted">How it was made:</span> {zone.method}
         </div>
         {zone.note && (
-          <div style={{ marginTop: 5, color: "var(--amber, #9a6300)" }}>
+          <div style={{ marginTop: 5, color: "var(--amber)" }}>
             {zone.note}
           </div>
         )}
@@ -89,14 +86,14 @@ export function ZonePanel({ zone, onDelete }) {
 
       {res && (
         <>
-          <div style={{ marginBottom: 8 }}>
-            <b>{res.n_vessels}</b> vessel{res.n_vessels === 1 ? "" : "s"} —{" "}
+          <div className="t-med" style={{ marginBottom: 8 }}>
+            {res.n_vessels} vessel{res.n_vessels === 1 ? "" : "s"} —{" "}
             {res.items.length} visit{res.items.length === 1 ? "" : "s"}
           </div>
           <BasisLine basis={res.basis} note={res.note} />
 
           {res.items.length === 0 && res.basis === "computed-empty" && (
-            <div className="notebar" style={{ fontSize: 12 }}>
+            <div className="notebar">
               We looked and found nobody in this area. That is a result, not an
               empty page.
             </div>
@@ -134,7 +131,8 @@ export function ZonePanel({ zone, onDelete }) {
 
 function BasisLine({ basis, note }) {
   const tone =
-    basis === "landed" ? "#1f7a4d" : basis === "none" ? "#b0221b" : "#9a6300";
+    basis === "landed" ? "var(--green)"
+      : basis === "none" ? "var(--red)" : "var(--amber)";
   const label = {
     landed: "from the computed transition table",
     computed: "computed on demand, just now",
@@ -142,10 +140,10 @@ function BasisLine({ basis, note }) {
     none: "not yet computed",
   }[basis] || basis;
   return (
-    <div style={{ fontSize: 11.5, color: tone, marginBottom: 6 }}>
+    <div className="t-meta" style={{ color: tone, marginBottom: 8 }}>
       ● {label}
       {note && (
-        <div className="muted" style={{ fontSize: 11.5, marginTop: 3 }}>
+        <div className="muted" style={{ marginTop: 3 }}>
           {note}
         </div>
       )}
@@ -158,14 +156,13 @@ function VisitRow({ v }) {
   const outTo = compass(v.exit_bearing_deg);
   return (
     <div
-      style={{
-        borderTop: "1px solid var(--line, #e3e8ec)",
-        padding: "6px 0",
-        fontSize: 12.5,
-      }}
+      className="t-meta"
+      style={{ borderTop: "1px solid var(--border)", padding: "7px 0" }}
     >
       <div>
-        <b className="mono">{v.mmsi ? `MMSI ${v.mmsi}` : v.track_key}</b>{" "}
+        <span className="mono t-med">
+          {v.mmsi ? `MMSI ${v.mmsi}` : v.track_key}
+        </span>{" "}
         <span className="muted">({v.track_source})</span>
       </div>
       <div className="muted">

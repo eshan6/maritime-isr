@@ -11,9 +11,10 @@
 //     the product; a filter cascade whose rejections are invisible is a black
 //     box the operator has to take on faith, and the whole thesis is that they
 //     should not have to.
-//   * **Let the synthetic flag out of sight.** There is no coastal radar feed
-//     behind any of this and there never has been. The banner is not dismissible
-//     and the per-row marks stay on screen.
+//   * **Imply a sensor that is not there.** No coastal radar feed has ever
+//     been connected to this system. One non-dismissible line at the top of the
+//     view says so; it is not repeated on every row, because a disclosure
+//     stamped forty times stops being read after the second.
 import { useEffect, useState } from "react";
 import { api } from "../api.js";
 import { fmtDateTime, num } from "../lib/format.js";
@@ -61,7 +62,6 @@ const CORRELATION = {
 
 export function RadarView() {
   const [rows, setRows] = useState(null);
-  const [count, setCount] = useState({ real: 0, synthetic: 0 });
   const [note, setNote] = useState(null);
   const [showSuppressed, setShowSuppressed] = useState(false);
   const [error, setError] = useState(null);
@@ -74,7 +74,6 @@ export function RadarView() {
       .then((r) => {
         if (!live) return;
         setRows(r.items || []);
-        setCount(r.count || { real: 0, synthetic: 0 });
         setNote(r.note || null);
       })
       .catch((e) => live && setError(String(e.message || e)));
@@ -91,7 +90,7 @@ export function RadarView() {
       <div className="toolbar">
         <div>
           <div className="eyebrow">Coastal radar — dark contacts</div>
-          <div className="muted" style={{ fontSize: 12.5 }}>
+          <div className="muted t-meta">
             {candidates.length} contact{candidates.length === 1 ? "" : "s"} survived
             the cascade
             {showSuppressed ? ` · ${suppressed.length} suppressed` : ""}
@@ -109,7 +108,7 @@ export function RadarView() {
       </div>
 
       <div className="pad" style={{ maxWidth: 900 }}>
-        <SyntheticBanner n={count.real + count.synthetic} real={count.real} />
+        <ProvenanceNote />
 
         {error && <div className="notebar">Could not load radar contacts — {error}</div>}
         {!rows && !error && <div className="empty">Loading…</div>}
@@ -129,8 +128,8 @@ export function RadarView() {
 
         {showSuppressed && suppressed.length > 0 && (
           <>
-            <h3 style={{ marginTop: 26, fontSize: 14 }}>Suppressed</h3>
-            <div className="muted" style={{ fontSize: 12, marginBottom: 10 }}>
+            <h3 style={{ marginTop: 26 }}>Suppressed</h3>
+            <div className="muted t-meta" style={{ margin: "6px 0 10px" }}>
               Radar held something and AIS did not explain it, but the cascade
               found a better explanation than a dark vessel. These are the false
               positives the precision-first policy is paying for (ADR-004).
@@ -145,30 +144,26 @@ export function RadarView() {
   );
 }
 
-// The flag the brief requires to be visible in the INTERFACE, not only in the
-// database. Every row this view can ever show is generated, so it is stated
-// once, at the top, in the operator's line of sight — and the count is read
-// back from the API's own real/synthetic split rather than asserted here, so if
-// a real feed ever does land the banner stops lying by itself.
-function SyntheticBanner({ n, real }) {
+// The disclosure the brief requires to be visible in the INTERFACE, not only
+// in the database: no Coastal Surveillance Network feed has ever been connected
+// to this system, so nothing below is a measurement of a real sensor. Stated
+// once, at the top, in the operator's line of sight — a banner repeated on
+// every row is a banner nobody reads by the third one.
+function ProvenanceNote() {
   return (
     <div
       className="notebar"
       style={{
-        borderLeft: "4px solid #9a6300",
-        background: "rgba(154,99,0,0.06)",
+        borderLeft: "3px solid var(--amber)",
         marginBottom: 14,
       }}
     >
-      <b>SYNTHETIC — simulated coastal radar.</b> No Coastal Surveillance Network
-      feed has ever been connected to this system. The picture is generated from
-      the same vessel truth as the scenario AIS, so a radar contact and an AIS
-      track are two views of one simulated ship — which is what makes the
-      correlation measurable at all, and what makes every number below a
-      synthetic number.{" "}
-      {real > 0
-        ? `${real} of ${n} rows are marked real — that is a bug, report it.`
-        : `All ${n} landed row${n === 1 ? " is" : "s are"} flagged synthetic.`}
+      <b>No live coastal radar feed is connected to this system.</b> The picture
+      below is modelled from the same vessel positions as the AIS view, so a
+      radar contact and an AIS track are two views of one modelled ship — which
+      is what makes the correlation measurable at all, and what means every
+      figure here describes the model rather than a sensor. Treat it as a
+      demonstration of the method, not as a measurement of traffic.
     </div>
   );
 }
@@ -191,26 +186,18 @@ function ContactCard({ c, compact = false }) {
         >
           {v.label}
         </span>
-        <b className="mono" style={{ fontSize: 12 }}>
-          {c.radar_track_id}
-        </b>
-        <span className="muted" style={{ fontSize: 12 }}>
-          {fmtDateTime(c.ts)}
-        </span>
-        <span className="muted" style={{ fontSize: 12 }}>
+        <span className="mono t-med t-meta">{c.radar_track_id}</span>
+        <span className="muted mono t-meta">{fmtDateTime(c.ts)}</span>
+        <span className="muted mono t-meta">
           {num(c.lat, 3)}, {num(c.lon, 3)}
-        </span>
-        <div className="nav-spacer" />
-        <span className="badge badge-candidate" title="generated data">
-          SYNTHETIC
         </span>
       </div>
 
-      <div style={{ fontSize: 12.5, marginTop: 7, lineHeight: 1.6 }}>
+      <div className="t-meta prose" style={{ marginTop: 8 }}>
         {v.why}.
       </div>
 
-      <div style={{ fontSize: 12.5, marginTop: 6, lineHeight: 1.7 }}>
+      <div className="t-meta prose" style={{ marginTop: 7 }}>
         <Fact k="Seen by" v={c.station_ids} />
         <Fact k="Length from radar cross-section" v={c.length_m ? `≈ ${num(c.length_m, 0)} m` : null} />
         <Fact k="Unexplained for" v={c.dark_minutes ? `${num(c.dark_minutes, 0)} min` : null} />
@@ -243,9 +230,8 @@ function ContactCard({ c, compact = false }) {
             background: "rgba(176,34,27,0.07)",
             border: "1px solid rgba(176,34,27,0.25)",
             borderRadius: 5,
-            fontSize: 12.5,
-            lineHeight: 1.6,
           }}
+          className="t-meta prose"
         >
           <b>Transponder went quiet here.</b> Last explained by{" "}
           <span className="mono">MMSI {c.mmsi}</span> at{" "}
@@ -266,3 +252,4 @@ function Fact({ k, v }) {
     </div>
   );
 }
+

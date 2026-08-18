@@ -2815,3 +2815,125 @@ Then re-run `python tools/run_scenario_pipeline.py` and the
   The `POL_TYPE` mapping is written from that publication's documented
   vocabulary and is **untested against the real file**.
 - Every figure is synthetic.
+
+---
+
+## The interface was shouting at everyone (2026-08-18)
+
+Three complaints from Eshan, one of them a hang, one of them a bug that had
+been on screen since the risk panel was written, and one a house-style rule.
+
+### 1. The whole-network graph froze the tab — the actual cause
+
+**Symptom:** opening Graph, or coming back to the whole network, made the page
+stop responding, every time.
+
+**Cause, measured rather than guessed.** A throwaway harness laid out a graph
+the shape and size of the server's cap (1,500 nodes / 1,934 edges) in a real
+Chromium and timed each stage:
+
+| stage | before |
+|---|---|
+| fcose layout | **15,653 ms** of blocked main thread |
+| one hover-fade | 481 ms |
+| clearing that hover | 410 ms |
+| five zoom steps (label rescale) | 1,950 ms |
+
+The layout was the freeze; the hover and zoom costs were why it stayed
+unusable afterwards. Fifteen seconds of a blocked main thread is Chrome's
+"page unresponsive" dialog, which is exactly what "it crashes" looks like.
+
+**The layout cost was not the iterations.** Cutting the budget 800 → 250
+iterations moved it 15.7s → 14.4s. Nearly all of it was fcose's *spectral*
+seeding — the eigendecomposition it runs when `randomize: false` — which is
+superlinear in node count (600 nodes: 2.3s; 1,500 nodes: 14.4s).
+
+**The fix.** `quality: "draft"` skips the spectral step entirely and runs the
+same graph in **0.3–0.65 s**, but it requires `randomize: true`, which would
+reshuffle the web on every visit — and a picture you cannot re-find is a
+picture you cannot learn. So the layout runs with `Math.random` temporarily
+replaced by a **seeded xorshift32** (`withSeededRandom` in `GraphView.jsx`).
+Verified by laying the same 1,500-node graph out twice and comparing every
+node position: identical to the last decimal.
+
+End to end, page load to a settled 1,500-node network, in Chromium:
+**2.1–2.4 s**, down from a hang.
+
+Three other things were making it stay slow, all fixed:
+
+- **Function-valued cytoscape styles** (`"background-color": (n) => …`) are
+  re-invoked per element on every restyle. Replaced with `data(...)` mappers;
+  everything the stylesheet reads is precomputed onto the element.
+- **Hover-fade** added a class to *every* element and restyled all of them.
+  Above 600 elements the view now raises the hovered neighbourhood without
+  pushing everything else down.
+- **The zoom label-rescale** applied a style bypass to all 3,400 elements when
+  at most a hundred draw text. Scoped to a `.labelled` class.
+
+Also: the whole-network view now caps its opening zoom (`OPENING_MAX_ZOOM`), so
+a focus node with three neighbours no longer fills the viewport with three
+enormous circles; and a "laying out N nodes…" overlay states that the canvas is
+about to hold the thread, instead of the page appearing to die silently.
+
+**One bug introduced and caught in the browser, worth remembering:** the first
+version of the in-flight guard was a boolean. React mounts an effect, tears it
+down and mounts it again in development, so the first call cancelled itself and
+the second refused to start — the view sat on "loading the whole network…"
+forever. It is a monotonic run-token now, not a flag.
+
+### 2. The four risk bars never worked
+
+`.rbar-fill` was a `<span>`, so it stayed `display: inline`, and an inline box
+ignores `height`. **Every bar rendered as an empty grey track**, whatever the
+component scored — since the panel was written. Both track and fill are
+block-level now.
+
+The width was also wrong in a way that would have lied once the bars appeared:
+it was `weighted / max(weighted)`, which normalises the largest component to a
+*full* bar however small it is. EMPRESS, scoring 0.037 on flag opacity and zero
+on everything else, would have drawn one **full** bar — a picture of maximum
+flag risk for a hull barely above zero. Each bar is now the component's own
+`value` on its own 0–1 scale, and the figure beside it is the weighted
+contribution. One colour, not four; four hues implied four kinds of thing when
+they are four terms of one sum.
+
+### 3. Type: one family, six sizes, three weights, no italics
+
+The UI had grown two typefaces, a dozen ad-hoc sizes (10.5, 11.5, 12.5, 13.5,
+26…), four weights and italic "not available" text. `theme.css` now defines the
+whole scale as tokens and every component uses it — no inline `fontSize`
+survives anywhere in `src/`. Audited in a real browser across all seven views:
+
+```
+fams: ["Inter"]  sizes: [11,12,13,15,20,28]  weights: [400,500,600]  italics: 0
+```
+
+`.mono` is the same family with tabular figures rather than a second typeface,
+so identifiers still line up.
+
+### 4. "Synthetic" and "scenario" are out of the interface
+
+Per Eshan's instruction, neither word (nor "simulated") appears anywhere a user
+can read: not in copy, layer names, badges, map popups, tooltips or option
+text. Audited in-browser on every view.
+
+**This is in tension with CLAUDE.md invariant 6, and the tension is resolved by
+wording, not by dropping the disclosure.** The Radar view still carries a
+non-dismissible line — "No live coastal radar feed is connected to this system.
+… every figure here describes the model rather than a sensor" — because there
+is no radar behind it and the interface must not imply one. What went is the
+jargon and the repetition (a `SYNTHETIC` badge on every row), not the honesty.
+**If Eshan wants that line gone too, say so — it is his call, but the data-layer
+guarantee and the external framing then carry the whole load.**
+
+Nothing in the data layer changed: `is_synthetic` is still on every row and the
+API still returns real/generated split counts. The UI simply stops printing it.
+
+### Status
+
+- 🟡 **Built, sandbox-green.** Every claim above was measured or audited in a
+  real headless Chromium against a stub API that mimics the FastAPI shape —
+  including the 1,500-node whole-network load. **None of it has run against the
+  real backend on Eshan's machine.**
+- The graph timings will differ on his hardware; the ratio (a 15-second freeze
+  becoming a sub-second layout) is what should carry over.
