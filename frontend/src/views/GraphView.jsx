@@ -335,8 +335,9 @@ export function GraphView() {
       expandedRef.current = new Set(g.nodes.map((n) => n.id));
 
       const focusId = g.focus;
+      const webScale = densityScale(g.nodes.length);
       cy.add([
-        ...g.nodes.map((n) => nodeElement(n, { showLabel: false })),
+        ...g.nodes.map((n) => nodeElement(n, { showLabel: false, scale: webScale })),
         // Edge labels off in the web view: two thousand of them is a texture,
         // and every one is a text box the renderer measures on each redraw.
         ...g.edges.map((e) => edgeElement(e, { showLabel: false })),
@@ -592,7 +593,42 @@ export function GraphView() {
 // missing in the other. Everything the stylesheet reads is precomputed here:
 // no style function ever runs per element per restyle.
 
-function nodeElement(n, { showLabel }) {
+// How much to shrink every node, given how many share the canvas.
+//
+// `nodeTypeSize` is one table of diameters used by both views, and it is tuned
+// for the neighbourhood — tens of nodes, each worth looking at. The whole-web
+// view puts up to 1,500 in the same rectangle at the same size, and 1,500
+// 30-unit discs cannot be laid out without touching whatever the layout does:
+// the ink alone exceeds the canvas. Reported by an operator as "everything is
+// overlapping and the object icons are too big", and visible as a clump of
+// merged circles under stacked labels at the centre of the network.
+//
+// Area is what has to stay bounded, so the scale goes as the square root of
+// the crowding. The floor keeps a vessel a dot rather than a pinprick: below
+// roughly 6px on screen a node stops being clickable, and clicking a hull to
+// open its own network is the whole interaction.
+export function densityScale(n) {
+  if (n <= FCOSE_ABOVE) return 1;
+  return Math.max(0.4, Math.sqrt(FCOSE_ABOVE / n));
+}
+
+// Re-stamp diameters when the graph's size changes — an expansion can push a
+// small graph past the threshold, and without this the graph ends up drawn at
+// two scales at once. A data update, not a style function: the stylesheet
+// reads `data(diameter)` and nothing here may reintroduce a per-element style
+// callback (see the note above `nodeElement`).
+function applyDensityScale(cy) {
+  const scale = densityScale(cy.nodes().length);
+  cy.batch(() => {
+    cy.nodes().forEach((n) => {
+      const want = n.data("size") * 2 * scale;
+      if (n.data("diameter") !== want) n.data("diameter", want);
+    });
+  });
+  return scale;
+}
+
+function nodeElement(n, { showLabel, scale = 1 }) {
   const label = n.label || shortId(n.id);
   const designated = !!(n.props && n.props.designated)
     || n.node_type === "sanctions_authority";
@@ -605,7 +641,7 @@ function nodeElement(n, { showLabel }) {
       kind: n.node_type,
       color: nodeTypeColor(n.node_type),
       size,
-      diameter: size * 2,
+      diameter: size * 2 * scale,
       sanctioned: designated ? 1 : 0,
       degree: n.degree,
       props: n.props,
@@ -715,7 +751,19 @@ function focusLabel(web) {
   return (n && n.label) || shortId(web.focus || "");
 }
 
-function markWebLabels(cy, focusId, hubCount = 40) {
+// How many hubs to name at rest, given how many nodes share the canvas.
+//
+// A fixed 40 was tuned on a smaller web. Labels are pinned to a constant SCREEN
+// size (`syncLabelScale`), so zooming out to see the whole network does not
+// shrink them — it stacks them, and 40 hub names plus every organisation lands
+// as a mat of text over the dense core. Fewer names on a bigger graph is the
+// only lever, since the graph itself cannot get less dense.
+function hubLabelCount(n) {
+  return Math.max(12, Math.min(40, Math.round(600 / Math.sqrt(Math.max(1, n)))));
+}
+
+function markWebLabels(cy, focusId, hubCount = null) {
+  if (hubCount == null) hubCount = hubLabelCount(cy.nodes().length);
   cy.batch(() => {
     const show = (eles) => eles.forEach((n) => {
       n.data("shownLabel", n.data("label"));
@@ -783,6 +831,9 @@ function runLayout(cy, nodeCount = 0) {
   // reshuffled on every visit would make it impossible to learn, and
   // re-finding a cluster you saw yesterday is most of the value.
   const big = nodeCount > FCOSE_ABOVE;
+  // Diameters before positions: the layout reads node sizes when it separates
+  // them, so shrinking after it ran would leave the spacing of the larger dots.
+  const scale = applyDensityScale(cy);
   const opts = big ? {
     name: "fcose",
     animate: false,
