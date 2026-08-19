@@ -20,6 +20,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
+from ..config import CLI
 from ..schemas.keys import native_vessel_id, vessel_node_id
 from . import graph_service as gsvc
 from . import report
@@ -1320,7 +1321,7 @@ def list_radar_contacts(limit: int = 500, status: str | None = None) -> dict:
     if not rows:
         return {"count": {"real": 0, "synthetic": 0}, "items": [],
                 "note": ("no landed radar correlation — run "
-                         "`maritime-isr radar correlate --write`")}
+                         f"`{CLI} radar correlate --write`")}
     if status != "all":
         rows = [r for r in rows if r.get("status") == "dark_candidate"]
     rows.sort(key=lambda r: str(r.get("ts") or ""), reverse=True)
@@ -1481,7 +1482,7 @@ def _zone_note(missing: list[str]) -> Optional[str]:
         return None
     return ("Not loaded: " + ", ".join(missing) + ". These are statutory "
             "limits and this system will not derive or transcribe them — load "
-            "a published file with `maritime-isr ingest zones --path <file>`. "
+            f"a published file with `{CLI} ingest zones --path <file>`. "
             "Until then any analysis that needs them is idle, not clean.")
 
 

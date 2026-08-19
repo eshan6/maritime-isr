@@ -30,6 +30,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from ..config import CLI
 from . import gfw_client as gc
 from .checks import report_landed
 from .landing import land_raw_json, land_table, read_table, stamp_envelope
@@ -245,7 +246,7 @@ def run(limit: int | None = None) -> int:
     ids = vessel_ids_from_events()
     if not ids:
         print("[gfw-vessels] no vessel ids found in the event tables. "
-              "Run `maritime-isr ingest gfw-events` first.")
+              f"Run `{CLI} ingest gfw-events` first.")
         return 0
     if limit:
         ids = ids[:limit]

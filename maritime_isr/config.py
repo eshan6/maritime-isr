@@ -285,6 +285,33 @@ def _main() -> int:
 
 PIPELINE_VERSION = "0.7.0"
 
+
+def _cli_command() -> str:
+    """How to invoke this CLI **on the machine that is running right now**.
+
+    Every operator-facing message that says "run X to fix this" used to spell
+    it `maritime-isr ...`. That is the console script declared in
+    `pyproject.toml`, and whether it works depends entirely on whether pip's
+    scripts directory is on PATH. On the sandbox this was written in, it is —
+    which is why the wrong form kept shipping. On the operator's Windows
+    laptop it is not, so every one of those seventeen hints named a command
+    that answers `CommandNotFoundException`.
+
+    A hint that does not run is worse than no hint: it sends someone to a
+    dead end and makes a working system look broken. `python -m` needs nothing
+    on PATH but the interpreter already executing this line, so it is the safe
+    fallback, and the short form is still preferred where it genuinely works.
+
+    Resolved once at import. `shutil.which` walks PATH, and these strings are
+    built inside loops and error handlers.
+    """
+    import shutil
+    return "maritime-isr" if shutil.which("maritime-isr") else "python -m maritime_isr.cli"
+
+
+#: The command prefix operator-facing messages must use. See `_cli_command`.
+CLI = _cli_command()
+
 # ---- Phase 5: anomaly library + risk constants ------------------------
 # Each anomaly type ships with its OWN precision gate (roadmap 5.2): an
 # anomaly only alerts above its threshold, and thresholds move only as

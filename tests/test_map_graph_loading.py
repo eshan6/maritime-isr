@@ -226,18 +226,22 @@ def test_truncation_is_reported_with_the_totals_it_was_drawn_from():
     """A partial web that looks whole is how a viewer concludes the dataset is
     sparser than it is."""
     g = gsvc.full_graph(limit=5)
-    if g["total_nodes"] <= 5:
-        pytest.skip("graph smaller than the test limit")
+    # Guard on what MATCHED, not on the whole graph. The web is the ownership
+    # subgraph now, so a corpus can hold thousands of nodes and still have
+    # fewer than five carrying an ownership edge — in which case nothing is
+    # truncated and there is nothing here to check.
+    if g["matched_nodes"] <= 5:
+        pytest.skip("fewer matching nodes than the test limit")
     assert g["truncated"] is True
     assert len(g["nodes"]) == 5
-    assert g["total_nodes"] > len(g["nodes"])
-    assert g["total_edges"] >= len(g["edges"])
+    assert g["matched_nodes"] > len(g["nodes"])
+    assert g["matched_edges"] >= len(g["edges"])
 
 
 def test_truncation_keeps_the_connected_core_not_an_arbitrary_slice():
     g = gsvc.full_graph(limit=5)
-    if g["total_nodes"] <= 5:
-        pytest.skip("graph smaller than the test limit")
+    if g["matched_nodes"] <= 5:
+        pytest.skip("fewer matching nodes than the test limit")
     degrees = [n["degree"] for n in g["nodes"]]
     assert degrees == sorted(degrees, reverse=True)
 

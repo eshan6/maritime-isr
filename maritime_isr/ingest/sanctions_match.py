@@ -61,7 +61,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 
-from ..config import cfg
+from ..config import CLI, cfg
 from ..db import connect
 from .checks import check_coverage, report_landed
 from .landing import land_table, read_table, stamp_envelope
@@ -609,7 +609,7 @@ def run(as_of: datetime | None = None,
     vessels = load_identified_vessels()
     if not vessels:
         print("[sanctions-match] no vessel identity landed. "
-              "Run `maritime-isr ingest gfw-vessels` first.")
+              f"Run `{CLI} ingest gfw-vessels` first.")
         return 0
 
     con = connect()
@@ -617,7 +617,7 @@ def run(as_of: datetime | None = None,
     if not designations:
         print("[sanctions-match] no sanctioned vessel rows found in any of "
               f"{', '.join(registries)}. "
-              "Run `maritime-isr ingest registries` first.")
+              f"Run `{CLI} ingest registries` first.")
         return 0
 
     print(f"[sanctions-match] {len(vessels):,} identity records vs "

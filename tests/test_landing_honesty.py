@@ -380,10 +380,16 @@ def test_the_empty_state_hints_name_commands_the_cli_actually_accepts():
         s = re.sub(r"<[^>]*>", "PLACEHOLDER", s)
         return " ".join(s.split())
 
+    # Both spellings. Operator-facing hints interpolate `{CLI}`, which resolves
+    # at runtime to whichever invocation actually works on the machine printing
+    # it; docstrings and comments keep the canonical `maritime-isr`. Scanning
+    # for only one form would have silently stopped checking anything the day
+    # the messages were switched over.
     hints = []
     for mod in ("maritime_isr/api/service.py", "maritime_isr/zones/analyses.py"):
         src = pathlib.Path(REPO / mod).read_text(encoding="utf-8")
         hints += re.findall(r"`maritime-isr ([^`]+)`", src, flags=re.S)
+        hints += re.findall(r"`\{CLI\} ([^`]+)`", src, flags=re.S)
     hints = sorted({_normalise(h) for h in hints})
     assert hints, "no operator-facing command hints found to check"
     assert any("radar correlate" in h for h in hints), (
@@ -400,3 +406,50 @@ def test_the_empty_state_hints_name_commands_the_cli_actually_accepts():
     assert not bad, (
         f"these hints name commands the CLI will not accept: {bad}. "
         "An empty view that misdirects is worse than an empty view.")
+
+
+def test_the_cli_hint_prefix_is_one_that_actually_runs():
+    """Seventeen hints named a command the operator's machine did not have.
+
+    `maritime-isr` is the console script from `pyproject.toml`, and whether it
+    resolves depends entirely on whether pip's scripts directory is on PATH.
+    On the sandbox this was written in it is, which is why the broken form kept
+    shipping; on a Windows laptop it is not, and every hint answered
+    `CommandNotFoundException`.
+
+    So the prefix is resolved at runtime, and this asserts the two branches are
+    both real: the short form only when it is genuinely on PATH, and the
+    fallback actually executable.
+    """
+    import shutil
+    import subprocess
+    import sys
+
+    from maritime_isr.config import CLI, _cli_command
+
+    if CLI == "maritime-isr":
+        assert shutil.which("maritime-isr"), (
+            "the short form is only correct when it is on PATH")
+    else:
+        assert CLI == "python -m maritime_isr.cli", CLI
+
+    # The fallback has to run, not merely look plausible. This is the form the
+    # operator will be told to use whenever the script is not on PATH.
+    out = subprocess.run([sys.executable, "-m", "maritime_isr.cli", "--help"],
+                         capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr[-400:]
+    assert "usage:" in out.stdout
+
+
+def test_the_fallback_is_chosen_when_the_script_is_not_on_path():
+    """The branch the operator hits, exercised rather than assumed."""
+    import shutil
+
+    from maritime_isr import config as cfg_mod
+
+    real = shutil.which
+    shutil.which = lambda n, *a, **k: None if n == "maritime-isr" else real(n, *a, **k)
+    try:
+        assert cfg_mod._cli_command() == "python -m maritime_isr.cli"
+    finally:
+        shutil.which = real
