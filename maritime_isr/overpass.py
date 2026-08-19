@@ -51,6 +51,7 @@ from shapely.geometry import Point, Polygon
 from shapely.ops import unary_union
 from shapely import wkt as shapely_wkt
 
+from .config import CLI
 from .db import connect, table_exists
 from .ingest.landing import land_table, read_table, stamp_envelope, stamp_h3
 
@@ -501,7 +502,7 @@ def run(*, v_max_kn: float = V_MAX_DEFAULT_KN,
     gaps = load_flagged_gaps(flagged_only=flagged_only)
     if not gaps:
         print("[overpass] no AIS gaps to assess. "
-              "Run `maritime-isr ingest gfw-events --kind gaps` first"
+              f"Run `{CLI} ingest gfw-events --kind gaps` first"
               + (", or pass --all-gaps to assess unflagged gaps too."
                  if flagged_only else "."))
         return 0
@@ -509,7 +510,7 @@ def run(*, v_max_kn: float = V_MAX_DEFAULT_KN,
     scenes = load_scenes()
     if not scenes:
         print("[overpass] no Sentinel-1 scenes in the catalog. "
-              "Run `maritime-isr ingest s1 --catalog-only` first.")
+              f"Run `{CLI} ingest s1 --catalog-only` first.")
         return 0
 
     print(f"[overpass] {len(gaps):,} gap(s) vs {len(scenes):,} Sentinel-1 "

@@ -110,6 +110,13 @@ Never commit `.env`. `.env.example` documents the full set.
 CLI shape is `maritime-isr <verb> <target> [options]`. Available so far
 (all Phase 0 — verify on-host before trusting):
 
+> **If `maritime-isr` is not recognised, use `python -m maritime_isr.cli` instead**
+> — same verbs, same options, everywhere below. `maritime-isr` is a console
+> script that `pip install -e .` drops into pip's scripts directory, and on
+> Windows that directory is often not on PATH; the module form needs nothing on
+> PATH but the interpreter. The app's own messages detect which one works and
+> print that, so a hint you copy from a screen will always run.
+
 ```bash
 # Health check: Python, libraries, DuckDB, data dir, disk budget, API keys
 maritime-isr doctor

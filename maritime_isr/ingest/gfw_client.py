@@ -18,7 +18,7 @@ from typing import Any, Iterator
 
 import requests
 
-from ..config import header_safety
+from ..config import CLI, header_safety
 
 API_BASE = "https://gateway.api.globalfishingwatch.org/v3"
 
@@ -46,7 +46,7 @@ def token() -> str:
             "  1. Register (free) at https://globalfishingwatch.org/our-apis/\n"
             "  2. Generate an API token.\n"
             "  3. Put GFW_API_TOKEN=<your token> in a .env file at the repo root.\n"
-            "Then run `maritime-isr doctor` to confirm it is picked up."
+            f"Then run `{CLI} doctor` to confirm it is picked up."
         )
 
     # Fail here, in plain English, rather than 30 frames deep in urllib3.
@@ -60,7 +60,7 @@ def token() -> str:
             "  A GFW token is plain ASCII: letters, digits, '-', '_' and '.'\n"
             "  Fix: delete the GFW_API_TOKEN line from .env and retype or re-paste\n"
             "  it from the GFW API portal directly into a plain-text editor.\n"
-            "  Then run `maritime-isr doctor` — it now checks this."
+            f"  Then run `{CLI} doctor` — it now checks this."
         )
 
     # A JWT is three dot-separated base64url segments. A truncated paste is the

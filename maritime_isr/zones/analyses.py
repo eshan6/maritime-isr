@@ -32,7 +32,7 @@ from typing import Iterable, Optional, Sequence
 import numpy as np
 import pandas as pd
 
-from ..config import (LANE_DEVIATION_MIN_KM, LANE_DEVIATION_MIN_MINUTES,
+from ..config import (CLI, LANE_DEVIATION_MIN_KM, LANE_DEVIATION_MIN_MINUTES,
                       LANE_DEVIATION_MIN_SOG_KN, MAIDEN_MIN_NOVELTY_KM,
                       MAIDEN_MIN_PRIOR_ZONES, OUTSIDE_LIMITS_MIN_HOURS,
                       OUTSIDE_LIMITS_MAX_SOG_KN)
@@ -65,7 +65,7 @@ def anchoring_analysis_status(index: ZoneIndex) -> tuple[bool, str]:
         "vessel is stopped INSIDE territorial waters and OUTSIDE every "
         "facility, and this project will not derive a territorial sea from a "
         "coastline (see zones/derive.py). Load a real one with "
-        "`maritime-isr ingest zones --path <file.geojson> --kind "
+        f"`{CLI} ingest zones --path <file.geojson> --kind "
         "territorial_sea` and it runs unchanged.")
 
 

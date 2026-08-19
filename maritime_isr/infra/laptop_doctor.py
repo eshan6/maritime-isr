@@ -27,7 +27,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from ..config import ENV_SPEC, cfg, header_safety, repo_root
+from ..config import CLI, ENV_SPEC, cfg, header_safety, repo_root
 
 # Under laptop mode the whole downloaded corpus must stay under 1 GB.
 DISK_BUDGET_BYTES = 1_000_000_000
@@ -377,7 +377,7 @@ def run(snap: bool = False) -> int:
         print(f"RESULT: NOT READY — {len(fails)} problem(s) must be fixed:")
         for _, name, detail in fails:
             print(f"  * {name}: {detail}")
-        print("\nFix those, then run `maritime-isr doctor` again.")
+        print(f"\nFix those, then run `{CLI} doctor` again.")
         print("=" * 72)
         return 1
 
