@@ -188,7 +188,7 @@ def run_radar_stage(tracks_out: dict) -> dict:
         print("  no landed radar_track_report data — the radar picture has not "
               "been generated, and the dark-contact path has nothing to run on")
         return dict(correlations=[], verdicts=[], statics=[], associations=[],
-                    radar_tracks=[], encounters=[])
+                    radar_tracks=[], landed={}, encounters=[])
     real, syn = split_real_synthetic(rows)
     print(f"  radar_track_report: {len(real):,} real + {len(syn):,} synthetic plot(s)")
 
@@ -220,9 +220,33 @@ def run_radar_stage(tracks_out: dict) -> dict:
                           ais_gaps=tracks_out["gaps"])
     print(f"  ({time.time() - t0:.0f}s)")
     print(format_correlation(out))
+
+    # **Land what this stage just computed.**
+    #
+    # It used to print the correlation and drop it. Everything else in the
+    # pipeline lands its output, so the omission was invisible — the stage
+    # reported real numbers and looked complete — while the Radar view, which
+    # reads `radar_dark_contact` off disk, kept saying "0 contacts survived the
+    # cascade" after a full successful run. The only way to fill it was
+    # `radar correlate --write`, a separate command that recomputes for minutes
+    # exactly what is already in memory here.
+    #
+    # An operator followed the documented sequence, got an empty Radar tab, and
+    # reasonably concluded the feature was broken. A stage that does the work
+    # and discards it is not a smaller version of doing the work.
+    from maritime_isr.fusion.radar_ais import land_correlation
+
+    is_syn = bool(syn) and not real
+    landed = land_correlation(
+        out,
+        source_id=SYNTHETIC_SOURCE_ID if is_syn else "coastal_radar",
+        is_synthetic=is_syn)
+    for table, n in sorted(landed.items()):
+        print(f"  landed {n:,} row(s) into {table}")
+
     return dict(correlations=out.correlations, verdicts=out.verdicts,
                 statics=out.statics, associations=out.associations,
-                radar_tracks=radar_tracks,
+                radar_tracks=radar_tracks, landed=landed,
                 encounters=detect_encounters(radar_tracks))
 
 

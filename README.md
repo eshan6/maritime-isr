@@ -183,23 +183,26 @@ python -m pip install -e ".[api]"                    # FastAPI + uvicorn
 # one-time: land the scenario corpus and populate the graph so the alert queue
 # and graph views have content (a few minutes — runs the track engine):
 python -m maritime_isr.cli scenario generate --seed 7
-python -m maritime_isr.cli radar correlate --write    # lands the radar correlation
 python tools/run_scenario_pipeline.py
 
 python -m maritime_isr.api                            # serves 127.0.0.1:8000
 ```
 
-> **`radar correlate --write` is not optional, and this block used to omit it.**
-> `run_scenario_pipeline.py` correlates radar against AIS *in memory* to report
-> the stage; it never lands the result. Only this command writes
-> `radar_correlation` and `radar_dark_contact` to disk, and the Radar view reads
-> the landed tables — so skipping it leaves that view saying "0 contacts
-> survived the cascade" over a picture that in fact correlated fine. An operator
-> following this section hit exactly that.
+Run these in order and let each finish — the pipeline reads what `generate`
+lands, and running it first prints "no landed ais_position data" and exits.
 
-Run these in order and let each finish: `radar correlate` reads landed
-`ais_position` rows, so running it before `scenario generate` prints "no landed
-ais_position data" and exits without doing anything.
+> **The pipeline lands the radar correlation itself.** It used to correlate
+> radar against AIS *in memory* to report stage 3b and then discard it, so the
+> Radar view — which reads `radar_dark_contact` off disk — said "0 contacts
+> survived the cascade" after a full successful run, and the only fix was a
+> separate `radar correlate --write` that spent minutes recomputing what had
+> just been thrown away. An operator followed this section, got an empty tab,
+> and reasonably concluded the feature was broken. The stage lands its own
+> output now.
+>
+> `maritime-isr radar correlate --write` still exists and is still the right
+> command when you want the radar path **without** the rest of the pipeline —
+> it is no longer something you must remember.
 
 Then open **http://127.0.0.1:8000** in a browser. That's the whole demo — Map,
 Findings, Alerts, Radar, Vessels, Graph. Nav routes, hard refreshes and pasted deep
@@ -207,10 +210,10 @@ links all work; the backend falls back to the app's `index.html` for any
 non-`/api` path.
 
 **If a view is empty, it is telling you which step is missing** — "no AIS
-positions landed" means `scenario generate` has not run, "no ownership edges in
-the graph yet" means `run_scenario_pipeline.py` has not, and "no landed radar
-correlation" means the `radar correlate --write` above was skipped. None of
-those is a broken view; each names its own fix.
+positions landed" means `scenario generate` has not run, and "no ownership
+edges in the graph yet" or "no landed radar correlation" both mean
+`run_scenario_pipeline.py` has not. None of those is a broken view; each names
+its own fix, in whichever form of the command works on your machine.
 
 The API reads the conformed Parquet tables through DuckDB and the object graph
 through SQLite, and writes nothing except alert dispositions. Auth is a shared
