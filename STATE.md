@@ -3030,3 +3030,87 @@ prevent. Split into one filtered layer per band.
 - ⬜ **The lesson worth keeping:** the fixture graph is smaller than the real
   one, and a `?:` only evaluates one branch. A code path the fixture cannot
   reach is a code path nothing has ever run.
+
+---
+
+## The graph's visual system, and one authority drawn twice (2026-08-20)
+
+Four reports. Three were proportion; one was a duplicate node with a real cause.
+
+### The symbols were sized for a different type scale
+
+Node radii came from `nodeTypeSize` and had never moved, but two things around
+them had: labels were pinned to a constant SCREEN size, and the type scale was
+rebuilt at 11px. A vessel was a 30px dot beside an 11px name — a button with a
+caption, not a labelled node. Radii cut about 40%, ratios untouched, so size
+still means importance and nothing else.
+
+### The arrowheads were the loudest mark on the canvas
+
+Cytoscape derives arrowhead size from **edge width**. Node diameters go through
+`densityScale` (0.41 on a 1,500-node graph) and edge widths did not — so on a
+dense view the dots shrank to 41% and the arrowheads stayed at 100%. Pinheads
+under enormous triangles, which is exactly how it was reported. `applyScreenScale`
+now puts edge widths through the same density factor, and `arrow-scale` drops
+0.7 -> 0.6. One factor applied to every mark keeps the system coherent at any
+node count.
+
+### The control panel could not be scrolled to
+
+`.graph-help` had no height limit. On a short window the Context checkboxes and
+the legend ran off the bottom of the viewport with no way to reach them —
+controls that exist and cannot be clicked. Capped to the canvas with its own
+scrollbar and `overscroll-behavior: contain`, so a wheel gesture that reaches
+the end of the panel does not fall through and zoom the graph. The panel copy
+was also cut to facts (the reasoning moved into `title=` tooltips), which on a
+760px-tall viewport is the difference between overflowing and fitting with room
+to spare.
+
+### Why there were two OFAC nodes
+
+Not a rendering bug — **two genuinely distinct nodes**:
+
+| node id | props | designations |
+|---|---|---|
+| `authority:OFAC` | `fictional: false` | the real matches |
+| `authority:SCENARIO-SDN` | same name, same issuing body | the generated ones |
+
+`graph/from_landed.py` relabels the second to display as "OFAC" by an explicit
+operator decision, so the demo reads as one system. The consequence nobody
+accounted for: the graph draws two identical diamonds with the designations
+split between them, which reads as two regulators — a picture that is simply
+false.
+
+Fixed in the **serving layer** (`merge_duplicate_authorities`), not the store:
+authority nodes sharing a (type, label) are drawn as one, edges are rewired and
+de-duplicated. Three properties it holds, each with a test:
+
+  * the **real** id survives, so clicking the node shows the real regulator's
+    register and reference rather than the stand-in's;
+  * the merged node is flagged generated if **any** part of it was — never the
+    other way round;
+  * **only authorities merge, and only by (type, label)**. Merging on label
+    alone would collapse two genuinely different hulls that share a name, which
+    is the opposite of what this product is for.
+
+Nothing in the store changes: both ids remain, both keep their own
+`is_synthetic`, and every split count and real-versus-generated query behaves
+exactly as before. Re-separating them is a matter of giving the second node a
+different display name again, at which point this merges nothing.
+
+### Also
+
+`tests/test_sanctions_match.py::test_no_identity_landed_is_a_clear_message` was
+**already failing on main** — PR #36 changed the hint to name
+`python -m maritime_isr.cli` (because the `maritime-isr` console script only
+exists after a `pip install`) and this assertion was left pointing at the old
+wording. Updated. Full suite: 663 passed, 33 skipped, 0 failed.
+
+### Status
+
+- 🟡 **Sandbox-green, and this time against a real backend.** Verified in
+  Chromium against uvicorn serving a corpus generated here by
+  `scenario generate` + `run_scenario_pipeline.py` — 222 vessels, 29 companies,
+  161-node ownership network. **Still not Eshan's corpus.**
+- The `merge_duplicate_authorities` behaviour is unit-tested and does not
+  depend on a populated graph.

@@ -267,7 +267,15 @@ export function GraphView() {
       // point of a graph — faded to grey haze while the nodes stayed crisp,
       // which is most of why the uncluttered version read as empty rather than
       // clear.
-      for (const [w, coll] of edgeWidthBuckets(cy)) coll.style("width", w / z);
+      //
+      // **Through the density factor as well**, which is what the nodes get
+      // and the edges did not. A dense graph shrinks its dots to 41% to make
+      // room; leaving lines and their arrowheads at full width made the heads
+      // the biggest thing on the canvas, dwarfing the nodes they point at.
+      // One factor, applied to every mark, keeps the system coherent at any
+      // node count.
+      const d = densityScale(cy.nodes().length);
+      for (const [w, coll] of edgeWidthBuckets(cy)) coll.style("width", (w * d) / z);
     });
   }, [sizeBuckets, edgeWidthBuckets]);
 
@@ -405,7 +413,15 @@ export function GraphView() {
             "line-color": "data(color)",
             "target-arrow-color": "data(color)",
             "target-arrow-shape": "triangle",
-            "arrow-scale": 0.7,
+            // Cytoscape derives the arrowhead's size from the EDGE WIDTH, and
+            // edge width is pinned to the screen (`width / zoom`) while node
+            // diameters are additionally shrunk by `densityScale`. On the
+            // 1,500-node view that left the dots at 41% and the arrowheads at
+            // 100% — pinheads under enormous triangles. `applyScreenScale` now
+            // puts edges through the same density factor, and this drops the
+            // head to half the line's width so a direction reads as a hint
+            // rather than as the loudest mark on the canvas.
+            "arrow-scale": 0.6,
             "curve-style": "bezier",
             opacity: 0.65,
             // Edge relationships are labelled at rest in the neighbourhood
@@ -756,8 +772,7 @@ export function GraphView() {
           Seed graph
         </button>
         <p className="graph-note muted">
-          Opens two hops: operator, parent company, and vessels sharing the owner.
-          Click a vessel or company to expand; hover to isolate.
+          Click a node to expand it; hover to isolate.
         </p>
         {/* What is on screen, stated in numbers. A web that looks complete is
             how a viewer concludes the dataset is smaller than it is, so the
@@ -765,52 +780,44 @@ export function GraphView() {
         {web && (
           <div className="graph-note muted">
             <div>
-              Showing <b>{web.nodes.length.toLocaleString()}</b> entities and{" "}
-              <b>{web.edges.length.toLocaleString()}</b> ownership relationships
-              {web.truncated ? (
-                <>
-                  {" "}of <b>{(web.matched_nodes ?? web.total_nodes).toLocaleString()}</b>{" "}
-                  and <b>{(web.matched_edges ?? web.total_edges).toLocaleString()}</b>{" "}
-                  that match — this is a partial picture, the most-connected
-                  core. Seed a vessel above to see any hull's own network in
-                  full.
+              <b>{web.nodes.length.toLocaleString()}</b> entities ·{" "}
+              <b>{web.edges.length.toLocaleString()}</b> ownership links
+              {web.truncated && (
+                <> of <b>{(web.matched_nodes ?? web.total_nodes).toLocaleString()}</b>
+                  {" "}·{" "}<b>{(web.matched_edges ?? web.total_edges).toLocaleString()}</b>{" "}
+                  <span title="The server returns the most-connected core up to a cap. A partial picture that looks whole is worse than no picture, so the numbers say which this is.">
+                    (partial — the most-connected core)
+                  </span>
                 </>
-              ) : (
-                <> — every one that matches.</>
               )}
             </div>
             {/* Hidden and truncated are different facts. A layer switched off
                 is one checkbox away; a node past the cap is not, and reporting
-                them as one number would tell an operator to go looking for a
-                control that would not help. */}
+                them as one number would send an operator looking for a control
+                that would not help. */}
             {web.total_nodes > (web.matched_nodes ?? web.total_nodes) && (
-              <div style={{ marginTop: 5 }}>
+              <div style={{ marginTop: 4 }}>
                 <b>{(web.total_nodes - web.matched_nodes).toLocaleString()}</b>{" "}
-                {web.total_nodes - web.matched_nodes === 1
-                  ? "more node carries" : "more nodes carry"}{" "}
-                only flag, port or identity links. They are hidden, not
-                missing — switch a Context layer on below to bring them back.
+                hidden — context only. Switch a layer on below.
               </div>
             )}
             {web.focus_basis && (
-              <div style={{ marginTop: 5 }}>
-                Centred on <b>{focusLabel(web)}</b> — {web.focus_basis}. That is
-                where the camera starts, not a finding: it is the
-                best-connected node, not the most suspicious one.
+              <div
+                style={{ marginTop: 4 }}
+                title="A camera position, not a finding — the best-connected node, not the most suspicious one."
+              >
+                Centred on <b>{focusLabel(web)}</b> (most connected).
               </div>
             )}
-            <div style={{ marginTop: 5 }}>
-              Dashed links are relationships that have ended; solid ones are
-              current.
-            </div>
             {/* An interaction that stops existing without saying so reads as a
                 broken feature — which is exactly how it was reported. */}
             {web.nodes.length + web.edges.length > INTERACTIVE_MAX_ELEMENTS && (
-              <div style={{ marginTop: 5 }}>
-                Hover-to-isolate is off above{" "}
-                {INTERACTIVE_MAX_ELEMENTS.toLocaleString()} elements — fading
-                this many costs about half a second per hover. Switch a Context
-                layer off to get it back.
+              <div
+                style={{ marginTop: 4 }}
+                title={`Fading every element costs about half a second per hover above ${INTERACTIVE_MAX_ELEMENTS} of them. Switch a Context layer off to get it back.`}
+              >
+                Hover-isolate off above{" "}
+                {INTERACTIVE_MAX_ELEMENTS.toLocaleString()} elements.
               </div>
             )}
           </div>
@@ -819,11 +826,10 @@ export function GraphView() {
             who assumes a considered selection would read "most edges" as
             "most interesting", and those are not the same claim. */}
         {autoSeed && (
-          <p className="graph-note muted">
-            Opened on <b>{autoSeed.label}</b> — the most connected vessel in the
-            graph ({autoSeed.degree} edge{autoSeed.degree === 1 ? "" : "s"}),
-            chosen automatically so the view opens on something. It is the
-            best-connected hull, not the most suspicious one.
+          <p className="graph-note muted"
+             title="Chosen automatically so the view opens on something. The best-connected hull, not the most suspicious one.">
+            Opened on <b>{autoSeed.label}</b> ({autoSeed.degree} edge
+            {autoSeed.degree === 1 ? "" : "s"}).
           </p>
         )}
         {!web && (
@@ -837,9 +843,9 @@ export function GraphView() {
           </button>
         )}
         {loadError && (
-          <p className="graph-note" style={{ color: "var(--red)" }}>
-            The whole network could not be drawn — {loadError}. Nothing is being
-            hidden from you deliberately; this is a fault, not an empty graph.
+          <p className="graph-note" style={{ color: "var(--red)" }}
+             title="This is a fault, not an empty graph — nothing is being hidden deliberately.">
+            Could not draw the network — {loadError}
           </p>
         )}
         {status && <p className="graph-note muted">{status}</p>}

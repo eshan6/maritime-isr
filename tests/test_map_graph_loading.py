@@ -304,3 +304,66 @@ def test_seed_limit_is_bounded():
         pytest.skip("graph not populated")
     assert len(gsvc.best_seeds(1)) <= 1
     assert len(gsvc.best_seeds(10_000)) <= 100
+
+
+# ---- one authority, however many node ids present as it --------------------
+#
+# The graph holds two sanctions-authority nodes that both display as "OFAC":
+# the real one and the stand-in that carries generated designations, which an
+# operator decision relabelled so the demo reads as one system. The graph then
+# drew two identical OFAC diamonds with the designations split between them,
+# which reads as two regulators. The merge is presentation only — the store
+# keeps both ids and both keep their own is_synthetic flag.
+
+def _auth(nid, label, degree, synthetic):
+    return {"id": nid, "node_type": "sanctions_authority", "label": label,
+            "degree": degree, "is_synthetic": synthetic}
+
+
+def test_authorities_sharing_a_label_are_drawn_once():
+    nodes = [_auth("authority:SCENARIO-SDN", "OFAC", 20, True),
+             _auth("authority:OFAC", "OFAC", 5, False)]
+    edges = [{"source": "v:1", "target": "authority:SCENARIO-SDN",
+              "edge_type": "sanctioned-under", "t_start": "2024-01-01"}]
+    out_nodes, out_edges = gsvc.merge_duplicate_authorities(nodes, edges)
+    assert len(out_nodes) == 1
+    # The REAL id survives, so clicking it shows the real regulator's props.
+    assert out_nodes[0]["id"] == "authority:OFAC"
+    # Degree carries across, so the focus pick sees one hub not two halves.
+    assert out_nodes[0]["degree"] == 25
+    # Generated if ANY part was — never the other way round.
+    assert out_nodes[0]["is_synthetic"] is True
+    assert out_edges[0]["target"] == "authority:OFAC"
+
+
+def test_two_designations_onto_the_merged_node_become_one_edge():
+    nodes = [_auth("authority:SCENARIO-SDN", "OFAC", 1, True),
+             _auth("authority:OFAC", "OFAC", 1, False)]
+    edges = [{"source": "v:1", "target": "authority:SCENARIO-SDN",
+              "edge_type": "sanctioned-under", "t_start": "2024-01-01"},
+             {"source": "v:1", "target": "authority:OFAC",
+              "edge_type": "sanctioned-under", "t_start": "2024-01-01"}]
+    _, out_edges = gsvc.merge_duplicate_authorities(nodes, edges)
+    assert len(out_edges) == 1
+
+
+def test_distinct_authorities_are_left_alone():
+    nodes = [_auth("authority:OFAC", "OFAC", 3, False),
+             _auth("authority:UN", "UN", 2, False)]
+    out_nodes, _ = gsvc.merge_duplicate_authorities(nodes, [])
+    assert len(out_nodes) == 2
+
+
+def test_two_vessels_sharing_a_name_are_never_merged():
+    """Merging on label alone would collapse two genuinely different hulls
+    that happen to share a name — the opposite of what this product is for.
+    Only authorities are folded, and only by (type, label)."""
+    nodes = [{"id": "vessel:a", "node_type": "vessel", "label": "SEA STAR",
+              "degree": 2, "is_synthetic": False},
+             {"id": "vessel:b", "node_type": "vessel", "label": "SEA STAR",
+              "degree": 2, "is_synthetic": False},
+             _auth("authority:SCENARIO-SDN", "OFAC", 1, True),
+             _auth("authority:OFAC", "OFAC", 1, False)]
+    out_nodes, _ = gsvc.merge_duplicate_authorities(nodes, [])
+    assert {n["id"] for n in out_nodes} == {
+        "vessel:a", "vessel:b", "authority:OFAC"}

@@ -386,7 +386,12 @@ def test_every_match_row_carries_provenance(tmp_path, monkeypatch):
 
 def test_no_identity_landed_is_a_clear_message(capsys):
     assert sm.run() == 0
-    assert "Run `maritime-isr ingest gfw-vessels` first" in capsys.readouterr().out
+    # The hint names `python -m maritime_isr.cli`, not the `maritime-isr`
+    # console script: that script only exists after a `pip install`, and
+    # naming a command the operator does not have is the defect ADR/PR #36
+    # fixed. This assertion was left behind pointing at the old wording.
+    assert ("Run `python -m maritime_isr.cli ingest gfw-vessels` first"
+            in capsys.readouterr().out)
 
 
 def test_zero_matches_is_reported_as_a_real_result(tmp_path, monkeypatch, capsys):

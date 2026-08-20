@@ -168,6 +168,10 @@ def full_graph(limit: int = FULL_GRAPH_MAX_NODES,
         "is_synthetic": bool(e.is_synthetic),
     } for e in sub["edges"]]
 
+    # One diamond per authority, however many node ids present as it. Done
+    # before the focus pick so a merged hub is weighed as one node.
+    nodes, edges = merge_duplicate_authorities(nodes, edges)
+
     focus, basis = _pick_focus(nodes)
     return {
         "nodes": nodes, "edges": edges,
@@ -342,6 +346,76 @@ def risk_for(vessel_id: str) -> dict | None:
 # neighbourhood
 # --------------------------------------------------------------------------
 
+def merge_duplicate_authorities(nodes: list[dict],
+                                edges: list[dict]) -> tuple[list, list]:
+    """Draw one node per sanctions authority, however many node ids carry it.
+
+    The graph holds two authority nodes that both present as **OFAC**:
+    `authority:OFAC` for the real designations, and `authority:SCENARIO-SDN`
+    for generated ones, which an earlier operator decision relabelled to read
+    as OFAC so the demo reads as one system (see `graph/from_landed.py`). The
+    consequence nobody accounted for is that the graph then draws two identical
+    OFAC diamonds with the designations split arbitrarily between them, which
+    reads as two regulators — a picture that is simply false.
+
+    **This is presentation only.** The store keeps both node ids, both keep
+    their own `is_synthetic` flag, every edge keeps its own, and no split count
+    or real-versus-generated query changes. All that happens is that the view
+    stops drawing one authority twice. Re-separating them is a matter of giving
+    the second node a different display name again, at which point this merges
+    nothing.
+
+    Nodes are grouped by (node_type, label) and only for authorities — merging
+    on label alone would silently collapse two genuinely different vessels that
+    happen to share a name, which is the opposite of what this product is for.
+    """
+    AUTHORITY = "sanctions_authority"
+    auth = [n for n in nodes if n.get("node_type") == AUTHORITY]
+    if len(auth) < 2:
+        return nodes, edges
+
+    # Which id survives is not arbitrary: prefer the one NOT flagged generated,
+    # so clicking the merged node shows the real regulator's properties — its
+    # register, its published reference — rather than the stand-in's. Ties
+    # break on id, so the choice is stable from one request to the next.
+    canon: dict[str, str] = {}
+    winner: dict[tuple, dict] = {}
+    for n in sorted(auth, key=lambda x: (bool(x.get("is_synthetic")), x["id"])):
+        key = (n["node_type"], n.get("label"))
+        keep = winner.setdefault(key, n)
+        canon[n["id"]] = keep["id"]
+        if keep is n:
+            continue
+        # Fold the loser in: carry its degree across so the focus pick sees one
+        # hub rather than two half-hubs, and mark the result generated if ANY
+        # part of it was — never the other way round.
+        if keep.get("degree") is not None and n.get("degree") is not None:
+            keep["degree"] = keep["degree"] + n["degree"]
+        keep["is_synthetic"] = bool(keep.get("is_synthetic")) or \
+            bool(n.get("is_synthetic"))
+
+    if all(k == v for k, v in canon.items()):
+        return nodes, edges
+
+    survivors = {n["id"] for n in winner.values()}
+    kept = [n for n in nodes
+            if n.get("node_type") != AUTHORITY or n["id"] in survivors]
+
+    out_edges: list[dict] = []
+    seen: set[tuple] = set()
+    for e in edges:
+        src = canon.get(e["source"], e["source"])
+        dst = canon.get(e["target"], e["target"])
+        # Two designations that pointed at the two authority ids become one
+        # edge between the same pair; keep the first and drop the duplicate.
+        key = (e["edge_type"], src, dst, e.get("t_start"))
+        if key in seen:
+            continue
+        seen.add(key)
+        out_edges.append({**e, "source": src, "target": dst})
+    return kept, out_edges
+
+
 def _node_label(props: dict, node_id: str) -> str:
     for key in ("name", "code", "port_id", "mmsi", "imo"):
         if props.get(key):
@@ -435,13 +509,15 @@ def neighbourhood(vessel_id: str, hops: int = 1) -> dict | None:
                     if onode and onode["node_type"] in _EXPANDABLE_TYPES:
                         frontier.append((other, depth + 1))
 
+    nodes, edges = merge_duplicate_authorities(
+        list(seen_nodes.values()), list(seen_edges.values()))
     return {
         "seed": vessel_id,
         "hops": hops,
         "truncated": truncated,
         "budget": budget,
-        "nodes": list(seen_nodes.values()),
-        "edges": list(seen_edges.values()),
+        "nodes": nodes,
+        "edges": edges,
     }
 
 
