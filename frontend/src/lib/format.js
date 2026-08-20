@@ -116,9 +116,20 @@ export function nodeTypeColor(t) {
 }
 
 // Node display radius by type — hubs (vessels, orgs) read larger than leaves.
+// Node RADIUS in screen pixels (the renderer doubles it to a diameter and
+// pins that to the screen, so these numbers are what you actually see).
+//
+// Roughly 40% smaller than they were. Symbols and labels are both pinned to
+// the screen now, so the two are directly comparable — and a 30px dot beside
+// an 11px label reads as a button with a caption, not as a labelled node. At
+// 18px the dot and its name carry about the same visual weight, which is what
+// makes a dense network look organised rather than clunky.
+//
+// The RATIOS are unchanged: a company is still bigger than a vessel, context
+// still recedes. Size means importance and nothing else.
 export function nodeTypeSize(t) {
-  return { vessel: 15, organization: 17, person: 15, sanctions_authority: 12,
-    flag_state: 9, port: 9, ais_gap: 9, identity: 6 }[t] || 8;
+  return { vessel: 9, organization: 10, person: 9, sanctions_authority: 8,
+    flag_state: 5.5, port: 5.5, ais_gap: 5.5, identity: 3.5 }[t] || 5;
 }
 
 // Edge colour follows the same families: ownership is the entity-blue that

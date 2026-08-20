@@ -494,7 +494,16 @@ p:last-child { margin-bottom: 0; }
    map advertises the gesture. */
 .graph-canvas { position: absolute; inset: 0; cursor: grab; }
 .graph-canvas:active { cursor: grabbing; }
-.graph-help { position: absolute; top: 12px; left: 12px; z-index: 4; }
+/* The control panel scrolls. It had no height limit, so on a short window the
+ * Context checkboxes and the legend below them ran off the bottom of the
+ * viewport with no way to reach them — controls that exist and cannot be
+ * clicked. Capped to the canvas and given its own scrollbar, the way the map's
+ * layer box already works. `overscroll-behavior` stops a wheel gesture that
+ * reaches the end of the panel from falling through and zooming the graph. */
+.graph-help {
+  position: absolute; top: 12px; left: 12px; z-index: 4;
+  max-height: calc(100% - 24px); overflow-y: auto; overscroll-behavior: contain;
+}
 .graph-note { font-size: var(--fs-meta); color: var(--ink-2); margin-top: 8px;
   line-height: 1.5; }
 .graph-note + .graph-note { margin-top: 6px; }
