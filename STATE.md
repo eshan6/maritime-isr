@@ -2937,3 +2937,96 @@ API still returns real/generated split counts. The UI simply stops printing it.
   real backend on Eshan's machine.**
 - The graph timings will differ on his hardware; the ratio (a 15-second freeze
   becoming a sub-second layout) is what should carry over.
+
+---
+
+## The whole-network graph never drew, and the retry did nothing (2026-08-18, second pass)
+
+Two symptoms Eshan reported — "there's always those two nodes in the top left
+corner" and "'Back to the whole network' isn't working" — with **one root cause
+between them**, plus one control that could never have recovered from it.
+
+### The ReferenceError
+
+`runLayout` is a module-scope function. Two of its fcose options read a bare
+`web`, which is a **component state variable** and is not in scope there:
+
+```js
+quality: web && nodeCount <= 400 ? "default" : "draft",
+randomize: !(web && nodeCount <= 400),
+```
+
+Every call threw `ReferenceError: web is not defined`. It was invisible for two
+reasons worth remembering:
+
+1. **Only the fcose branch evaluates those lines.** `big ? {…fcose…} : {…cose…}`
+   evaluates one object literal, so any graph of ≤ `FCOSE_ABOVE` (250) nodes
+   never touched them. The fixture ownership network is ~160 nodes, so it
+   passed every check that had been run against it. Eshan's corpus clears 250,
+   and his did not.
+2. **Both call paths swallowed it.** `loadWholeWeb` had a `finally` and no
+   `catch`; `expand` caught everything and reported "nothing further to expand
+   there".
+
+### Why that looked like two stray dots
+
+`loadWholeWeb` adds every element to the canvas and *then* lays it out. The
+throw landed in between, so:
+
+- the elements stayed on the canvas at cytoscape's default un-positioned
+  origin — a clump at the top-left corner, which is the "two nodes" that were
+  always there;
+- `setWeb(g)` and `setNodeCount(...)` never ran, so React believed the canvas
+  was empty and drew **"Pick a vessel and seed the graph to begin"** on top of
+  the clump it did not know about.
+
+### Why the button could not recover
+
+`web` stayed null, so "← Back to the whole network" stayed on screen. Its
+entire implementation was `setParams({})` — clearing `?seed=` so the loader
+effect, which depends on `params`, re-runs. But after a failed load **the URL
+is already parameterless**, so `location.search` did not change, the effect
+never re-ran, and the button did nothing however many times it was pressed.
+
+### Fixes
+
+- `runLayout(cy, nodeCount, { isWeb })` — the flag is a parameter, threaded
+  from the two whole-network call sites. `SPECTRAL_MAX_NODES` (400) is now a
+  named constant next to `FCOSE_ABOVE`.
+- `loadWholeWeb` **catches**: it clears the half-built canvas, records the
+  error, and the panel says the network could not be drawn and offers a retry.
+  A view that reports its own failure is debuggable; one that draws two dots
+  is not.
+- `expand` distinguishes "the fetch found nothing" from "we threw after adding
+  elements", and no longer reports the second as the first.
+- The button calls `loadWholeWeb()` directly when there is nothing in the URL
+  to clear, and reads "↻ Retry the whole network" after a failure.
+- The empty state has three messages now — failed, no ownership edges, nothing
+  asked for — because they mean different things.
+
+**Measured after the fix, in Chromium against the stub API:** 350 nodes (the
+spectral path, which had never once executed without throwing) draws in
+**1.1 s**; 1,500 nodes (the draft path) in **2.3 s**; the retry button restores
+the network from a failed parameterless load.
+
+### Found while verifying
+
+MapLibre was rejecting the radar coverage ring outright —
+`layers.radar-coverage-line.paint.line-dasharray: data expressions not
+supported` — and dropping the property, so **both rings drew solid**. The
+dashed outer ring is the entire point of drawing two: solid is the station's
+reach for a small craft, dashed for a large ship, and the band between them is
+"big ships only". Drawn solid, the picture promised skiff coverage out to the
+tanker horizon, which is the exact misreading the two-ring design exists to
+prevent. Split into one filtered layer per band.
+
+### Status
+
+- 🟡 **Sandbox-green.** Verified in a real headless Chromium against a stub API
+  at 200, 350 and 1,500 nodes, including the failure-and-retry path. **Not run
+  against the real backend.** The radar-ring fix removes the console error but
+  the dashes themselves were not eyeballed — the basemap tiles do not load in
+  this sandbox.
+- ⬜ **The lesson worth keeping:** the fixture graph is smaller than the real
+  one, and a `?:` only evaluates one branch. A code path the fixture cannot
+  reach is a code path nothing has ever run.

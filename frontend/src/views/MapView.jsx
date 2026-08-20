@@ -922,17 +922,36 @@ function upsertRingLayer(m, id, feats, on) {
         "fill-opacity": ["case", ["==", ["get", "band"], "small"], 0.07, 0.035],
       },
     }, under);
-    m.addLayer({
-      id: id + "-line", type: "line", source: id,
-      paint: {
-        "line-color": "#0b6e75",
-        "line-width": 0.9,
-        "line-opacity": ["case", ["==", ["get", "band"], "small"], 0.55, 0.35],
-        "line-dasharray": ["case", ["==", ["get", "band"], "small"], ["literal", [1, 0]], ["literal", [3, 2]]],
-      },
-    }, under);
+    // **Two line layers, one per band, because `line-dasharray` cannot be a
+    // data expression.** MapLibre rejects one outright —
+    // "layers.…-line.paint.line-dasharray: data expressions not supported" —
+    // and drops the property, so both rings drew SOLID. The dashed outer ring
+    // is the whole point of drawing two: solid is what the station holds for a
+    // small craft, dashed is what it holds for a large one, and the gap
+    // between them is "big ships only". Losing the dash silently promised
+    // skiff coverage out to the tanker horizon, which is exactly the
+    // misreading the two-ring design exists to prevent.
+    //
+    // `line-opacity` was expression-driven in the same rule and IS supported,
+    // but it moves here too: one filtered layer per band is the shape that
+    // holds for every property rather than only some of them.
+    for (const [band, dash, opacity] of [
+      ["small", null, 0.55],
+      ["large", [3, 2], 0.35],
+    ]) {
+      m.addLayer({
+        id: `${id}-line-${band}`, type: "line", source: id,
+        filter: ["==", ["get", "band"], band],
+        paint: {
+          "line-color": "#0b6e75",
+          "line-width": 0.9,
+          "line-opacity": opacity,
+          ...(dash ? { "line-dasharray": dash } : {}),
+        },
+      }, under);
+    }
   }
-  for (const suff of ["-fill", "-line"]) {
+  for (const suff of ["-fill", "-line-small", "-line-large"]) {
     if (m.getLayer(id + suff))
       m.setLayoutProperty(id + suff, "visibility", on ? "visible" : "none");
   }

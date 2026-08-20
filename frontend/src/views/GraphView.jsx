@@ -128,6 +128,10 @@ export function GraphView() {
   // letting an operator believe they are looking at a considered selection.
   const [autoSeed, setAutoSeed] = useState(null);
   const [autoSeedFailed, setAutoSeedFailed] = useState(false);
+  // Why the whole-network view is not on screen, when the reason is a failure
+  // rather than a choice. "Nothing loaded" and "you have not picked anything"
+  // look identical on an empty canvas and mean opposite things.
+  const [loadError, setLoadError] = useState(null);
   // The whole-web payload, kept so the panel can state what is on screen and
   // — when the graph is larger than the cap — what is not.
   const [web, setWeb] = useState(null);
@@ -152,6 +156,24 @@ export function GraphView() {
     // do nothing while a single hull is on screen.
     p.delete("seed");
     setParams(p);
+  }
+
+  // "Back to the whole network", and the retry it becomes when the load failed.
+  //
+  // Clearing `?seed=` is what normally triggers the reload, because the loader
+  // effect depends on `params`. But when the URL is ALREADY parameterless —
+  // which is exactly the state you are left in after a failed load — writing
+  // the same empty search back changes nothing, the effect never re-runs, and
+  // the button does nothing at all however many times it is pressed. That is
+  // the "Back to the whole network isn't working" that was reported: not a
+  // wiring mistake, a control whose only mechanism was a change that had
+  // nothing to change.
+  function backToWholeNetwork() {
+    if ([...params.keys()].length === 0) {
+      loadWholeWeb();
+      return;
+    }
+    setParams({});
   }
 
   useEffect(() => {
@@ -291,9 +313,9 @@ export function GraphView() {
     }
   }, [applyScreenScale]);
 
-  const settleLayout = useCallback((cy, nodeCount, frame) => {
+  const settleLayout = useCallback((cy, nodeCount, frame, opts) => {
     for (let pass = 0; pass < 2; pass++) {
-      runLayout(cy, nodeCount);
+      runLayout(cy, nodeCount, opts);
       settleCamera(cy, frame);
     }
   }, [applyScreenScale, settleCamera]);
@@ -503,6 +525,7 @@ export function GraphView() {
   async function loadWholeWeb(stillLive = () => true) {
     const myRun = ++runRef.current;
     const current = () => runRef.current === myRun && stillLive();
+    setLoadError(null);
     setStatus("loading the whole network…");
     let g;
     try {
@@ -577,7 +600,7 @@ export function GraphView() {
       // — the panel's claim is "here is the ownership network", and the camera
       // should agree with the sentence.
       if (!node.length) {
-        settleLayout(cy, g.nodes.length, () => fitView(cy));
+        settleLayout(cy, g.nodes.length, () => fitView(cy), { isWeb: true });
       } else {
         // **Open framed on a cluster, not fitted to everything.**
         //
@@ -606,10 +629,29 @@ export function GraphView() {
                       renderedPosition: { x: cy.width() / 2, y: cy.height() / 2 } });
             cy.center(nbr);
           }
-        });
+        }, { isWeb: true });
       }
       setNodeCount(cy.nodes().length);
       setWeb(g);
+    } catch (e) {
+      // **A half-built canvas is worse than an empty one.** The elements are
+      // added before the layout runs, so anything that throws in between —
+      // a layout bug, a malformed payload — used to leave every node sitting
+      // un-positioned at the model origin while React, whose state was never
+      // updated, printed "pick a vessel" over the top. What the operator saw
+      // was a couple of stray dots in the top-left corner that no control
+      // could clear, and no indication anything had gone wrong.
+      //
+      // So: clear what was half-drawn, and SAY the load failed. A view that
+      // reports its own failure is debuggable; one that quietly draws two
+      // dots is not.
+      console.error("whole-network load failed", e);
+      if (runRef.current === myRun) {
+        if (cy && !cy.destroyed()) cy.elements().remove();
+        setNodeCount(0);
+        setWeb(null);
+        setLoadError(String(e?.message || e));
+      }
     } finally {
       if (runRef.current === myRun) {
         setBusy("");
@@ -622,6 +664,12 @@ export function GraphView() {
     if (expandedRef.current.has(nodeId)) return;
     const myRun = ++runRef.current;
     setStatus("expanding…");
+    // Whether anything reached the canvas before a throw. Everything below the
+    // fetch is local work, so a failure after this point is a fault in our
+    // code, not a hull with nothing attached to it — and reporting it as the
+    // latter is how the same layout crash stayed invisible on this path while
+    // it was leaving stray nodes on the other.
+    let added = false;
     try {
       const nb = await api.neighbourhood(nodeId, hops);
       const cy = cyRef.current;
@@ -639,14 +687,35 @@ export function GraphView() {
         add.push(edgeElement(e, { showLabel: true }));
       }
       cy.add(add);
+      added = true;
       runLayout(cy, cy.nodes().length);
       if (isSeed) cy.getElementById(nodeId).addClass("seed");
       fitView(cy);
       syncScreenScale(cy);
       setNodeCount(cy.nodes().length);
       setStatus(nb.truncated ? "traversal budget reached — partial neighbourhood shown" : "");
-    } catch {
-      if (runRef.current === myRun) setStatus("nothing further to expand there");
+    } catch (e) {
+      if (runRef.current !== myRun) return;
+      if (!added) {
+        setStatus("nothing further to expand there");
+        return;
+      }
+      console.error("expansion failed after adding elements", e);
+      const cy = cyRef.current;
+      // Same rule as the whole-network path: never leave un-positioned nodes
+      // on the canvas. A seed owns the canvas, so it can be cleared outright;
+      // an expansion is additive, so re-fit what is there and report the fault
+      // rather than throwing away a graph the operator built up by hand.
+      if (cy && !cy.destroyed()) {
+        if (isSeed) {
+          cy.elements().remove();
+          setNodeCount(0);
+        } else {
+          fitView(cy);
+          setNodeCount(cy.nodes().length);
+        }
+      }
+      setStatus(`could not draw that neighbourhood — ${e?.message || e}`);
     }
   }
 
@@ -762,10 +831,16 @@ export function GraphView() {
             className="btn btn-sm"
             style={{ marginTop: 8, width: "100%" }}
             disabled={!!busy}
-            onClick={() => { setParams({}); }}
+            onClick={backToWholeNetwork}
           >
-            ← Back to the whole network
+            {loadError ? "↻ Retry the whole network" : "← Back to the whole network"}
           </button>
+        )}
+        {loadError && (
+          <p className="graph-note" style={{ color: "var(--red)" }}>
+            The whole network could not be drawn — {loadError}. Nothing is being
+            hidden from you deliberately; this is a fault, not an empty graph.
+          </p>
         )}
         {status && <p className="graph-note muted">{status}</p>}
         {/* Legend grouped by family, so the colour system explains itself. */}
@@ -835,7 +910,13 @@ export function GraphView() {
           the second is a prompt. */}
       {nodeCount === 0 && !status && !busy && (
         <div className="empty" style={{ position: "absolute", top: "45%", left: 0, right: 0 }}>
-          {autoSeedFailed
+          {/* Three kinds of empty, and they mean different things: the draw
+              failed, the corpus has no ownership edges, or you have not asked
+              for anything yet. Collapsing the first into the third is how a
+              fault spent a release looking like a prompt. */}
+          {loadError
+            ? "The whole network could not be drawn. Use the retry in the panel."
+            : autoSeedFailed
             ? "No ownership edges in the graph yet. Populate the graph, or pick "
               + "a vessel to check one hull directly."
             : "Pick a vessel and seed the graph to begin."}
@@ -1079,6 +1160,13 @@ function markWebLabels(cy, focusId, hubCount = null) {
 //: there is nothing to gain from changing what already works.
 const FCOSE_ABOVE = 250;
 
+//: Up to this many nodes the whole-network view can afford fcose's SPECTRAL
+//: seeding, which lays a mostly-disconnected ownership forest out far better
+//: than draft mode does (measured on the ownership network: 15 overlapping
+//: label pairs against draft's 274). Above it, spectral seeding is the
+//: superlinear cost that froze the tab for 14 seconds — see `withSeededRandom`.
+const SPECTRAL_MAX_NODES = 400;
+
 //: A deterministic pseudo-random source, installed over `Math.random` for the
 //: duration of one layout run.
 //:
@@ -1114,7 +1202,13 @@ function withSeededRandom(fn) {
   }
 }
 
-function runLayout(cy, nodeCount = 0) {
+// `isWeb` says whether this is the whole-network view rather than a seeded
+// neighbourhood. It is a PARAMETER and not a closure over component state:
+// this function lives at module scope, and the earlier version read a `web`
+// state variable that does not exist here. Every call with more than
+// FCOSE_ABOVE nodes threw `ReferenceError: web is not defined` — see the note
+// on `quality` below for what that broke.
+function runLayout(cy, nodeCount = 0, { isWeb = false } = {}) {
   // Un-animated on purpose: an animating force simulation keeps nudging nodes
   // for seconds after a click and reads as a glitch. Both layouts settle
   // deterministically, so the same graph always looks the same — a web that
@@ -1134,6 +1228,11 @@ function runLayout(cy, nodeCount = 0) {
   // nodes touching, measured at 64 overlapping label pairs against cose's 9.
   // Rows are not elegant; a blob is not readable.
   const big = nodeCount > FCOSE_ABOVE;
+  // Spectral seeding is affordable on a few hundred nodes and worth a lot
+  // there; above that it is the 14-second freeze `withSeededRandom` exists to
+  // avoid. Only the whole-network view qualifies — a seeded neighbourhood
+  // never reaches the fcose branch at all.
+  const spectral = isWeb && nodeCount <= SPECTRAL_MAX_NODES;
   // Diameters before positions: the layout reads node sizes when it separates
   // them, so shrinking after it ran would leave the spacing of the larger dots.
   const scale = applyDensityScale(cy);
@@ -1149,8 +1248,17 @@ function runLayout(cy, nodeCount = 0) {
     // scattered positions and, on a graph that is mostly small disconnected
     // stars, never fully recovers. The size threshold is what keeps this from
     // being a promise about the 29,000-node real graph.
-    quality: web && nodeCount <= 400 ? "default" : "draft",
-    randomize: !(web && nodeCount <= 400),
+    //
+    // These two lines read a `web` that is not in scope here, and the object
+    // literal is only evaluated on the fcose branch — so the bug was invisible
+    // on any graph of 250 nodes or fewer and threw on every graph above it.
+    // On a corpus whose ownership network clears that bar, the whole-network
+    // view added its elements, threw before laying them out, and left them
+    // stacked at the origin: the "two nodes in the top-left corner" that were
+    // always there, under a "Pick a vessel and seed the graph to begin"
+    // message, because the state that would have said otherwise was never set.
+    quality: spectral ? "default" : "draft",
+    randomize: !spectral,
     padding: 50,
     // Measure label boxes when there are few enough to be worth measuring.
     // Only a minority of nodes carry a label here (see `markWebLabels`), and
