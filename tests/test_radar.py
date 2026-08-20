@@ -751,3 +751,69 @@ def test_epoch_reads_a_naive_timestamp_as_utc():
     assert _epoch(pd.Timestamp("2026-06-25 12:36", tz="UTC")) == want
     assert _epoch("2026-06-25T12:36:00Z") == want
     assert _epoch(None) == 0
+
+
+# ==========================================================================
+# 9. the pipeline lands the correlation it computed
+# ==========================================================================
+
+def test_landing_the_correlation_is_what_makes_radar_visible(tmp_path, monkeypatch):
+    """The Radar view reads landed tables, not a terminal.
+
+    Correlating takes minutes over thousands of epochs, so no request can do it
+    on demand — the result has to be on disk like every other derived product.
+    This drives that whole path: correlate, land, then ask the API the question
+    the view asks.
+    """
+    from maritime_isr.api import service
+    from maritime_isr.config import cfg
+    from maritime_isr.fusion.radar_ais import land_correlation
+    from maritime_isr.ingest.landing import SYNTHETIC_SOURCE_ID
+
+    monkeypatch.setattr(cfg, "data_root", tmp_path)
+
+    rad, _ = build_tracks(_radar_rows("SYN-POR:0001", n=40), source=RADAR)
+    other = _ais_rows(999000002, n=40, lat0=21.70, lon0=69.50)
+    ais, _ = build_tracks(other, source=AIS)
+    out = correlate_radar(rad, ais, _cov(other), {})
+    assert [v for v in out.verdicts if v["status"] == "dark_candidate"], (
+        "fixture produced no dark contact; nothing to land")
+
+    # Empty before, so the assertion after cannot pass on stale data.
+    assert service.list_radar_contacts()["items"] == []
+
+    landed = land_correlation(out, source_id=SYNTHETIC_SOURCE_ID,
+                              is_synthetic=True)
+    assert sum(landed.values()) > 0, landed
+
+    served = service.list_radar_contacts()
+    assert served["items"], (
+        "the correlation landed but the Radar view still sees nothing")
+    assert not served.get("note"), served.get("note")
+    assert all(r["is_synthetic"] for r in served["items"])
+
+
+def test_the_pipeline_lands_its_radar_stage_rather_than_printing_it():
+    """A grep-shaped guard, because the omission was grep-shaped.
+
+    `run_radar_stage` computed the correlation, printed the numbers and threw
+    the object away. Every other stage lands its output, so nothing looked
+    wrong: the stage reported real figures and read as complete, while the
+    Radar view stayed empty after a full successful run. An operator followed
+    the documented sequence, got an empty tab, and reasonably concluded the
+    feature was broken.
+
+    Asserting on the source is weak, and it is the right weakness here — the
+    alternative is running a multi-minute pipeline over a full corpus inside
+    the unit suite. What it catches is exactly what happened: the call going
+    missing again.
+    """
+    import pathlib
+
+    src = (pathlib.Path(__file__).resolve().parent.parent
+           / "tools" / "run_scenario_pipeline.py").read_text(encoding="utf-8")
+    stage = src.split("def run_radar_stage")[1].split("\ndef ")[0]
+    assert "land_correlation(" in stage, (
+        "run_radar_stage computes the correlation but never lands it — the "
+        "Radar view reads the landed table and will be empty after a full "
+        "pipeline run")
