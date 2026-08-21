@@ -8,7 +8,15 @@ session. `CLAUDE.md`, `ARCHITECTURE.md`, `DECISIONS.md` are stable contracts;
 > between status buckets, record what was verified vs assumed, log anything now
 > broken, and set "Next up." If you don't update it, the next session starts blind.
 
-**Last updated:** 2026-08-16 (third session) — **Build 2: the maritime zone
+**Last updated:** 2026-08-21 — **the timeline player ran and nothing on the map
+moved.** The scrubber was playing the *corpus* window (2012→2026, on a thin tail
+of real GFW records) when only the *AIS* window (the eight-week narrative, 52
+days) can move a vessel: 99% of the bar covered days with no positions, one
+playthrough took ten hours, and the default playhead sat past the last position
+so the map opened empty. Both spans are now served, the scrubber plays the one
+that can move, and it says which. See the section at the end of this file.
+
+Prior entry: 2026-08-16 (third session) — **Build 2: the maritime zone
 layer** (ADR-030). The system understood four hardcoded circles; it now holds a
 provenance-carrying geography layer that is queryable rather than merely
 drawable, with zone entry/exit as first-class events, operator-drawn geofences
@@ -3114,3 +3122,122 @@ wording. Updated. Full suite: 663 passed, 33 skipped, 0 failed.
   161-node ownership network. **Still not Eshan's corpus.**
 - The `merge_duplicate_authorities` behaviour is unit-tested and does not
   depend on a populated graph.
+
+## The timeline player ran and nothing on the map moved (2026-08-21)
+
+Reported by Eshan, in those words: *"when i run the timeline player, nothing
+happens. nothing moves on the map. everything on the map stays the same."*
+
+Correct report, and the play button was innocent — the clock really was
+advancing. **The scrubber was scrubbing the wrong window.**
+
+### Two windows, treated as one
+
+`/corpus-window` returned the **corpus** span: the union of the four GFW event
+tables and `ais_position`. But the scrubber's only job is to interpolate AIS
+tracks to a clock, so the only days it can move anything on are the days that
+have positions. On the laptop corpus those are not the same span at all:
+
+| | span | days |
+|---|---|---|
+| corpus window (what the scrubber played) | 2012-01-04 → 2026-07-25 | 5,317 |
+| AIS positions (what can actually move) | 2026-06-04 → 2026-07-25 | 52 |
+
+The 2012 start is a thin tail of real GFW identity and loitering records —
+`scenario/world.py` documents it — while the eight-week narrative sits at the
+dense end. So **99.04% of the scrubber covered years holding no positions**, and
+the consequences compounded:
+
+* At `SECONDS_PER_DAY = 7`, one playthrough of 5,317 days takes **10.3 hours**.
+  Press play and the clock leaves 2012 at 8.6 corpus-days per minute; the first
+  vessel would appear after about ten hours of watching.
+* The whole motion band is 0.96% of the bar — **9.6 of the slider's 1,000
+  steps**. Nearly every drag lands in an empty year.
+* The playhead defaulted to `t = 1`, the window's end, which on this corpus is
+  53 minutes past the last AIS position. **The map opened with zero vessels
+  drawn**, and the status line said "200 vessels on AIS" while showing none.
+
+A scenario-only corpus has no 2012 tail, so its two windows coincide and the
+player worked perfectly in every sandbox it had ever been run in. That is why
+this survived to the demo.
+
+### The fix
+
+**Server** — `/corpus-window` now returns four timestamps, not two:
+`start`/`end` (the corpus) and `motion_start`/`motion_end` (the `ais_position`
+extent), plus a `note` naming both spans whenever they differ. `/stats` and the
+incident report are untouched: they still get the corpus window, which is what
+they mean. The two agree on the keys they share, which the test now asserts as a
+subset rather than as equality.
+
+**Client** — the scrubber plays `motion_*` and falls back to the corpus window
+only when no positions are landed at all (the real-feed case, ADR-005). It says
+so: the server's note renders in the notes bar, and the status line carries an
+"· AIS window" suffix whenever it is playing less than the whole corpus. A time
+control silently covering a different span from the map under it is precisely
+the kind of quiet mismatch CLAUDE.md §4 exists to forbid.
+
+**The playhead parks where the fleet is.** Defaulting to the end of the window
+put the clock on the one instant guaranteed to be nearly empty — a vessel is
+drawn only while the clock sits inside her own track, and by then almost every
+track has finished. It now lands on the busiest instant (max simultaneous
+tracks, one sweep over the span endpoints), and stays out of the way the moment
+the operator touches the scrubber or presses play. On the reproduction corpus
+that is 0 vessels on arrival before, **97 after**.
+
+**Playback is capped end to end** at `MAX_PLAYTHROUGH_S = 120`. Seconds-per-day
+is the right pace for a window of weeks and an absurd one for a window of years;
+the cap is what keeps the no-AIS fallback watchable instead of a ten-hour
+progress bar.
+
+**The status line counts what is on screen**, `N of M vessels moving`, not the
+corpus total. The old text could read "200 vessels on AIS" over an empty map —
+it did, in the screenshot of the bug.
+
+### Verified
+
+Reproduced and fixed **in Chromium against a live uvicorn backend**, on a corpus
+deliberately shaped like Eshan's: `scenario generate` here, plus a three-row
+non-synthetic 2012 partition written into `gfw_loitering` to recreate the real
+GFW tail. The check counts vessel-coloured pixels in the MapLibre canvas across
+a playback, because a canvas hash also catches repaint jitter.
+
+| | before | after |
+|---|---|---|
+| clock advances | yes | yes |
+| vessel dots on arrival | 0 | 97 of 200 |
+| **vessel positions change while playing** | **no** | **yes** |
+| clock reaches after 12 s of play | 2012-01-06 | 2026-06-30 |
+
+Before-state screenshot: playing, slider pinned at the far left, clock at
+2012-01-06, "200 vessels on AIS", and not one blue dot on the map — Eshan's
+report exactly.
+
+Full suite: **662 passed, 37 skipped, 2 failed**. Both failures reproduce
+identically on the base commit (checked in a worktree at `9861df1`) and are
+artefacts of *this* sandbox, not of the change:
+
+* `test_api_exercise.py::test_ports_non_empty_and_split` — the gazetteer is
+  empty here because only `scenario generate` was run, not the full
+  `tools/run_scenario_pipeline.py` that lands ports.
+* `test_sanctions_match.py::test_no_identity_landed_is_a_clear_message` —
+  **a brittle test, worth fixing separately.** It hard-codes the
+  `python -m maritime_isr.cli` spelling of a hint that `config.CLI` resolves
+  *per machine* (short form when the console script is on PATH, `python -m`
+  when it is not — see `_cli_command`). A `pip install -e .` here put the
+  script on PATH, so `CLI` is `maritime-isr` and the assertion misses. It will
+  fail for anyone who pip-installs the package, which is the documented install
+  path; it should assert against `config.CLI` rather than one of its branches.
+  Left alone: out of scope for this fix.
+
+### Status
+
+- 🟡 **Verified against a real backend in a real browser, on a corpus shaped
+  like the laptop's — but still not the laptop.** The 2012 tail here is three
+  rows synthesised to match `data_profiles/real_corpus_profile.json`; the real
+  one is a handful of genuine GFW records. The shape is what matters and the
+  shape is reproduced, but the exit test is Eshan pressing play on his own
+  corpus and seeing ships move.
+- The `motion_start`/`motion_end` and note behaviour is unit-tested, including
+  the laptop-corpus numbers and the no-AIS-at-all branch, neither of which the
+  sandbox corpus can reach on its own.

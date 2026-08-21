@@ -642,3 +642,59 @@ maritime-isr zones status
 python -m pytest -q tests/test_zones.py       # 35 passed
 python tools/run_scenario_pipeline.py         # stages 3c and 7b
 ```
+
+---
+
+## fix: the timeline player played 14 years of a window in which nothing could move
+
+Reported from the laptop: *"when i run the timeline player, nothing happens.
+nothing moves on the map."* The play button was innocent — the clock really was
+advancing. The scrubber was scrubbing the wrong window.
+
+```
+git add maritime_isr/api/ frontend/src frontend/dist \
+        tests/test_map_graph_loading.py STATE.md COMMITS.md
+git commit -m "fix: the timeline player played 14 years of a window in which nothing could move"
+```
+
+**Two windows, treated as one.** `/corpus-window` returned the union of the
+event tables and `ais_position`. The scrubber's only job is to interpolate AIS
+tracks to a clock, so the only days it can move anything on are days with
+positions — and on the laptop corpus those are 52 of 5,317. The 2012 start is a
+thin tail of real GFW identity and loitering records; the eight-week narrative
+sits at the dense end. So 99.04% of the bar covered years with nothing in them,
+one playthrough at 7 s/day took **10.3 hours**, the whole motion band was 9.6 of
+the slider's 1,000 steps, and the playhead defaulted to `t = 1` — 53 minutes
+past the last position, so the map opened with **zero** vessels while the status
+line read "200 vessels on AIS".
+
+A scenario-only corpus has no 2012 tail, so both windows coincide and the player
+worked in every sandbox it had ever run in. That is why it survived to the demo.
+
+`/corpus-window` now returns `motion_start`/`motion_end` alongside `start`/`end`,
+plus a `note` naming both spans when they differ. `/stats` and the incident
+report still get the corpus window, which is what they mean. The client plays
+the motion window, falls back to the corpus window only when no positions are
+landed (ADR-005), and discloses the difference in the notes bar and in the
+status line. The playhead parks on the busiest instant instead of the end;
+playback is capped at 120 s end to end; the status line counts vessels **on
+screen**, not in the corpus.
+
+Verify — the browser half is the half that matters:
+
+```
+python -m pytest tests/test_map_graph_loading.py -q     # 17 passed
+python -m pytest -q       # 662 passed, 37 skipped, 2 pre-existing failures
+python -m maritime_isr.api      # open /, wait for the map, press play
+```
+
+Both failures reproduce on the base commit and belong to this sandbox, not to
+the change: no ports landed (`scenario generate` was run without
+`run_scenario_pipeline.py`), and a sanctions-hint assertion that hard-codes one
+branch of `config.CLI` and so fails wherever the console script is on PATH.
+
+*Success:* the map opens with the fleet already drawn and a mid-window clock,
+and pressing play slides ships across the Arabian Sea while the counter moves.
+The notes bar admits it when the corpus reaches back further than the AIS does.
+*Failure:* a blank white page means a stale `dist/` — rebuild with
+`npm run build` in `frontend/`.
