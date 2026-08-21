@@ -3213,6 +3213,23 @@ Before-state screenshot: playing, slider pinned at the far left, clock at
 2012-01-06, "200 vessels on AIS", and not one blue dot on the map — Eshan's
 report exactly.
 
+Full suite: **662 passed, 37 skipped, 2 failed**. Both failures reproduce
+identically on the base commit (checked in a worktree at `9861df1`) and are
+artefacts of *this* sandbox, not of the change:
+
+* `test_api_exercise.py::test_ports_non_empty_and_split` — the gazetteer is
+  empty here because only `scenario generate` was run, not the full
+  `tools/run_scenario_pipeline.py` that lands ports.
+* `test_sanctions_match.py::test_no_identity_landed_is_a_clear_message` —
+  **a brittle test, worth fixing separately.** It hard-codes the
+  `python -m maritime_isr.cli` spelling of a hint that `config.CLI` resolves
+  *per machine* (short form when the console script is on PATH, `python -m`
+  when it is not — see `_cli_command`). A `pip install -e .` here put the
+  script on PATH, so `CLI` is `maritime-isr` and the assertion misses. It will
+  fail for anyone who pip-installs the package, which is the documented install
+  path; it should assert against `config.CLI` rather than one of its branches.
+  Left alone: out of scope for this fix.
+
 ### Status
 
 - 🟡 **Verified against a real backend in a real browser, on a corpus shaped

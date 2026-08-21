@@ -683,9 +683,15 @@ screen**, not in the corpus.
 Verify — the browser half is the half that matters:
 
 ```
-python -m pytest tests/test_map_graph_loading.py -q
+python -m pytest tests/test_map_graph_loading.py -q     # 17 passed
+python -m pytest -q       # 662 passed, 37 skipped, 2 pre-existing failures
 python -m maritime_isr.api      # open /, wait for the map, press play
 ```
+
+Both failures reproduce on the base commit and belong to this sandbox, not to
+the change: no ports landed (`scenario generate` was run without
+`run_scenario_pipeline.py`), and a sanctions-hint assertion that hard-codes one
+branch of `config.CLI` and so fails wherever the console script is on PATH.
 
 *Success:* the map opens with the fleet already drawn and a mid-window clock,
 and pressing play slides ships across the Arabian Sea while the counter moves.
