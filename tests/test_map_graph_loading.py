@@ -14,29 +14,121 @@ than whether it exists:
    thousands, and most picks land on a lone node because GFW registry ownership
    covers ~1.3% of hulls here.
 
-These tests cover the server halves: a cheap dedicated window endpoint, and a
-seed list ranked by degree. The client halves — request ordering, the session
-cache, and the scrubber staying mounted while disabled — were verified in a
-real browser and are not reachable from pytest.
+3. **The player ran and nothing on the map moved.** The scrubber took its span
+   from the corpus window — the union of the event tables and the positions —
+   but a vessel can only be animated where there are AIS positions to
+   interpolate. On the laptop corpus the real GFW tables tail back to 2012 while
+   every position sits in the eight-week narrative at the far end, so 99% of the
+   bar covered days on which nothing could move, and the default playhead (the
+   window's end) sat past the last position entirely.
+
+These tests cover the server halves: a cheap dedicated window endpoint that
+reports the animatable span separately, and a seed list ranked by degree. The
+client halves — request ordering, the session cache, the scrubber staying
+mounted while disabled, and where the playhead parks — were verified in a real
+browser and are not reachable from pytest.
 """
 from __future__ import annotations
+
+from datetime import datetime
 
 import pytest
 
 from maritime_isr.api import graph_service as gsvc, service
 
 
-def test_corpus_window_returns_the_span_alone():
+def test_corpus_window_returns_the_spans_alone():
     w = service.get_corpus_window()
-    assert set(w) == {"start", "end"}
+    assert set(w) == {"start", "end", "motion_start", "motion_end", "note"}
 
 
 def test_corpus_window_agrees_with_the_one_stats_reports():
     """Two endpoints, one fact. If they drift, the scrubber and the dashboard
-    would disagree about what window the operator is looking at."""
-    if not service.get_corpus_window()["start"]:
+    would disagree about what window the operator is looking at.
+
+    Only the corpus span is shared — `/stats` has no opinion about where the AIS
+    positions sit, which is the extra thing the scrubber needs.
+    """
+    w = service.get_corpus_window()
+    if not w["start"]:
         pytest.skip("no corpus landed")
-    assert service.get_corpus_window() == service.get_stats()["corpus_window"]
+    stats = service.get_stats()["corpus_window"]
+    assert {k: w[k] for k in stats} == stats
+
+
+def test_motion_window_is_the_ais_extent_not_the_corpus_extent():
+    """The scrubber's window must come from `ais_position`, because that is the
+    only table it can move a vessel with.
+
+    The bug this pins: the corpus window is the union of the event tables and
+    the positions, and on the laptop corpus the real GFW tail reaches back to
+    2012 while every position sits in the eight-week narrative. Scrubbing the
+    union spent 99% of the bar on days holding nothing that can move — the clock
+    advanced and the map never changed.
+    """
+    w = service.get_corpus_window()
+    if not w["motion_start"]:
+        pytest.skip("no AIS positions landed")
+    tracks = service.list_tracks(max_points=10_000)["items"]
+    if not tracks:
+        pytest.skip("no tracks to compare against")
+    first = min(tr["points"][0][2] for tr in tracks)
+    last = max(tr["points"][-1][2] for tr in tracks)
+    lo = datetime.fromisoformat(w["motion_start"]).timestamp()
+    hi = datetime.fromisoformat(w["motion_end"]).timestamp()
+    # Tracks are decimated, so they can only sit INSIDE the window the endpoint
+    # reports; what must not happen is a track falling outside it. The second of
+    # slack is `list_tracks` truncating each timestamp to a whole second.
+    assert lo - first <= 1 and last - hi <= 1, (
+        f"tracks span {first}..{last}, outside the reported motion window "
+        f"{lo}..{hi} — vessels would vanish at those clock positions")
+    # And the window must be tight around the positions rather than the corpus:
+    # a day of slack either side is decimation, a year is the old bug.
+    assert (first - lo) < 86400 and (hi - last) < 86400
+
+
+def test_corpus_window_says_so_when_it_plays_less_than_the_whole_corpus():
+    """A control covering a different span from the map under it has to say so
+    (CLAUDE.md §4: nothing asserted silently)."""
+    w = service.get_corpus_window()
+    if not w["start"] or not w["motion_start"]:
+        pytest.skip("no corpus landed")
+    corpus = (datetime.fromisoformat(w["end"])
+              - datetime.fromisoformat(w["start"])).total_seconds()
+    motion = (datetime.fromisoformat(w["motion_end"])
+              - datetime.fromisoformat(w["motion_start"])).total_seconds()
+    if corpus - motion < 86400:
+        assert w["note"] is None      # nothing is being withheld
+    else:
+        assert w["note"] and w["start"][:10] in w["note"]
+
+
+def test_the_note_names_both_spans_on_a_laptop_corpus():
+    """The branch the sandbox corpus cannot reach.
+
+    A scenario-only corpus has no real GFW tail, so its two windows coincide and
+    the disclosure is correctly silent. These are the operator's real numbers
+    (`data_profiles/real_corpus_profile.json`): a 5,317-day corpus carrying 52
+    days of positions. The sentence has to name both.
+    """
+    note = service._window_note(
+        {"start": "2012-01-04T06:18:14+00:00", "end": "2026-07-25T22:53:53+00:00"},
+        {"motion_start": "2026-06-04T00:00:00+00:00",
+         "motion_end": "2026-07-25T22:00:00+00:00"},
+    )
+    assert note is not None
+    assert "2026-06-04" in note and "2012-01-04" in note
+    assert "52 days" in note and "5317 days" in note
+
+
+def test_the_note_says_it_plainly_when_there_is_no_ais_at_all():
+    """The real-feed case (ADR-005): no free AIS, so nothing can ever move. The
+    scrubber must not read as broken when it is merely empty."""
+    note = service._window_note(
+        {"start": "2012-01-04T06:18:14+00:00", "end": "2026-07-25T22:53:53+00:00"},
+        {"motion_start": None, "motion_end": None},
+    )
+    assert note and "no AIS positions" in note
 
 
 def test_corpus_window_is_cheaper_than_the_full_stats_sweep():

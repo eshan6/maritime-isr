@@ -905,13 +905,75 @@ def _corpus_window_only() -> dict:
 
 
 def get_corpus_window() -> dict:
-    """The corpus time span, on its own — the map scrubber's only dependency.
+    """The corpus time span **and the span the map can actually animate**.
 
     Public counterpart to `_corpus_window_only`, which the report already used
-    for the same reason. Two min/max aggregates per event table instead of the
-    full `get_stats()` sweep.
+    for the same reason. A handful of min/max aggregates instead of the full
+    `get_stats()` sweep.
+
+    `start`/`end` are the whole corpus. `motion_start`/`motion_end` are the
+    extent of `ais_position` — the only table the map's time scrubber can move
+    anything with, because a vessel is drawn by interpolating its AIS track to
+    the clock.
+
+    **The two are not the same window, and assuming they were is what broke the
+    scrubber.** On the laptop corpus the real GFW tables carry a long thin tail
+    back to 2012 (a few identity and loitering records) while every AIS position
+    sits in the eight-week narrative window at the dense end. Scrubbing across
+    `start`..`end` therefore spent 99% of the bar in years that contain no
+    positions at all: the clock advanced and not one vessel ever moved. The
+    client needs both spans — the motion window to play, the corpus window to
+    disclose what it is not playing — so both are returned.
     """
-    return _corpus_window_only()
+    with open_reader() as reader:
+        window = _corpus_window(reader)
+        motion = _motion_window(reader)
+    return {**window, **motion, "note": _window_note(window, motion)}
+
+
+def _motion_window(reader: Reader) -> dict:
+    """The extent of the AIS positions — everything the scrubber can animate."""
+    if not reader.has("ais_position"):
+        return {"motion_start": None, "motion_end": None}
+    r = reader.one("SELECT min(ts) a, max(ts) b FROM ais_position")
+    if not r or not r["a"]:
+        return {"motion_start": None, "motion_end": None}
+    return {"motion_start": as_iso(r["a"]), "motion_end": as_iso(r["b"])}
+
+
+def _window_note(window: dict, motion: dict) -> Optional[str]:
+    """Said out loud whenever the scrubber plays less than the whole corpus.
+
+    A time control that silently covers a different span from the one the rest
+    of the map is drawn over is exactly the kind of quiet mismatch this project
+    treats as a defect, so the client gets a sentence it can render rather than
+    having to infer the discrepancy from two pairs of timestamps.
+    """
+    if not window["start"]:
+        return None                   # nothing landed at all; the client says so
+    if not motion["motion_start"]:
+        return ("no AIS positions landed — the scrubber can move the clock but "
+                "has no vessel tracks to animate (ADR-005: there is no free "
+                "real AIS).")
+    span = _span_days(motion["motion_start"], motion["motion_end"])
+    whole = _span_days(window["start"], window["end"])
+    if span is None or whole is None or whole - span < 1:
+        return None
+    return (f"the scrubber plays the AIS window ({motion['motion_start'][:10]} "
+            f"to {motion['motion_end'][:10]}, {span:.0f} days) — the corpus "
+            f"itself reaches back to {window['start'][:10]} ({whole:.0f} days), "
+            f"but those earlier days hold no positions to move.")
+
+
+def _span_days(start: Optional[str], end: Optional[str]) -> Optional[float]:
+    if not start or not end:
+        return None
+    try:
+        lo = datetime.fromisoformat(start)
+        hi = datetime.fromisoformat(end)
+    except ValueError:
+        return None
+    return (hi - lo).total_seconds() / 86400.0
 
 
 # --------------------------------------------------------------------------

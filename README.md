@@ -230,7 +230,7 @@ token (`X-API-Token`, default `maritime-isr-dev`, override with `MISR_API_TOKEN`
 | `/api/events`, `/api/events/density` | event rows; per-H3-cell counts over the whole corpus |
 | `/api/detections` | SAR radar contacts |
 | `/api/tracks`, `/api/scenes`, `/api/ports`, `/api/stats` | map layers and headline figures |
-| `/api/corpus-window` | just the corpus time span — the map scrubber's only dependency, split out of `/stats` so it is not queued behind the slow calls |
+| `/api/corpus-window` | the corpus time span **and** the AIS span (`motion_start`/`motion_end`) the map scrubber can actually animate, with a note when they differ — split out of `/stats` so it is not queued behind the slow calls |
 | `/api/graph/all` | every current relationship as one web, most-connected core first, with `truncated` + totals |
 | `/api/graph/seeds` | vessels worth opening the graph on, ranked by degree |
 | `/api/radar/stations` | the coastal station network, with the two size-dependent coverage rings |

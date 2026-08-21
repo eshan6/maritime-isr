@@ -354,7 +354,7 @@ def create_app() -> FastAPI:
 
     @api.get("/corpus-window", dependencies=guard)
     def corpus_window() -> dict:
-        """Just the corpus time span — two aggregates, not the whole dashboard.
+        """The corpus time span — a handful of aggregates, not the dashboard.
 
         The map's time scrubber needs only this, and it used to take it from
         `/stats`, which scans every event table, groups the sanctions matches,
@@ -364,6 +364,11 @@ def create_app() -> FastAPI:
         vanished again on every navigation away and back, because the view
         remounts and refetches. Splitting the cheap half out is the fix; the
         dashboard keeps using `/stats`.
+
+        Returns FOUR timestamps, not two: `start`/`end` bound the whole corpus,
+        `motion_start`/`motion_end` bound the AIS positions. The scrubber plays
+        the second pair, because those are the only days on which a vessel can
+        move; `note` says so whenever the two differ.
         """
         return service.get_corpus_window()
 
