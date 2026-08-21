@@ -7,6 +7,15 @@
 //
 // Where no AIS tracks exist for the window, nothing moves and the events and
 // sanctioned-vessel markers still render.
+//
+// **The scrubber plays the AIS window, not the corpus window.** Those are
+// different spans and treating them as one is what made the player look dead:
+// the laptop corpus reaches back to 2012 on a thin tail of real GFW identity
+// and loitering records, while every AIS position sits in the eight-week
+// narrative at the far end. Scrubbing 2012→2026 put 99% of the bar in years
+// holding no positions, so the clock ticked and not one vessel ever moved.
+// `/corpus-window` now returns both spans; we play `motion_*` and disclose the
+// rest.
 import { useEffect, useMemo, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
@@ -23,6 +32,14 @@ const AOI = { lonMin: 60, latMin: 5, lonMax: 78, latMax: 25 };
 //: enough to follow a vessel's movement across a day rather than watch it
 //: flicker past.
 const SECONDS_PER_DAY = 7;
+
+//: …but never more than this end to end. A fixed seconds-per-day is the right
+//: pace for a window measured in weeks and an absurd one for a window measured
+//: in years: at 7 s/day the 5,317-day corpus window took **ten hours** to play
+//: through, which is indistinguishable from a broken button. The cap is what
+//: keeps the fallback case (no AIS at all, so the scrubber spans the whole
+//: corpus) honest — the clock still crosses the window while somebody watches.
+const MAX_PLAYTHROUGH_S = 120;
 
 const BASEMAP = {
   version: 8,
@@ -125,10 +142,17 @@ export function MapView() {
   const [selectedZone, setSelectedZone] = useState(null);
   const [drawing, setDrawing] = useState(null);   // null | {points: [[lon,lat]]}
   const [zoneNote, setZoneNote] = useState(null);
-  const [window_, setWindow] = useState(null); // {start,end} epoch ms
+  // {start, end} epoch ms — the span the scrubber PLAYS, which is not
+  // necessarily the span the corpus covers. `playsWholeCorpus` says whether the
+  // two coincide, so the status line can admit it when they do not.
+  const [window_, setWindow] = useState(null);
   const [windowError, setWindowError] = useState(null);
   const [t, setT] = useState(1); // 0..1 across the window
   const [playing, setPlaying] = useState(false);
+  // Has the operator moved the clock themselves? Until they have, the playhead
+  // is ours to park somewhere useful (see the parking effect below); once they
+  // have, it is theirs and we never move it under them.
+  const [scrubbed, setScrubbed] = useState(false);
 
   // ---- init map once ----
   useEffect(() => {
@@ -166,11 +190,24 @@ export function MapView() {
     // nothing and puts it on screen immediately; `api.corpusWindow` is
     // session-cached, so a return visit does not even reach the network.
     api.corpusWindow().then((w) => {
-      if (live && w && w.start && w.end) {
-        setWindow({ start: +new Date(w.start), end: +new Date(w.end) });
-      } else if (live) {
+      if (!live) return;
+      // Play the AIS window when there is one, and fall back to the corpus
+      // window only when there is not — with no positions landed nothing can
+      // move anyway, and a scrubber locked to an empty span would be worse
+      // than one that at least walks the clock over the events on screen.
+      const play = w && w.motion_start && w.motion_end
+        ? { start: w.motion_start, end: w.motion_end }
+        : (w && w.start && w.end ? { start: w.start, end: w.end } : null);
+      if (!play) {
         setWindowError("the corpus has no dated events to scrub through");
+        return;
       }
+      setWindow({
+        start: +new Date(play.start),
+        end: +new Date(play.end),
+        playsWholeCorpus: play.start === w.start && play.end === w.end,
+      });
+      note("window", w.note);
     }).catch(() => live && setWindowError("could not load the corpus window"));
 
     api.events({ limit: EVENT_LIMIT })
@@ -252,15 +289,37 @@ export function MapView() {
     renderVessels(map.current, tracks, clockSec, visible.positions, (id) => setSelected(id));
   }, [ready, tracks, clockSec, visible.positions]);
 
+  // ---- park the playhead where the fleet actually is ----
+  // The clock defaulted to the very END of the window, which is the one instant
+  // in the whole span guaranteed to be nearly empty: a vessel is drawn only
+  // while the clock sits inside her own track, and by definition almost every
+  // track has ended by then. So the map opened on one dot — or, on the corpus
+  // window, on none at all — and looked as dead as the player did.
+  //
+  // Park it instead on the busiest instant: the moment the most vessels are
+  // simultaneously broadcasting. Only until the operator touches the scrubber,
+  // after which the clock is theirs.
+  useEffect(() => {
+    if (scrubbed || !window_ || !tracks.length) return;
+    const at = busiestInstant(tracks);
+    if (at == null) return;
+    const span = window_.end - window_.start;
+    if (span <= 0) return;
+    setT(Math.min(1, Math.max(0, (at * 1000 - window_.start) / span)));
+  }, [scrubbed, window_, tracks]);
+
   // ---- play/pause ----
-  // Playback runs at a fixed SECONDS_PER_DAY, derived from the window's real
-  // span, so an 8-week corpus and a 6-month one advance at the same readable
-  // pace. Tying the step to a raw fraction instead made a long window blur past.
+  // Playback runs at SECONDS_PER_DAY, derived from the window's real span, so
+  // an 8-week corpus and a 6-month one advance at the same readable pace —
+  // tying the step to a raw fraction instead made a long window blur past. The
+  // MAX_PLAYTHROUGH_S cap catches the other end: a window of years at 7 s/day
+  // is a progress bar nobody lives to see finish.
   useEffect(() => {
     if (!playing || !window_) return;
     const totalDays = Math.max(1, (window_.end - window_.start) / 86400000);
+    const playthroughS = Math.min(SECONDS_PER_DAY * totalDays, MAX_PLAYTHROUGH_S);
     const tickMs = 100;
-    const dt = tickMs / (SECONDS_PER_DAY * 1000 * totalDays); // fraction per tick
+    const dt = tickMs / (playthroughS * 1000); // fraction of the window per tick
     const h = setInterval(() => {
       setT((x) => (x >= 1 ? 0 : Math.min(1, x + dt)));
     }, tickMs);
@@ -268,6 +327,13 @@ export function MapView() {
   }, [playing, window_]);
 
   const movingCount = tracks.length;
+  // How many of those are on screen at THIS instant — the number that tells the
+  // operator whether the clock is somewhere with traffic. `movingCount` is the
+  // corpus total and never changes, so on its own it cannot say that.
+  const onScreen = useMemo(
+    () => tracks.reduce((n, tr) => n + (posAt(tr.points, clockSec) ? 1 : 0), 0),
+    [tracks, clockSec],
+  );
 
   return (
     <div style={{ position: "absolute", inset: 0 }}>
@@ -380,7 +446,7 @@ export function MapView() {
         <button
           className="play"
           disabled={!window_}
-          onClick={() => setPlaying((p) => !p)}
+          onClick={() => { setScrubbed(true); setPlaying((p) => !p); }}
         >
           {playing ? "❚❚" : "▶"}
         </button>
@@ -396,6 +462,7 @@ export function MapView() {
           disabled={!window_}
           onChange={(e) => {
             setPlaying(false);
+            setScrubbed(true);
             setT(+e.target.value);
           }}
         />
@@ -403,7 +470,9 @@ export function MapView() {
           {!window_
             ? (windowError || "loading time window…")
             : movingCount > 0
-              ? `${movingCount} vessel${movingCount === 1 ? "" : "s"} on AIS`
+              ? `${onScreen} of ${movingCount} vessel`
+                + (movingCount === 1 ? "" : "s") + " moving"
+                + (window_.playsWholeCorpus ? "" : " · AIS window")
               : "no AIS tracks in this window"}
         </span>
       </div>
@@ -481,6 +550,28 @@ function posAt(points, tSec) {
   const span = b[2] - a[2] || 1;
   const f = (tSec - a[2]) / span;
   return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f];
+}
+
+//: The epoch-second at which the most tracks are simultaneously live — a sweep
+//: over track start/end events, so it is one sort rather than a scan per
+//: candidate instant. Ties go to the earliest such moment.
+function busiestInstant(tracks) {
+  const marks = [];
+  for (const tr of tracks) {
+    const p = tr.points;
+    if (!p || p.length < 2) continue;
+    marks.push([p[0][2], 1], [p[p.length - 1][2], -1]);
+  }
+  if (!marks.length) return null;
+  // Opens before closes at the same instant: a track that ends exactly as
+  // another starts should not read as a moment when neither is present.
+  marks.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
+  let live = 0, best = 0, at = marks[0][0];
+  for (const [sec, delta] of marks) {
+    live += delta;
+    if (live > best) { best = live; at = sec; }
+  }
+  return at;
 }
 
 function renderVessels(m, tracks, clockSec, on, onSelect) {
