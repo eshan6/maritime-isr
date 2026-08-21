@@ -57,16 +57,18 @@ const LABEL_PX = 11;
 // moves it, so this is the lever that matters.
 const MIN_ZOOM = 0.08;
 const MAX_ZOOM = 4;
-//: How far in the whole-network view is allowed to open. Framing the focus
-//: node's neighbourhood is right; letting that fit run to MAX_ZOOM when the
-//: focus has three neighbours is not — the operator lands on a handful of
-//: giant circles with no network around them.
-const OPENING_MAX_ZOOM = 1.1;
 //: How many labelled nodes a layout will measure boxes for. Label-aware
 //: spacing is what stops two company names sharing a spot; measuring 1,400 of
 //: them is what made it too slow to keep on. This is the count of nodes that
 //: actually draw text, not the node count.
 const LABEL_AWARE_MAX_LABELS = 300;
+
+//: Floors for the draw-time clamp. A mark that scales all the way down with
+//: the camera eventually vanishes, and a graph of invisible dots is not a
+//: graph; these are the sizes below which a node or a line stops being a mark
+//: at all. They are a FLOOR on the rendered size, never an input to a layout.
+const MIN_NODE_PX = 3;
+const MIN_EDGE_PX = 0.6;
 
 //: Above this many elements the view stops doing the whole-graph interactions.
 //:
@@ -211,6 +213,9 @@ export function GraphView() {
   //     edges cost ~175 ms per zoom event when at most a hundred carry text.
   const rafRef = useRef(0);
   const bucketRef = useRef(null);
+  //: Nodes worth naming in the whole-network view, best first. Held so the
+  //: zoom handler can redo the de-collision pass without rebuilding it.
+  const labelCandidatesRef = useRef(null);
   const sizeBuckets = useCallback((cy) => {
     if (bucketRef.current && bucketRef.current.n === cy.nodes().length) {
       return bucketRef.current.buckets;
@@ -244,38 +249,68 @@ export function GraphView() {
     return buckets;
   }, []);
 
-  // Immediate, unthrottled. The layout needs the true sizes applied BEFORE it
-  // runs (see `settleLayout`), and a rAF-deferred version would hand it the
-  // previous pass's numbers.
+  // **Draw-time scaling. It never runs before a layout, and it never feeds
+  // back into one.**
+  //
+  // The previous version divided node diameters by the zoom and applied that
+  // BEFORE the layout, so the layout's idea of how big a node is came from
+  // where the camera happened to be. That is circular, and on a large graph
+  // the loop ran away instead of converging. Measured on a 1,499-node
+  // ownership forest (276 components):
+  //
+  //     model bounding box 559 x 287 units for 1,499 nodes
+  //     fit zoom 2.65 — the fit ZOOMED IN, because the graph had collapsed
+  //     every node rendered 7-8px, all of them stacked in a 614 x 316px blob
+  //
+  // Each round made it worse: a tighter layout raised the fit zoom, a higher
+  // zoom shrank the model sizes handed to the next layout, which packed
+  // tighter still. That is the diagonal smear of overlapping nodes and
+  // unreadable labels that got reported, and no amount of tuning repulsion
+  // fixes a feedback loop.
+  //
+  // So the two concerns are separated for good:
+  //
+  //   * **Layout space is zoom-independent.** `applyLayoutSizes` gives every
+  //     node its nominal density-scaled diameter and the model font size, and
+  //     the layout runs against those. Same graph, same picture, whatever the
+  //     camera is doing.
+  //   * **Render space is clamped, not pinned.** Node size is
+  //     `clamp(nominal x zoom, floor, nominal)` — capped at nominal so zooming
+  //     in never inflates a vessel into a saucer with a small word under it,
+  //     floored so zooming out never shrinks it to nothing. A clamp of a
+  //     monotone function cannot oscillate, and it is applied only after a
+  //     layout has finished.
+  //
+  // Labels stay pinned to a constant screen size, which is what makes a
+  // zoomed-out graph readable. They cannot feed back either, because the
+  // layout measures them at the model font size, not the pinned one.
   const applyScreenScale = useCallback((cy) => {
     if (cy.destroyed()) return;
     const z = cy.zoom();
-    const px = LABEL_PX / z;
-    const nodes = cy.nodes(".labelled");
+    const density = densityScale(cy.nodes().length);
+    const labelled = cy.nodes(".labelled");
     const labelledEdges = cy.edges(".labelled");
     cy.batch(() => {
-      if (!nodes.empty()) nodes.style("font-size", px);
-      if (!labelledEdges.empty()) labelledEdges.style("font-size", px * 0.85);
+      if (!labelled.empty()) labelled.style("font-size", LABEL_PX / z);
+      if (!labelledEdges.empty()) labelledEdges.style("font-size", (LABEL_PX / z) * 0.85);
       for (const [d, coll] of sizeBuckets(cy)) {
-        const s = d / z;
-        coll.style({ width: s, height: s });
+        // `d` is the nominal diameter in screen pixels. Model units are what
+        // cytoscape wants, so divide the pixels we actually want by the zoom.
+        const px = Math.min(d, Math.max(MIN_NODE_PX, d * z));
+        coll.style({ width: px / z, height: px / z });
       }
-      // Lines belong to the same visual system as the dots and the type. Left
-      // in model units they were the one thing that still shrank: the network
-      // settles around zoom 0.4, where a 2px ownership line draws at 0.8px and
-      // a 1.2px context line at half a pixel. The relationships — the entire
-      // point of a graph — faded to grey haze while the nodes stayed crisp,
-      // which is most of why the uncluttered version read as empty rather than
-      // clear.
-      //
-      // **Through the density factor as well**, which is what the nodes get
-      // and the edges did not. A dense graph shrinks its dots to 41% to make
-      // room; leaving lines and their arrowheads at full width made the heads
-      // the biggest thing on the canvas, dwarfing the nodes they point at.
-      // One factor, applied to every mark, keeps the system coherent at any
-      // node count.
-      const d = densityScale(cy.nodes().length);
-      for (const [w, coll] of edgeWidthBuckets(cy)) coll.style("width", (w * d) / z);
+      // Lines get the same treatment, so the whole visual system scales
+      // together. Left in model units they were the one thing that still
+      // shrank — a 2px ownership line at zoom 0.4 draws at 0.8px — and the
+      // relationships are the entire point of a graph. The density factor is
+      // in here too: without it a dense view shrank its dots to 41% and left
+      // the arrowheads (which cytoscape sizes from the line width) at full
+      // size, which is how they came to dwarf the nodes they point at.
+      for (const [w, coll] of edgeWidthBuckets(cy)) {
+        const nominal = w * density;
+        const px = Math.min(nominal, Math.max(MIN_EDGE_PX, nominal * z));
+        coll.style("width", px / z);
+      }
     });
   }, [sizeBuckets, edgeWidthBuckets]);
 
@@ -287,46 +322,30 @@ export function GraphView() {
     });
   }, [applyScreenScale]);
 
-  // **Lay out, frame, then lay out again knowing how big the type ended up.**
-  //
-  // Pinning labels to the screen and fitting a graph to the viewport pull
-  // against each other. The layout spaces nodes in MODEL units using the
-  // stylesheet font (11). The fit then zooms out to show everything — measured
-  // at 0.30 on the ownership network — and the pin scales the type back up to
-  // stay 11px on screen, which in model units is 11/0.30 = 36.7. Every label is
-  // suddenly three times the size the layout allowed for, so they collide:
-  // 40 overlapping label pairs among 40 labelled nodes.
-  //
-  // Neither half is wrong. Constant-size type is what makes a zoomed-out graph
-  // readable, and fitting is what makes it whole. What was wrong is that the
-  // layout was told one thing and the renderer did another.
-  //
-  // So: run it, frame it, apply the type size that framing implies, and run it
-  // again against the real numbers. Measured on the ownership network the
-  // overlap count goes 40 -> 1 -> 0 and the zoom settles at 0.25, so a second
-  // pass is enough and a third changes nothing. It is a fixed point rather
-  // than a fudge: bigger labels spread the graph, spreading lowers the fit
-  // zoom, a lower zoom means bigger labels — and the loop converges because
-  // each round adds less than the last.
-  // The camera needs the same treatment as the layout, and for the same
-  // reason. `fitView` picks a zoom from the graph's bounding box, but that box
-  // includes labels whose size depends on the zoom it is about to replace — so
-  // one fit lands wrong, and the picture ends up overflowing every edge at a
-  // scale chosen for different type. Alternating fit and rescale converges on
-  // the same fixed point the layout does; three rounds is comfortably past it.
-  const settleCamera = useCallback((cy, frame) => {
-    for (let i = 0; i < 3; i++) {
-      frame();
+  // Redo the label de-collision once the zoom has SETTLED. Debounced hard,
+  // because it must not run per wheel notch: the pass itself is sub-millisecond
+  // but it rewrites label data, and doing that mid-gesture makes names flicker
+  // in and out while the view is still moving. On the trailing edge it reads as
+  // a map filling in detail as you zoom.
+  const labelTimerRef = useRef(0);
+  const scheduleLabelPass = useCallback((cy) => {
+    if (!labelCandidatesRef.current) return;
+    clearTimeout(labelTimerRef.current);
+    labelTimerRef.current = setTimeout(() => {
+      if (cy.destroyed() || !labelCandidatesRef.current) return;
+      applyLabelDecollision(cy, labelCandidatesRef.current);
       applyScreenScale(cy);
-    }
+    }, 180);
   }, [applyScreenScale]);
 
+  // Lay out, frame it, then scale for drawing. One pass each, in that order,
+  // and never the other way round — the old two-pass fit/rescale fixed point
+  // existed only to reconcile the circularity described above.
   const settleLayout = useCallback((cy, nodeCount, frame, opts) => {
-    for (let pass = 0; pass < 2; pass++) {
-      runLayout(cy, nodeCount, opts);
-      settleCamera(cy, frame);
-    }
-  }, [applyScreenScale, settleCamera]);
+    runLayout(cy, nodeCount, opts);
+    frame();
+    applyScreenScale(cy);
+  }, [applyScreenScale]);
 
   useEffect(() => {
     const cy = cytoscape({
@@ -380,7 +399,8 @@ export function GraphView() {
             // everything (it holds tens of nodes); the whole-web view holds up
             // to 1,500 and labelling all of them is an unreadable mat of text,
             // so it marks only the nodes worth naming at rest — see
-            // `markWebLabels`. The label is precomputed onto the element as
+            // `webLabelCandidates` + `applyLabelDecollision`. The label is
+            // precomputed onto the element as
             // `shownLabel` rather than decided in a style function.
             label: "data(shownLabel)",
             color: "#1f2a36",
@@ -479,9 +499,16 @@ export function GraphView() {
     cy.on("tap", (e) => {
       if (e.target === cy) { setInfo(null); clearHl(); }
     });
-    cy.on("zoom", () => syncScreenScale(cy));
+    cy.on("zoom", () => { syncScreenScale(cy); scheduleLabelPass(cy); });
 
     cyRef.current = cy;
+    // The live cytoscape core, exposed for diagnosis. Not used by the app.
+    // Every number in the layout notes above — bounding boxes, distinct node
+    // positions, overlapping label pairs, nodes actually inside the viewport —
+    // was measured through this handle in a real browser, and the collapse it
+    // found was invisible from the outside. Leaving it costs nothing and makes
+    // the next report answerable with measurements instead of guesses.
+    if (typeof window !== "undefined") window.__cy = cy;
     // A read-only handle for verification. Every claim about this view — "the
     // labels stopped colliding", "zoom no longer inflates the nodes" — is a
     // claim about geometry, and without a handle the only way to check it is
@@ -495,9 +522,10 @@ export function GraphView() {
     return () => {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
       rafRef.current = 0;
+      clearTimeout(labelTimerRef.current);
       cy.destroy();
     };
-  }, [syncScreenScale]);
+  }, [syncScreenScale, scheduleLabelPass]);
 
   // ---- seed the view ----
   // Arriving at /graph with no ?seed= used to leave an empty canvas and a
@@ -590,63 +618,32 @@ export function GraphView() {
       });
       await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
       if (!current() || cy.destroyed()) return;
-      // Labels FIRST, then layout. `cose` lays out around label boxes
-      // (`nodeDimensionsIncludeLabels`), and it was being handed a graph whose
-      // labels had not been assigned yet — so it spaced bare circles and the
-      // text landed on top of itself the moment the labels appeared. Every
-      // "Harrow Maritime Services" sitting across "MORNING BREEZE" came from
-      // these two lines being the wrong way round.
-      markWebLabels(cy, focusId);
+      // The candidate ORDER is fixed here; which of them are actually drawn is
+      // decided after the camera settles, because that is when a label's
+      // position in pixels — the only thing that decides whether two collide —
+      // is finally known.
+      labelCandidatesRef.current = webLabelCandidates(cy, focusId);
 
       const node = focusId ? cy.getElementById(focusId) : cy.collection();
       if (node.length) {
         node.addClass("focus");
         node.closedNeighborhood().addClass("focus-nbr");
       }
-      // **Open on the whole network when the whole network is legible.**
+      // **Open on the whole network, always.**
       //
-      // Framing the focus neighbourhood was the right call when the default
-      // view was everything: fitting 1,500 nodes showed a grey mass, so the
-      // camera started somewhere readable and left the rest to be found by
-      // zooming out. But it also meant the view opened mid-graph with edges
-      // running off every side, which reads as a picture that has been cut off.
+      // It used to open FRAMED on the focus node's neighbourhood, which made
+      // sense when a fit produced an unreadable speck. It does not any more —
+      // node and line sizes have a floor now, so a fitted graph stays legible
+      // — and framing had a cost that was never worth it: the panel says
+      // "1,499 entities" over a viewport showing 123 of them. A number on the
+      // panel that the canvas contradicts is how an operator concludes the
+      // view is broken, and here it was measured at 8% of what it claimed.
       //
-      // The ownership network is ~325 elements and, with symbols pinned to the
-      // screen, fits whole and legible. Showing all of it is the honest opening
-      // — the panel's claim is "here is the ownership network", and the camera
-      // should agree with the sentence.
-      if (!node.length) {
-        settleLayout(cy, g.nodes.length, () => fitView(cy), { isWeb: true });
-      } else {
-        // **Open framed on a cluster, not fitted to everything.**
-        //
-        // Fitting the whole network was tried and is worse to look at. The
-        // ownership graph is a forest of about thirty small stars, and the
-        // whole of it at once is a field of identical dots too small to carry
-        // a name — tidy, and saying nothing. Framed, the same data reads the
-        // way it used to: substantial nodes, legible companies, edges you can
-        // follow. The fit control and a scroll wheel get you the overview when
-        // you want it, which is the right way round — an overview is something
-        // you ask for, a working view is what you land in.
-        //
-        // Un-animated because `settleLayout` runs the framing twice; animating
-        // a camera move that is about to be recomputed reads as a stutter, and
-        // there is nothing on screen yet to animate from.
-        //
-        // Capped, because a fit is a fit to whatever is there: a focus with
-        // three neighbours fills the viewport with three enormous circles and
-        // no surrounding network, which reads as "the graph contains four
-        // things".
-        const nbr = node.closedNeighborhood();
-        settleLayout(cy, g.nodes.length, () => {
-          cy.fit(nbr, 90);
-          if (cy.zoom() > OPENING_MAX_ZOOM) {
-            cy.zoom({ level: OPENING_MAX_ZOOM,
-                      renderedPosition: { x: cy.width() / 2, y: cy.height() / 2 } });
-            cy.center(nbr);
-          }
-        }, { isWeb: true });
-      }
+      // The focus node keeps its ring, so it is still findable; it is a
+      // labelled starting point rather than a crop.
+      settleLayout(cy, g.nodes.length, () => fitView(cy), { isWeb: true });
+      applyLabelDecollision(cy, labelCandidatesRef.current);
+      applyScreenScale(cy);
       setNodeCount(cy.nodes().length);
       setWeb(g);
     } catch (e) {
@@ -972,6 +969,25 @@ function applyDensityScale(cy) {
   return scale;
 }
 
+//: Put the graph into LAYOUT space: nominal sizes, model font, no zoom
+//: anywhere. This is what makes a layout reproducible — the same graph gets
+//: the same picture whatever the camera was doing when it ran, and the
+//: run-away collapse documented on `applyScreenScale` cannot happen because
+//: nothing here reads `cy.zoom()`.
+function applyLayoutSizes(cy) {
+  const scale = applyDensityScale(cy);
+  cy.batch(() => {
+    cy.nodes().forEach((n) => {
+      const d = n.data("diameter");
+      n.style({ width: d, height: d, "font-size": LABEL_PX });
+    });
+    cy.edges().forEach((e) => {
+      e.style({ width: e.data("width") * scale, "font-size": LABEL_PX * 0.85 });
+    });
+  });
+  return scale;
+}
+
 function nodeElement(n, { showLabel, scale = 1 }) {
   const label = n.label || shortId(n.id);
   const designated = !!(n.props && n.props.designated)
@@ -1128,35 +1144,79 @@ function focusLabel(web) {
   return (n && n.label) || shortId(web.focus || "");
 }
 
-// How many hubs to name at rest, given how many nodes share the canvas.
-//
-// A fixed 40 was tuned on a smaller web. Labels are pinned to a constant SCREEN
-// size (`syncScreenScale`), so zooming out to see the whole network does not
-// shrink them — it stacks them, and 40 hub names plus every organisation lands
-// as a mat of text over the dense core. Fewer names on a bigger graph is the
-// only lever, since the graph itself cannot get less dense.
-function hubLabelCount(n) {
-  return Math.max(12, Math.min(40, Math.round(600 / Math.sqrt(Math.max(1, n)))));
+
+//: How far apart two labels must be ON SCREEN before both are drawn, and how
+//: many nodes are even considered. The cap keeps the greedy pass below a
+//: millisecond; the spacing is roughly a short name plus its leading.
+const LABEL_MIN_SEPARATION_PX = 78;
+const LABEL_CANDIDATE_CAP = 400;
+
+//: Nodes worth naming, best first. Priority order: what is designated, then
+//: the companies (few, and the reason an ownership graph exists), then the
+//: focus and its immediate network, then the best-connected hubs.
+function webLabelCandidates(cy, focusId) {
+  const byDegree = (a, b) => (b.data("degree") || 0) - (a.data("degree") || 0);
+  const out = [];
+  const seen = new Set();
+  const push = (eles) => eles.forEach((n) => {
+    if (out.length >= LABEL_CANDIDATE_CAP || seen.has(n.id())) return;
+    seen.add(n.id());
+    out.push(n);
+  });
+  push(cy.nodes().filter((n) =>
+    n.data("sanctioned") === 1 || n.data("kind") === "sanctions_authority")
+    .sort(byDegree));
+  push(cy.nodes().filter((n) => n.data("kind") === "organization").sort(byDegree));
+  if (focusId) {
+    const f = cy.getElementById(focusId);
+    if (f.length) push(f.closedNeighborhood().nodes().sort(byDegree));
+  }
+  push(cy.nodes().sort(byDegree));
+  return out;
 }
 
-function markWebLabels(cy, focusId, hubCount = null) {
-  if (hubCount == null) hubCount = hubLabelCount(cy.nodes().length);
-  cy.batch(() => {
-    const show = (eles) => eles.forEach((n) => {
-      n.data("shownLabel", n.data("label"));
-      n.addClass("labelled");
-    });
-    show(cy.nodes().filter((n) =>
-      n.data("kind") === "organization" ||
-      n.data("kind") === "sanctions_authority" ||
-      n.data("sanctioned") === 1));
-    show(cy.nodes().sort((a, b) => (b.data("degree") || 0) - (a.data("degree") || 0))
-      .slice(0, hubCount));
-    if (focusId) {
-      const f = cy.getElementById(focusId);
-      if (f.length) show(f.closedNeighborhood().nodes());
+// **Labels that get out of each other's way.**
+//
+// A flat budget is not enough. Labels are pinned to a constant SCREEN size, so
+// they do not shrink when the view is fitted — and the density that matters is
+// how close two of them land in PIXELS, which depends on the zoom and on where
+// the layout put things. A cap of 55 still stacked every company name on top
+// of the next around the inner ring of a concentric core, because all 25 of
+// them were inside 300px of arc.
+//
+// So: walk the candidates best-first and accept one only if it is clear of
+// every label already accepted. Everything keeps its name in `data` — this
+// decides what is drawn AT REST, and the detail card shows the rest on click.
+//
+// Recomputed when the zoom settles, so zooming in reveals more names the way a
+// map does, rather than leaving the picture permanently as sparse as its most
+// zoomed-out moment.
+function applyLabelDecollision(cy, candidates) {
+  const minGap = LABEL_MIN_SEPARATION_PX;
+  const accepted = [];
+  const keep = new Set();
+  for (const n of candidates) {
+    const p = n.renderedPosition();
+    let clear = true;
+    for (const q of accepted) {
+      if (Math.abs(p.x - q.x) < minGap && Math.abs(p.y - q.y) < minGap * 0.55) {
+        clear = false;
+        break;
+      }
     }
+    if (!clear) continue;
+    accepted.push(p);
+    keep.add(n.id());
+  }
+  cy.batch(() => {
+    cy.nodes().forEach((n) => {
+      const want = keep.has(n.id()) ? n.data("label") : "";
+      if (n.data("shownLabel") !== want) n.data("shownLabel", want);
+      if (want) n.addClass("labelled");
+      else n.removeClass("labelled");
+    });
   });
+  return keep.size;
 }
 
 //: Above this many nodes the view switches from `cose` to `fcose`. Not a taste
@@ -1214,82 +1274,140 @@ function withSeededRandom(fn) {
 // state variable that does not exist here. Every call with more than
 // FCOSE_ABOVE nodes threw `ReferenceError: web is not defined` — see the note
 // on `quality` below for what that broke.
+//: A component bigger than this earns a force layout of its own. Below it the
+//: component is a star — a company and the hulls it operates — and a force
+//: simulation is both the wrong tool and, in fcose's draft mode, a broken one.
+const BIG_COMPONENT = 60;
+
+//: Spacing between a hub and its leaves, and between packed components, in
+//: model units.
+const STAR_GAP = 46;
+const COMPONENT_PAD = 60;
+
+// **The whole-network layout. It is a forest, so lay it out as one.**
+//
+// What this graph IS, measured on a corpus-shaped 1,499-node view: **276
+// connected components**, nearly all of them one company and the three to five
+// hulls it operates, plus a couple of larger cores around the sanctions
+// authority. That is a forest of stars, and a global force simulation is the
+// wrong instrument for it.
+//
+// It is also, specifically, a BROKEN instrument. fcose in `quality: "draft"`
+// — the fast path — collapses every small component onto a single point.
+// Measured headless on that graph, with real `Math.random`, not the seeded one:
+//
+//     fcose draft   box   250 x  442    23 distinct positions out of 961
+//     this layout   box  3724 x 2898  1499 distinct positions out of 1499
+//                                      median node spacing 46 units
+//
+// Twenty-three positions for nine hundred nodes is every star crushed to a dot
+// and the dots packed into a band — which is exactly what was on screen: a
+// diagonal smear with labels stacked on labels and most of the graph invisible.
+// Tuning repulsion, gravity, `nodeSeparation` and `packComponents` moved the
+// bounding box and changed nothing about the collapse, because the collapse is
+// not a spacing problem.
+//
+// So each component gets the cheapest treatment that suits its shape, and the
+// components are then packed:
+//
+//   * **a star** (the common case) — highest-degree node in the middle, the
+//     rest on a ring around it. Deterministic, instant, and it is a truthful
+//     picture of "this company operates these hulls";
+//   * **a real network** (above BIG_COMPONENT) — fcose with SPECTRAL seeding,
+//     which is affordable here precisely because it is scoped to one
+//     component. The cost that made spectral unusable is superlinear in the
+//     node count it is handed, and a component is a fraction of the graph;
+//   * **packed** into rows about as wide as the whole is tall, biggest first,
+//     so the result is roughly square rather than a ribbon.
+function layoutForest(cy) {
+  const comps = cy.elements().components();
+  const boxes = [];
+
+  for (const comp of comps) {
+    const nodes = comp.nodes();
+    if (nodes.length === 1) {
+      nodes[0].position({ x: 0, y: 0 });
+    } else if (nodes.length > BIG_COMPONENT) {
+      // **Rings by connectedness, not a force simulation.**
+      //
+      // The large components here are hub-and-spoke too, just deeper: a
+      // sanctions authority, the companies it designated, and the hulls those
+      // companies operate. Measured on exactly that shape (126 nodes, 18-unit
+      // node diameters), nearest-neighbour spacing and aspect ratio:
+      //
+      //     fcose draft      median-nn  0   — collapsed, 76 distinct of 126
+      //     fcose spectral   median-nn  8   — overlapping; nodes are 18 wide
+      //     cose             median-nn 67   — good, but 546ms and O(n^2)
+      //     concentric       median-nn 48   — clean rings, 20ms, deterministic
+      //
+      // Concentric imposes an organising principle rather than discovering
+      // one, and that is worth saying: the rings mean degree and nothing else.
+      // For an ownership graph that is a fair reading — an authority is more
+      // connected than a company, a company than a hull — and it is what the
+      // panel already says it centres on. The seeded neighbourhood view keeps
+      // a real force layout, which is where structure is actually read.
+      comp.layout({
+        name: "concentric",
+        animate: false, fit: false, padding: 0,
+        minNodeSpacing: STAR_GAP,
+        concentric: (n) => n.degree(),
+        levelWidth: () => 1,
+      }).run();
+    } else {
+      const sorted = nodes.sort((a, b) => b.degree() - a.degree());
+      const hub = sorted[0];
+      const leaves = sorted.slice(1);
+      const r = Math.max(STAR_GAP, (STAR_GAP * leaves.length) / (2 * Math.PI));
+      hub.position({ x: 0, y: 0 });
+      leaves.forEach((n, i) => {
+        const a = (2 * Math.PI * i) / leaves.length;
+        n.position({ x: r * Math.cos(a), y: r * Math.sin(a) });
+      });
+    }
+    const bb = comp.boundingBox();
+    boxes.push({ comp, w: bb.w, h: bb.h, x1: bb.x1, y1: bb.y1 });
+  }
+
+  // Shelf-pack, biggest first. The row width is derived from the total area so
+  // the packed result is roughly square: a fixed row count would give a 40:1
+  // ribbon on one graph and a column on another.
+  boxes.sort((a, b) => b.w * b.h - a.w * a.h);
+  const area = boxes.reduce((t, b) => t + (b.w + COMPONENT_PAD) * (b.h + COMPONENT_PAD), 0);
+  const rowWidth = Math.sqrt(area) * 1.3;
+  let x = 0, y = 0, rowH = 0;
+  cy.batch(() => {
+    for (const b of boxes) {
+      if (x > 0 && x + b.w > rowWidth) { x = 0; y += rowH + COMPONENT_PAD; rowH = 0; }
+      const dx = x - b.x1, dy = y - b.y1;
+      b.comp.nodes().forEach((n) => {
+        const p = n.position();
+        n.position({ x: p.x + dx, y: p.y + dy });
+      });
+      x += b.w + COMPONENT_PAD;
+      rowH = Math.max(rowH, b.h);
+    }
+  });
+}
+
 function runLayout(cy, nodeCount = 0, { isWeb = false } = {}) {
-  // Un-animated on purpose: an animating force simulation keeps nudging nodes
-  // for seconds after a click and reads as a glitch. Both layouts settle
-  // deterministically, so the same graph always looks the same — a web that
-  // reshuffled on every visit would make it impossible to learn, and
-  // re-finding a cluster you saw yesterday is most of the value.
+  // Sizes before positions, in LAYOUT space: the layout reads node sizes when
+  // it separates them, and it must read a number that does not depend on where
+  // the camera is. See the note on `applyScreenScale` for what happened when
+  // it did.
+  applyLayoutSizes(cy);
+
+  if (isWeb) {
+    layoutForest(cy);
+    return;
+  }
+
+  // The seeded neighbourhood is ONE connected component of a few dozen nodes,
+  // and `cose`'s organic look is tuned for it. Nothing here is worth changing.
   //
-  // **The web always uses fcose, whatever its size.** The ownership network is
-  // structurally a forest — a company and the hulls it owns, with few links
-  // between companies — and `cose` lays disconnected components out in tidy
-  // rows. On 161 nodes that produced a grid of near-identical stars: honest
-  // about the data, and unreadable as a picture, because a regular grid has no
-  // shape to remember and nothing to draw the eye. fcose packs components
-  // organically, which is what made the old view look like a network.
-  // fcose was tried for the web and reverted. It packs disconnected components
-  // instead of laying them in rows, which sounded right for an ownership
-  // forest — but `packComponents` crams them into one diagonal band with the
-  // nodes touching, measured at 64 overlapping label pairs against cose's 9.
-  // Rows are not elegant; a blob is not readable.
-  const big = nodeCount > FCOSE_ABOVE;
-  // Spectral seeding is affordable on a few hundred nodes and worth a lot
-  // there; above that it is the 14-second freeze `withSeededRandom` exists to
-  // avoid. Only the whole-network view qualifies — a seeded neighbourhood
-  // never reaches the fcose branch at all.
-  const spectral = isWeb && nodeCount <= SPECTRAL_MAX_NODES;
-  // Diameters before positions: the layout reads node sizes when it separates
-  // them, so shrinking after it ran would leave the spacing of the larger dots.
-  const scale = applyDensityScale(cy);
-  const opts = big ? {
-    name: "fcose",
-    animate: false,
-    // Draft quality with a SEEDED random source — see `withSeededRandom` for
-    // why this is both the fast path and still a deterministic one.
-    //
-    // The ownership web is the exception: at ~160 nodes the spectral seeding
-    // costs nothing and is worth a lot. Measured on it, draft settled to 274
-    // overlapping label pairs where `default` gives 15 — draft starts from
-    // scattered positions and, on a graph that is mostly small disconnected
-    // stars, never fully recovers. The size threshold is what keeps this from
-    // being a promise about the 29,000-node real graph.
-    //
-    // These two lines read a `web` that is not in scope here, and the object
-    // literal is only evaluated on the fcose branch — so the bug was invisible
-    // on any graph of 250 nodes or fewer and threw on every graph above it.
-    // On a corpus whose ownership network clears that bar, the whole-network
-    // view added its elements, threw before laying them out, and left them
-    // stacked at the origin: the "two nodes in the top-left corner" that were
-    // always there, under a "Pick a vessel and seed the graph to begin"
-    // message, because the state that would have said otherwise was never set.
-    quality: spectral ? "default" : "draft",
-    randomize: !spectral,
-    padding: 50,
-    // Measure label boxes when there are few enough to be worth measuring.
-    // Only a minority of nodes carry a label here (see `markWebLabels`), and
-    // measuring 1,400 of them costs more than it buys when most are empty —
-    // but with a couple of hundred it is what stops company names landing on
-    // top of each other. `markWebLabels` now runs BEFORE the layout, so this
-    // count is the real one rather than zero.
-    nodeDimensionsIncludeLabels:
-      cy.nodes(".labelled").length <= LABEL_AWARE_MAX_LABELS,
-    // Left at the values tuned against the real corpus graph. Draft mode
-    // starts from scattered positions rather than a spectral draft, so it
-    // settles a little looser than the spectral path did — but retuning the
-    // forces is a judgement to make against real data, not against a
-    // stand-in, so they stay put.
-    nodeRepulsion: 9000,
-    idealEdgeLength: 70,
-    edgeElasticity: 0.35,
-    gravity: 0.3,
-    gravityRange: 3.2,
-    // Draft mode starts from scattered positions rather than a spectral draft,
-    // so it wants the iterations the spectral seeding used to save. They are
-    // cheap: the whole run is well under a second either way.
-    numIter: 1200,
-    fit: false,
-  } : {
+  // Un-animated on purpose: an animating force simulation keeps nudging nodes
+  // for seconds after a click and reads as a glitch. `randomize: false` keeps
+  // it deterministic, so re-finding a cluster you saw yesterday is possible.
+  withSeededRandom(() => cy.layout({
     name: "cose",
     animate: false,
     padding: 50,
@@ -1306,6 +1424,5 @@ function runLayout(cy, nodeCount = 0, { isWeb = false } = {}) {
     numIter: 1500,
     randomize: false,
     fit: false,
-  };
-  withSeededRandom(() => cy.layout(opts).run());
+  }).run());
 }

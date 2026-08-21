@@ -3114,3 +3114,107 @@ wording. Updated. Full suite: 663 passed, 33 skipped, 0 failed.
   161-node ownership network. **Still not Eshan's corpus.**
 - The `merge_duplicate_authorities` behaviour is unit-tested and does not
   depend on a populated graph.
+
+---
+
+## The whole-network graph was collapsing, not just crowded (2026-08-20, third pass)
+
+Reported as "most of the texts and nodes are not visible at all". The cause was
+not styling. Two independent defects, both found by measuring through a live
+`cy` handle in a browser rather than by looking at screenshots.
+
+### 1. fcose's draft mode cannot lay out a disconnected forest
+
+This graph, at Eshan's scale, is **276 connected components** — nearly all of
+them one company and the three to five hulls it operates. `quality: "draft"`,
+the fast path adopted to escape the 14-second spectral freeze, **collapses
+every small component onto a single point.** Measured headless on a
+corpus-shaped 1,499-node graph, with real `Math.random` (the seeded PRNG was
+checked separately and is uniform — 20,000 unique values, flat deciles, so it
+is not the cause):
+
+| | bounding box | distinct node positions | median spacing |
+|---|---|---|---|
+| fcose draft | 250 × 442 | **23 of 961** | **0** |
+| forest layout | 3724 × 2898 | 1499 of 1499 | 46 |
+
+Twenty-three positions for nine hundred nodes. Tuning `nodeRepulsion`,
+`gravity`, `nodeSeparation` and `packComponents` moved the bounding box and
+changed the collapse not at all, because a collapse is not a spacing problem.
+
+**The fix is to stop asking a global force simulation to draw a forest.** Each
+component now gets what suits its shape, and the components are shelf-packed
+into rows about as wide as the whole is tall:
+
+  * a **star** (the common case) — highest-degree node centred, the rest on a
+    ring. Instant, deterministic, and a truthful picture of "this company
+    operates these hulls";
+  * a **large component** — `concentric` by degree. Measured on the real shape
+    (a sanctions authority, its designated companies, their fleets; 126 nodes,
+    18-unit diameters), median nearest-neighbour spacing: fcose draft **0**,
+    fcose spectral **8** (overlapping), cose **67** but 546 ms and O(n²),
+    concentric **48** in 20 ms. Concentric imposes rings by degree rather than
+    discovering structure, which is worth stating — for an ownership graph it
+    is a fair reading, and the seeded neighbourhood view keeps a real force
+    layout, which is where structure is actually read.
+
+### 2. Node sizes were divided by the zoom BEFORE the layout ran
+
+So the layout's geometry depended on where the camera was, and the loop ran
+away instead of converging: a tighter layout raised the fit zoom, a higher zoom
+shrank the model sizes handed to the next layout, which packed tighter still.
+Measured on the same graph before the fix: model box **559 × 287** for 1,499
+nodes and a fit zoom of **2.65** — the fit ZOOMED IN, because the graph had
+collapsed to a speck.
+
+The two concerns are separated for good now:
+
+  * **Layout space is zoom-independent** (`applyLayoutSizes`). Nothing the
+    layout reads comes from `cy.zoom()`.
+  * **Render space is clamped, not pinned**: `clamp(nominal × zoom, floor,
+    nominal)`. Capped so zooming in never inflates a vessel into a saucer,
+    floored so zooming out never erases it. A clamp of a monotone function
+    cannot oscillate, and it is applied only after a layout has finished.
+
+The two-pass fit/rescale "fixed point" that used to reconcile the circularity
+is gone with it.
+
+### 3. Labels now get out of each other's way
+
+A flat budget was not enough: labels are pinned to a constant SCREEN size, so
+the density that matters is how close two land in PIXELS. A cap of 55 still
+stacked all 25 company names around 300 px of arc in a concentric core. The
+view now walks candidates best-first (designated, then companies, then the
+focus network, then hubs) and draws one only if it is clear of every label
+already drawn — recomputed when the zoom settles, so zooming in reveals more
+names the way a map does.
+
+Measured on the 1,499-node view: **0 overlapping label pairs** at fit (68
+labels) and **0** after zooming in four steps (298 labels).
+
+### 4. The view opens fitted
+
+It used to open framed on the focus neighbourhood — which, measured, put 123
+of 1,499 nodes on screen under a panel reading "1,499 entities". A number the
+canvas contradicts by 92% is how an operator concludes the view is broken.
+
+### Verified
+
+| view | nodes | in viewport | labels | overlapping pairs |
+|---|---|---|---|---|
+| whole network (real backend) | 161 | 161 | 41 | 0 |
+| + flag context | 272 | 272 | 49 | 0 |
+| seeded neighbourhood | 14 | 14 | 14 | 0 |
+| corpus-shaped stand-in | 1,499 | 1,499 | 68 | 0 |
+
+### Two things worth keeping
+
+- **`window.__cy` is left exposed on purpose.** Every number above was measured
+  through it in a real browser. The collapse was invisible from outside: the
+  panel reported 1,499 entities, no error was thrown, and the screenshots just
+  looked bad.
+- **The pytest suite writes to the real `data/` directory.** A full run
+  emptied `data/graph.sqlite` (886 nodes -> 31) and the Graph view went blank
+  for a reason that had nothing to do with the code under test. Rebuilt with
+  `python -m maritime_isr.cli graph-populate`. Worth fixing separately — a test
+  run should not be able to destroy the operator's corpus.
