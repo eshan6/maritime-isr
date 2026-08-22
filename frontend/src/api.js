@@ -145,6 +145,18 @@ export const api = {
       disposition,
     }),
   findings: (params) => get("/findings", params),
+  // ---- the MDA assistant (ADR-031) -------------------------------------
+  // NOT memoised: an alert disposition changes the queue, so a cached list
+  // would show a subject the operator has just dismissed.
+  voi: (params) => get("/voi", params),
+  // Subject ids carry colons (`contact:radar:SYN-MUM:0214`), which is why the
+  // route is declared `{subject_id:path}` — encodeURIComponent percent-encodes
+  // them and Starlette hands the decoded value back.
+  voiDetail: (id) => get(`/voi/${encodeURIComponent(id)}`),
+  voiWorkload: () => get("/voi/workload"),
+  voiCatalog: () => memo("voi-catalog", () => get("/voi/catalog")),
+  voiAsk: (id, question) =>
+    post(`/voi/${encodeURIComponent(id)}/ask`, { question }),
   events: (params) => get("/events", params),
   // Per-H3-cell counts over the WHOLE corpus, not a page. The map uses this
   // instead of plotting every event, which on the real corpus both truncated

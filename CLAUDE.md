@@ -202,6 +202,11 @@ ingest/    one module per source; lands raw + normalizes to canonical schema
 process/   SAR preprocessing, detection, track building, features
 fusion/    association engine + dark-vessel logic (THE fusion core — keep it source-agnostic)
            (an empty `fuse/` package also exists, unused — do not put code there)
+assistant/ the MDA assistant (ADR-031): the ranked Vessel of Interest object —
+           factor catalog, decomposable score, plain-language narration,
+           recommended next actions, grounded Q&A. ASSEMBLES, never detects:
+           a collector that started detecting would be a second, uncalibrated
+           copy of a rule that already exists.
 graph/     ontology, edge store, event engine, confidence decay
 rules/     anomaly library, risk scoring
 eval/      the permanent evaluation harness

@@ -77,7 +77,12 @@ def world():
 
 #: Every package that reaches a verdict. None may consult ground truth.
 DETECTION_PATHS = ("detect", "fusion", "fuse", "anomaly", "graph", "tracks",
-                   "rules", "eval", "product", "api")
+                   "rules", "eval", "product", "api",
+                   # The MDA assistant (ADR-031) assembles, ranks, narrates and
+                   # answers questions about subjects. It is the surface an
+                   # operator forms their trust from, so it is the last place
+                   # that may see the answer key.
+                   "assistant")
 
 
 def _truth_references(path: Path) -> list[str]:

@@ -168,6 +168,70 @@ CONTACT_PREFIX = "contact"
 #: answer key.
 _SYNTHETIC_STATION_PREFIX = "SYN-"
 
+#: Every reserved token that marks a *sensor-side* identifier as scenario data.
+#: The radar network names stations `SYN-MUM`; the scene generator names scenes
+#: `SYN_S1_20260710_M`. Two spellings, one meaning, and both have to be
+#: recognised or a detection minted from one of them inherits the wrong flag.
+_SYNTHETIC_SENSOR_PREFIXES = ("SYN-", "SYN_")
+
+
+def sensor_ref_is_synthetic(ref: str | None) -> bool:
+    """Does this scene or station id come from the scenario sensor network?
+
+    **A rule about an identifier space, never about ground truth** — the same
+    line `ensure_contact_node` already walks. `radar:` is stripped first because
+    the radar path names its scenes after the stations that saw them
+    (`radar:SYN-MUN`), so the reserved token is not at position zero.
+    """
+    s = str(ref or "")
+    if s.startswith("radar:"):
+        s = s[len("radar:"):]
+    return s.startswith(_SYNTHETIC_SENSOR_PREFIXES)
+
+
+#: Node prefix for one unexplained observation — a single look, not a track.
+DETECTION_PREFIX = "detection"
+
+
+def ensure_detection_node(store, detection_id: str, *, scene_id: str | None,
+                          source: str = "fusion_core", props: dict | None = None
+                          ) -> str:
+    """The graph node for one unexplained observation, created if absent.
+
+    **`detect_dark_vessels` raised alerts against a subject that was not a node
+    at all**, and the consequence was not a missing link — it was a wrong
+    label. `GraphStore.add_alert` derives `is_synthetic` by looking the subject
+    up in `nodes`; a subject that does not exist returns no row, the flag
+    defaults to 0, and every dark-vessel alert in the corpus was recorded as
+    **real data**. Measured on seed 7 before this function existed: **9 of 9**,
+    all of them produced from the scenario radar picture. ADR-019 puts the
+    entire real-versus-synthetic separation on that one column, and this was the
+    one detector quietly writing the wrong value into it.
+
+    That is the same shape as ADR-022's shadow stub and ADR-028's second
+    finding, for the third time: *minting an id is not the same as creating the
+    node*, and a subject that resolves to nothing passes every presence check
+    there is. So the detection becomes an object — something was observed here,
+    at this time, and nothing explains it — and the flag is inherited from the
+    sensor that saw it by the same reserved-token rule contacts already use.
+
+    Typed `contact` rather than needing a new ontology entry: a detection *is* a
+    sensed target with no broadcast identity. What distinguishes it from a
+    tracked contact is `single_look`, which is on the props where a UI can read
+    it — one look from a satellite is a photograph, a radar run is a history,
+    and an operator must not read one as the other.
+    """
+    nid = f"{DETECTION_PREFIX}:{detection_id}"
+    if store.node(nid) is None:
+        store.upsert_node(
+            nid, CONTACT_PREFIX,
+            dict(sensor=source, scene_id=scene_id, named=False,
+                 single_look=True,
+                 note="an unexplained observation with no broadcast identity",
+                 **(props or {})),
+            is_synthetic=sensor_ref_is_synthetic(scene_id))
+    return nid
+
 
 def contact_node_id(track_key: str, *, source: str) -> str:
     """The graph node for a target we can see but cannot name.

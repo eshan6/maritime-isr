@@ -28,12 +28,14 @@ import math
 
 import pandas as pd
 
-from ..config import (ANOMALY_THRESHOLDS, GEOFENCE_LOITER_MIN_HOURS,
+from ..config import (ANCHORAGE_RADIUS_KM, ANOMALY_THRESHOLDS,
+                      GEOFENCE_LOITER_MIN_HOURS, PORT_RADIUS_KM,
                       RENDEZVOUS_NEAR_KM, RENDEZVOUS_PARTY_SLACK_S,
                       RENDEZVOUS_WINDOW_S)
-from ..graph.identity import (ensure_contact_node, resolve_mmsi,
-                              track_subject_id)
+from ..graph.identity import (ensure_contact_node, ensure_detection_node,
+                              resolve_mmsi, track_subject_id)
 from ..ports import PORTS as _PORTS
+from ..ports import at_waiting_area
 from ..zones.derive import SENSITIVE_AREAS as _SENSITIVE_AREAS
 
 # --- sensitive geometry (geofence layer, roadmap 5.2 #4) ------------------
@@ -102,7 +104,14 @@ def detect_dark_vessels(store, verdicts: list[dict], *, source_ref: str) -> list
     for v in verdicts:
         if v["status"] != "dark_candidate":
             continue
-        did = f"detection:{v['detection_id']}"
+        # The subject is published as a node before the alert points at it.
+        # It used to be a bare f-string, so `add_alert` looked it up, found
+        # nothing, and defaulted `is_synthetic` to False — every dark-vessel
+        # alert in the scenario corpus was filed as real data. See
+        # `ensure_detection_node`.
+        did = ensure_detection_node(store, v["detection_id"],
+                                    scene_id=v.get("scene_id"),
+                                    props=dict(length_m=v.get("length_m")))
         ev = [dict(edge="dark_candidate", src=did, dst="sensor:sentinel1-syn",
                    confidence=round(v["dark_score"], 3), source="fusion_core",
                    source_ref=source_ref,
@@ -212,6 +221,40 @@ def detect_dark_rendezvous(store, encounters: list[dict],
             untracked.append(a)
 
     for e in encounters:
+        # **A meeting at a berth is a berth, not a transfer.** Two hulls lying
+        # within 500 m of each other at under 2 knots is the encounter
+        # primitive's definition, and inside a port or its designated waiting
+        # area that describes every ship alongside and every ship in the queue.
+        #
+        # Measured on seed 7 before this test existed: **42 of 43
+        # dark_rendezvous alerts fired inside a berth or an anchorage** — 32 of
+        # them 470 m from the Mangalore port coordinate, 8 at Mundra, 2 at
+        # Kochi. One alert in forty-three was in open water. A queue that is
+        # 98% berth traffic is the alert-fatigue failure ADR-004 exists to
+        # prevent, and it stayed invisible while the corpus was SAR-only,
+        # because six unmatched contacts in total can only meet each other by
+        # accident. Coastal radar (ADR-028) put thousands of contacts into the
+        # picture and the anchorages lit up.
+        #
+        # `at_waiting_area` is the shared helper `extract_features` already
+        # uses to suppress loiter episodes for exactly this reason — a vessel
+        # stopped off Kandla is waiting for a berth, not loitering. The
+        # rendezvous rule asks the same question of a place and had never been
+        # taught to. Reusing the one helper is what keeps the two rules from
+        # drifting apart again; both layers are needed because a berth radius
+        # does not reach the anchorage that serves it.
+        #
+        # What this costs: a ship-to-ship transfer that genuinely happens at
+        # anchor is now invisible to this rule. That is a real loss and it is
+        # the precision-first trade stated in ADR-004 — bunkering at a
+        # designated anchorage is lawful and routine, so an alert there carries
+        # almost no information, while the same meeting 40 nm offshore carries
+        # most of it. Separating the two needs activity classification (is this
+        # hull anchored, or holding station in open water?), which is Area 2 of
+        # the Section-3 brief and does not exist yet.
+        if at_waiting_area(e["lat"], e["lon"], port_radius_km=PORT_RADIUS_KM,
+                           anchorage_radius_km=ANCHORAGE_RADIUS_KM):
+            continue
         t = e["t_start"].timestamp()
         t_end = pd.Timestamp(e["t_end"]).timestamp()
         # Direct evidence: one of THESE two tracks was unexplained while THIS

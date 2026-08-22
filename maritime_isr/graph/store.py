@@ -621,8 +621,28 @@ class GraphStore:
         it exactly the distinction it must not use. Deriving it here, after the
         decision has been made, keeps the detector blind while still letting the
         alert be split real from synthetic for reporting.
+
+        **Deriving it required the subject to exist, and that was never
+        checked.** A subject absent from `nodes` returned no row, the flag fell
+        through to 0, and the alert was filed as real data. Measured on seed 7:
+        all 9 `dark_vessel` alerts, every one of them from the scenario radar
+        picture, recorded as real — because `detect_dark_vessels` pointed them
+        at `detection:<id>`, a string nothing had ever created.
+
+        Silence was the wrong default in the one place it could do most damage.
+        ADR-019 rests the entire real-versus-synthetic split on this column, and
+        an unknown subject is not evidence of realness — it is evidence that the
+        question cannot be answered, so it is refused instead of guessed. A
+        caller that genuinely knows may still pass the flag explicitly.
         """
         if is_synthetic is None:
+            if self.node(subject) is None:
+                raise ValueError(
+                    f"alert {alert_id!r} names subject {subject!r}, which is "
+                    f"not a node in this graph, so `is_synthetic` cannot be "
+                    f"derived and would silently default to real. Publish the "
+                    f"subject first (see graph.identity.ensure_contact_node / "
+                    f"ensure_detection_node) or pass is_synthetic explicitly.")
             is_synthetic = self._subject_is_synthetic(subject)
         self._con.execute(
             "INSERT OR IGNORE INTO alerts(alert_id,rule,subject,ts,"
