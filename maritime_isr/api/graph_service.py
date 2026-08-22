@@ -24,6 +24,7 @@ from typing import Iterator, Sequence
 
 from ..config import GRAPH_DB_NAME, TRAVERSAL_MAX_NODES, cfg
 from ..graph import GraphStore
+from ..schemas.keys import IDENTITY_KINDS
 
 # ---- risk index cache, invalidated by the graph file's mtime ----------------
 _risk_cache: dict = {"mtime": None, "index": {}}
@@ -166,6 +167,14 @@ def full_graph(limit: int = FULL_GRAPH_MAX_NODES,
         # differently instead of hiding them.
         "is_current": e.t_end is None,
         "is_synthetic": bool(e.is_synthetic),
+        # Which KIND of identifier an `identified-as` edge asserts. Without it
+        # every identity edge on the canvas reads "identified as", which is the
+        # one thing they all have in common and the one thing that carries no
+        # information: an MMSI, an IMO and a ship's name are three different
+        # claims with three different strengths (a hull number is welded on, a
+        # name is paint). `props` as a whole is deliberately NOT shipped — this
+        # is up to 1,900 edges and the client needs one field of it.
+        "identity_kind": _identity_kind(e),
     } for e in sub["edges"]]
 
     # One diamond per authority, however many node ids present as it. Done
@@ -416,6 +425,26 @@ def merge_duplicate_authorities(nodes: list[dict],
     return kept, out_edges
 
 
+def _identity_kind(edge) -> str | None:
+    """The identifier kind an `identified-as` edge asserts, or None.
+
+    The populator stamps `props["kind"]` on every identity edge it writes
+    (`graph/from_landed._add_key_identities` and `add_identities`), drawn from
+    the closed `schemas.keys.IDENTITY_KINDS` vocabulary. Reading it back is
+    what lets the graph say "MMSI" or "IMO" where it used to say "identified
+    as" for all of them.
+
+    Gated on the closed vocabulary rather than passed through raw: an unknown
+    spelling reaching the canvas as an edge label would be a silent way for the
+    populator and the UI to drift apart, which is the drift ADR-022 exists to
+    prevent. An unrecognised kind falls back to the generic label instead.
+    """
+    if getattr(edge, "edge_type", None) != "identified-as":
+        return None
+    kind = (getattr(edge, "props", None) or {}).get("kind")
+    return kind if kind in IDENTITY_KINDS else None
+
+
 def _node_label(props: dict, node_id: str) -> str:
     for key in ("name", "code", "port_id", "mmsi", "imo"):
         if props.get(key):
@@ -498,6 +527,7 @@ def neighbourhood(vessel_id: str, hops: int = 1) -> dict | None:
                         "confidence": round(e.base_confidence, 3),
                         "t_start": _iso(e.t_start), "t_end": _iso(e.t_end),
                         "is_synthetic": bool(e.is_synthetic),
+                        "identity_kind": _identity_kind(e),
                     }
                 # Only keep expanding through hubs (vessels, companies). A leaf
                 # type is added and shown, but we do not pull in its other

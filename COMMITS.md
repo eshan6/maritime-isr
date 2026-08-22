@@ -698,3 +698,74 @@ and pressing play slides ships across the Arabian Sea while the counter moves.
 The notes bar admits it when the corpus reaches back further than the AIS does.
 *Failure:* a blank white page means a stale `dist/` — rebuild with
 `npm run build` in `frontend/`.
+
+---
+
+## 2026-08-22 — the map said everything and distinguished nothing
+
+*Reported: "the map key and the map have become too cluttered and crowded" —
+and, underneath it, "which ones are the actual vessels?"*
+
+```
+git add maritime_isr/api/ frontend/src frontend/dist \
+        tests/test_map_legibility.py STATE.md COMMITS.md
+git commit -m "fix: the map drew a two-year-old pin and a live ship as the same mark"
+```
+
+**The question was the finding.** Exactly one layer on that map moves. Every
+other coloured dot is an event pin, deliberately not filtered by the clock so
+nothing blinks during playback — a good decision the map never disclosed and
+then undermined by drawing both as a small coloured circle. So a pin that has
+never moved read as a ship that had stopped, which is what "they stay stationary
+for days" was describing.
+
+Eighteen of twenty-four layers on at first paint. Eleven layers drawn as
+circles between r4 and r8. Three unrelated meanings sharing `#b0221b`. Every one
+of those defaults had been set for a real reason in its own past session; nobody
+ever added them up.
+
+Now: four collapsible key groups that say what they hold (a collapsed group
+still shows `n/m` — collapsing reduces reading, it does not hide state); an
+opening set of five layers; mark weight separating live from historical from
+sensor, with alerts drawn as a ring rather than a disc because an alert is an
+annotation *about* a position; AIS gaps moved off the encounter red to
+near-black, which says "silence" and deliberately not "intentional silence"
+(ADR-005); and the notes bar moved clear of the key it had been painting over.
+
+Three defects found while in there, all of the same kind — **a view asserting
+what it had not measured, or withholding what it had:**
+
+* `/tracks` capped at 200 and returned `note: None` regardless. Measured: **200
+  of 208** vessels drawn, in silence. `/events` has reported its cap since
+  ADR-024; this was the one endpoint still breaking the rule.
+* Alert markers were drawn at the subject's *earliest* located event, because
+  events arrive ordered by `start_time`. Now: her track interpolated to the
+  alert's own timestamp, else her nearest event **in time** with the label
+  saying so, else no marker at all.
+* 607 graph identity edges all read "identified as" — the one phrase carrying no
+  information. `identity_kind` now rides the payload, gated on the closed
+  `IDENTITY_KINDS` vocabulary. Measured: 225 MMSI, 224 name, 99 call sign, 59
+  IMO, 0 unlabelled. **`GraphEdge` had to be declared too** — pydantic drops
+  undeclared keys, so the field would have reached `/graph/all` and silently not
+  `/vessels/{id}/neighbourhood`.
+
+And the reported one: hovering a graph edge did nothing, because `mouseover` was
+bound to `node` only.
+
+Verify:
+
+```
+python -m pytest tests/test_map_legibility.py -q      # 12 passed
+python -m pytest -q     # 694 passed, 18 skipped, 1 pre-existing failure
+cd frontend && npm run build && cd .. && python -m maritime_isr.api
+```
+
+The pre-existing failure is the `config.CLI` assertion in
+`test_sanctions_match.py`, which fails wherever the console script is on PATH.
+Second session running; it should be fixed.
+
+*Success:* the map opens calm, and the four key groups tell you which marks move
+and which are pins. Hovering a graph edge lights it up and names it — "MMSI",
+"IMO number", "sanctioned under" — instead of doing nothing.
+*Failure:* a blank white page means a stale `dist/` — rebuild with
+`npm run build` in `frontend/`.

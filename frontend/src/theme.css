@@ -429,6 +429,32 @@ p:last-child { margin-bottom: 0; }
 .layer-toggle input { accent-color: var(--blue); }
 .layer-swatch { width: 12px; height: 12px; border-radius: 3px; flex: 0 0 auto; }
 
+/* The key's collapsible groups. Twenty-four flat checkboxes in a scrolling
+   column is an inventory; four named groups with a one-line hint is a key. */
+.layer-group + .layer-group { border-top: 1px solid var(--border); margin-top: 6px; }
+.layer-group-head {
+  display: flex; align-items: center; gap: 6px; width: 100%;
+  background: none; border: 0; padding: 7px 0 5px; cursor: pointer;
+  font: inherit; color: var(--ink-3); text-align: left;
+}
+.layer-group-head:hover { color: var(--ink-1); }
+.layer-group-title {
+  flex: 1; font-size: var(--fs-micro); text-transform: uppercase;
+  letter-spacing: 0.07em; font-weight: var(--w-bold);
+}
+.layer-group-count { font-size: var(--fs-micro); font-variant-numeric: tabular-nums; }
+.layer-group-caret {
+  display: inline-block; font-size: 9px; line-height: 1;
+  transition: transform 120ms ease; flex: 0 0 auto;
+}
+.layer-group-caret.open { transform: rotate(90deg); }
+.layer-group-body { padding-bottom: 6px; }
+/* The sentence that stops a fixed pin reading as a stalled ship. */
+.layer-group-hint {
+  font-size: var(--fs-micro); line-height: 1.45;
+  margin: 0 0 6px; padding-left: 15px;
+}
+
 .legendline { display: flex; align-items: center; gap: 7px;
   font-size: var(--fs-meta); color: var(--ink-2); padding: 2px 0; }
 .legend-group { font-size: var(--fs-micro); letter-spacing: 0.07em;
@@ -459,8 +485,15 @@ p:last-child { margin-bottom: 0; }
 .maplibregl-popup-content { font: inherit; font-size: var(--fs-meta);
   border-radius: var(--radius); box-shadow: var(--shadow-lg); padding: 9px 11px; }
 
+/* Clear of the key rather than on top of it. Both panels sat at `left: 12px`,
+   so the notes — which come later in the DOM and therefore paint over — covered
+   the bottom of the layer list whenever the key was tall enough to reach them.
+   The disclosures and the controls they qualify were competing for one column.
+   240px is the key's 216px plus its 12px gutter and a 12px gap; the `min()`
+   keeps the panel on screen when the window is too narrow for both. */
 .map-notes {
-  position: absolute; left: 12px; bottom: 74px; max-width: 460px; z-index: 5;
+  position: absolute; left: 240px; bottom: 74px; z-index: 5;
+  max-width: min(460px, calc(100vw - 264px));
 }
 .map-notes .note-key { font-weight: var(--w-bold); }
 

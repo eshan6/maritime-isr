@@ -198,6 +198,12 @@ class GraphEdge(BaseModel):
     t_start: Optional[str] = None
     t_end: Optional[str] = None
     is_synthetic: bool = False
+    #: Which identifier an `identified-as` edge asserts — mmsi / imo /
+    #: call_sign / name / flag — so the canvas can label it with the specific
+    #: claim rather than the generic relationship. None on every other edge
+    #: type. Declared here because pydantic drops undeclared keys: the field
+    #: reaches the neighbourhood route only if the model knows about it.
+    identity_kind: Optional[str] = None
 
 
 class Neighbourhood(BaseModel):
