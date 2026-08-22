@@ -515,6 +515,48 @@ def connectivity(store: GraphStore) -> None:
               f"{with_3} with >=3")
 
 
+def _area2_inputs():
+    """Current identities and the per-area baseline index (ADR-032).
+
+    Both degrade to "absent" rather than raising: a corpus with no identity
+    table or too few positions to fit a baseline still runs the original six
+    detectors, and the two Area 2 ones simply stay quiet. A pipeline stage that
+    could not run without an optional input would make the optional input
+    mandatory by accident.
+    """
+    import pandas as pd
+
+    from maritime_isr import baselines as bl
+    from maritime_isr.api.reader import open_reader
+
+    identities: list[dict] = []
+    index = None
+    with open_reader() as reader:
+        if reader.has("gfw_vessel_identity"):
+            identities = reader.rows("""
+                SELECT * FROM (
+                  SELECT *, row_number() OVER (
+                    PARTITION BY vessel_id
+                    ORDER BY (valid_to IS NULL) DESC, valid_from DESC NULLS LAST
+                  ) AS _rn FROM gfw_vessel_identity) WHERE _rn = 1
+            """)
+        if reader.has("ais_position"):
+            pos = pd.DataFrame(reader.rows(
+                "SELECT vessel_id, mmsi, lat, lon, sog_kn, cog_deg, ts, "
+                "is_synthetic FROM ais_position"))
+            derived = bl.derive_baselines(pos)
+            if derived:
+                n = bl.land_baselines(derived)
+                index = bl.BaselineIndex(derived)
+                cov = index.coverage()
+                print(f"  area baselines : {n:,} cell(s) landed, "
+                      f"{cov['usable']:,} usable "
+                      f"({cov['fraction_usable']:.0%} of cells at res "
+                      f"{cov['res']}, floor {cov['min_observations']} obs)")
+    print(f"  identities     : {len(identities):,} current row(s)")
+    return identities, index
+
+
 def run_anomalies(store: GraphStore, tracks_out: dict,
                   fusion_out: dict) -> dict:
     """Phase 5 over the combined corpus — the real anomaly library.
@@ -539,6 +581,12 @@ def run_anomalies(store: GraphStore, tracks_out: dict,
               f"stage.\n        If the detectors changed since they were written, "
               f"the measurement\n        at the end scores BOTH rule sets. Delete "
               f"data/graph.sqlite and re-run\n        for a clean figure.")
+    # ---- Area 2 inputs (ADR-032) -----------------------------------------
+    # Derived here rather than inside the library so the detectors stay pure
+    # functions of what they are handed, and so the baseline artifact is landed
+    # and inspectable rather than living for the duration of one call.
+    identities, baselines = _area2_inputs()
+
     t0 = time.time()
     fired = run_anomaly_library(
         store,
@@ -547,7 +595,9 @@ def run_anomalies(store: GraphStore, tracks_out: dict,
         spoof_events=tracks_out["spoof_events"],
         associations=fusion_out["associations"],
         verdicts=fusion_out["verdicts"],
-        source_ref="scenario-combined")
+        source_ref="scenario-combined",
+        identities=identities,
+        baselines=baselines)
     print(f"  ran in {time.time() - t0:.0f}s")
     for atype, ids in sorted(fired.items()):
         print(f"    {atype:<26}{len(ids):>6} alert(s)")

@@ -84,6 +84,15 @@ def test_every_factor_kind_narrates_and_recommends():
         assert len(text) > 30, f"{kind} narrates to nothing useful: {text!r}"
         assert "{" not in text and "None" not in text, \
             f"{kind} leaked a template or a null into its sentence: {text!r}"
+        # A kind with no branch of its own falls through to the generic
+        # fallback, which is true but dull — and that is exactly what happened
+        # when `dark_contact` was renamed to `dark_vessel` and its sentence was
+        # left behind on the old key. The fallback is a safety net, not an
+        # acceptable resting place for a registered kind.
+        generic = f"{s.label.lower()} — {s.blurb}"
+        assert generic not in text.lower(), (
+            f"{kind} has no narration branch of its own — it is falling "
+            f"through to the generic fallback in narrate_factor()")
         assert s.actions, f"{kind} proposes no action"
         for action in s.actions:
             assert action in recommend.ACTIONS, \

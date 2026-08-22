@@ -436,6 +436,63 @@ def cmd_alerts(args):
     g.close()
 
 
+def cmd_baselines(args):
+    """Derive or show the per-area baseline layer.
+
+    The whole point of this layer is that it is *inspectable* — the requirement
+    asks for a maintained artifact rather than a constant, and an artifact
+    nobody can print is indistinguishable from a constant.
+    """
+    import pandas as pd
+
+    from . import baselines as bl
+    from .api.reader import open_reader
+    from .config import CLI as _CLI
+
+    if args.action == "derive":
+        with open_reader() as reader:
+            if not reader.has("ais_position"):
+                raise SystemExit(
+                    f"no landed AIS positions to derive from — run "
+                    f"`{_CLI} scenario generate` or land a real corpus first")
+            pos = pd.DataFrame(reader.rows(
+                "SELECT vessel_id, mmsi, lat, lon, sog_kn, cog_deg, ts, "
+                "is_synthetic FROM ais_position"))
+        derived = bl.derive_baselines(pos)
+        n = bl.land_baselines(derived)
+        cov = bl.BaselineIndex(derived).coverage()
+        print(f"derived from {len(pos):,} position(s)")
+        print(f"  landed        : {n:,} cell(s) at H3 res {cov['res']}")
+        print(f"  usable        : {cov['usable']:,} "
+              f"({cov['fraction_usable']:.0%})")
+        print(f"  insufficient  : {cov['insufficient']:,} "
+              f"(under {cov['min_observations']} observations)")
+        print(f"\n  {_CLI} baselines show   to read them")
+        return
+
+    rows = bl.load_baselines()
+    if not rows:
+        raise SystemExit(f"no landed baselines — run `{_CLI} baselines derive`")
+    index = bl.BaselineIndex(rows)
+    cov = index.coverage()
+    print(f"per-area baselines — {cov['usable']:,} usable of {cov['cells']:,} "
+          f"cell(s) at H3 res {cov['res']}\n")
+    usable = sorted(index.usable(), key=lambda b: -b.n_observations)
+    print(f"{'cell':<17}{'lat':>8}{'lon':>8}{'obs':>9}{'ships':>7}"
+          f"{'p50':>7}{'p95':>7}{'p99':>7}{'ships/day':>11}")
+    for b in usable[:args.top]:
+        m = b.metrics.get("sog_kn", {})
+        print(f"{b.h3_cell:<17}{b.lat:>8.2f}{b.lon:>8.2f}"
+              f"{b.n_observations:>9,}{b.n_vessels:>7}"
+              f"{m.get('p50', 0):>7.1f}{m.get('p95', 0):>7.1f}"
+              f"{m.get('p99', 0):>7.1f}"
+              f"{(b.vessels_per_day if b.vessels_per_day is not None else 0):>11.1f}")
+    print(f"\n  Speeds are knots. A cell under {cov['min_observations']} "
+          f"observations reports no distribution at all — a percentile over a "
+          f"handful of\n  points is noise wearing an authoritative face, and "
+          f"`is_unusual` answers 'cannot say' there rather than 'normal'.")
+
+
 def cmd_voi(args):
     """The MDA assistant from a terminal — the same code the API serves.
 
@@ -949,6 +1006,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--evidence", action="store_true",
                    help="with `show`: print every evidence item, not a count")
     p.set_defaults(fn=cmd_voi)
+
+    p = sub.add_parser(
+        "baselines",
+        help="per-area behavioural baselines: what normal looks like where "
+             "(ADR-032)")
+    p.add_argument("action", choices=["derive", "show"],
+                   help="derive from landed positions and land the result, "
+                        "or show the landed snapshot")
+    p.add_argument("--top", type=int, default=20)
+    p.set_defaults(fn=cmd_baselines)
 
     p = sub.add_parser("status")
     p.set_defaults(fn=cmd_status)

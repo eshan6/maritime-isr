@@ -85,7 +85,7 @@ def narrate_factor(f: Factor, *, name: str) -> str:
     again = f" This has happened {n} times." if n > 1 else ""
     conf = confidence_word(f.confidence)
 
-    if f.kind == "dark_contact":
+    if f.kind == "dark_vessel":
         length = d.get("length_m")
         size = f" about {float(length):.0f} m long" if length else ""
         where = _fmt_pos(d.get("lat"), d.get("lon"))
@@ -136,6 +136,31 @@ def narrate_factor(f: Factor, *, name: str) -> str:
         zone = d.get("zone") or "an area"
         return (f"{name} entered {zone} for the first time on record, having "
                 f"worked this coast elsewhere. {conf.capitalize()}.{again}")
+
+    if f.kind == "notable_activity":
+        act = str(d.get("activity") or "unusual motion").replace("_", " ")
+        h = _hours(d.get("hours"))
+        local = d.get("local_baseline")
+        tail = ""
+        if isinstance(local, dict) and local.get("statement"):
+            tail = (" Against what is normal in this area: "
+                    + local["statement"]
+                    + (" That is unusual here."
+                       if local.get("unusual") else
+                       " That is ordinary here, which is why this is scored "
+                       "down rather than raised."))
+        return (f"{name} was {act}"
+                + (f" for {h:.1f} hours" if h else "")
+                + f". {d.get('reason') or ''}".rstrip()
+                + f" {conf.capitalize()}.{tail}{again}")
+
+    if f.kind == "identity_contradiction":
+        statements = d.get("statements") or []
+        n_c = int(d.get("n_contradictions") or len(statements) or 1)
+        lead = (f"{name} declares an identity that does not hold together — "
+                f"{n_c} contradiction{'' if n_c == 1 else 's'}.")
+        return (lead + " " + " ".join(str(s) for s in statements[:3])
+                + f" {conf.capitalize()}.")
 
     if f.kind == "assessed_ais_disabling":
         n_gaps = int(d.get("n_gaps") or 1)

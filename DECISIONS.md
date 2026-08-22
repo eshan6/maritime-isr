@@ -2273,3 +2273,170 @@ number up.
   time. Importing `api.reader` — a DuckDB read layer with no web dependency —
   used to construct the whole FastAPI app as a side effect, which became a real
   cycle the moment a non-API module needed the reader.
+
+---
+
+## ADR-032 — Predictive analysis of AIS tracks, and one capability measured out of the product *(Accepted)*
+**2026-08-22. Section 3, Area 2 of the IDEX Challenge 82 brief.**
+
+**Context.** AIS carries kinematics, position and self-declared static
+information. The requirement is blunt about the gap: the existing software
+"is not able to classify authenticity of static information transmitted on AIS
+and activities of the vessels". The brief adds a word that decides the shape of
+the work — *predictive* — and names four deliverables: identity authenticity,
+forward projection, activity classification, and per-area baselines learned from
+local history.
+
+**Decision — five parts.**
+
+**(a) Identity authenticity is arithmetic before it is inference.** Two checks
+carry most of the value and neither needs a model. The IMO check digit is a
+checksum over the first six digits and rejects 90.3% of random seven-digit
+strings — verified in the tests rather than quoted, because the rule's whole
+justification is that number. The MMSI's Maritime Identification Digits are
+allocated by the ITU to a flag administration, so a hull broadcasting a
+Panamanian prefix while declaring an Indian flag states two incompatible things
+about itself in one message stream. Registry consistency (name, call sign,
+vessel type) is promoted from "a component buried in a score" to a rule of its
+own, with confidences that differ by field and say why: a call sign is issued
+with the flag and changes only when the flag does; a name changes on sale and
+registries lag.
+
+`MID_TO_FLAG` is **deliberately partial**. This rule's entire value is that it
+almost never produces a false positive, and the fastest way to destroy that is a
+wrong row. An unallocated MID produces `not_checkable` — no claim at all —
+rather than a guess.
+
+**(b) Every check has three outcomes, not two.** `contradiction`, `ok` and
+`not_checkable`. An absent IMO is a gap in the record and reporting it as a
+contradiction would fire on most of an honest corpus; a surface also has to be
+able to say "we looked and it was fine" as distinct from "we could not look".
+`summarise()` reports all three, because a check that is `not_checkable` on 95%
+of a corpus has told you almost nothing and a report of contradictions alone
+would present that silence as a clean bill of health.
+
+**(c) Activity classification lives in `tracks/` and reads motion only.** Area 3
+requires that the same behaviours be recognisable "whether the track came from
+radar or AIS", and says outright that if they are not, "that is a defect in the
+fusion core". So the classifier takes a built track and never asks which sensor
+produced it — satisfied by *placement*, not by a compatibility shim, and
+enforced by `test_activity_is_identical_on_radar_and_ais`. Rules rather than a
+learned model, because there is no labelled corpus of vessel activity for this
+area and generating one from the scenario would be training a classifier on its
+own answer key. `unclassified` is a first-class output: a confident wrong
+activity costs more than an admitted gap.
+
+**(d) Baselines are a landed artifact, not a constant.** The brief's charge that
+this was "currently absent from the system entirely" was accurate — every
+threshold here is global, which is why the loitering rule was once a Kandla
+anchorage detector and the rendezvous rule a Mangalore berth detector (ADR-031).
+Baselines are derived per H3 cell at **res 5** (~8 km across: an approach
+channel, an anchorage and the open water outside them fall in different cells,
+while a cell still accumulates enough observations to say anything), landed with
+the full provenance envelope, and queryable. R5 is *named* in `h3util` but
+deliberately **not** added to `RESOLUTIONS`: stamping it on every positioned row
+would be a schema change across the whole corpus to serve one derived artifact
+that computes its own cell.
+
+`is_unusual` is **three-valued on purpose**. True, False and None are genuinely
+different answers — "unusual here", "ordinary here", and "we have not watched
+here enough to have an opinion" — and a boolean collapses the third into the
+second, which reports every unmonitored patch of ocean as clean.
+`MIN_OBSERVATIONS = 100` is the floor; below it a 95th percentile is an order
+statistic over a handful of points that moves by knots when one vessel passes.
+
+Measured on the corpus: **770 cells, 212 usable (27.5%)**, and the local normals
+are genuinely different — the Kandla approach carries a 95th-percentile speed of
+12.0 knots over 19,768 observations of 128 vessels, while the Mumbai anchorage
+carries 6.5 knots with a median of 0.0.
+
+**(e) Forward projection is built as an assertion and is NOT promoted to a
+suspicion factor.** This is the part worth reading twice.
+
+The brief asks that "a vessel which departs from its own predicted path is
+detectable as such". It is detectable. It is also ubiquitous. Swept over 209 AIS
+tracks across every combination of lead time, persistence gate and severity
+threshold:
+
+| lead (h) | min run | radii ≥ | departures | % of fleet |
+|---|---|---|---|---|
+| 0.5 | 2 | 1 | 1,770 | 98% |
+| 0.5 | 3 | 5 | 377 | 73% |
+| 1.0 | 3 | 5 | 775 | 92% |
+| 3.0 | 2 | 5 | 1,177 | 97% |
+| 3.0 | 2 | 20 | 22 | 10% |
+
+There is no plateau — the rule flags almost every hull in the picture, or past a
+cliff almost none, and a threshold sitting on a cliff is fitted to this corpus
+rather than to the phenomenon. The cause is physical and not fixable by tuning:
+at three hours a merchant runs 45 nm, a cone tight enough to notice an
+alteration is about ±4° of heading, and **every vessel alters course at every
+waypoint**. Dead reckoning is a good predictor along a leg and a useless one
+across a turn, and a coastal voyage is mostly turns.
+
+Under ADR-004 — precision before recall for anything analyst-facing — it is
+therefore **not** a factor on the Vessel of Interest list, `assistant/catalog.py`
+has no entry for it, and `test_projection_is_not_a_registered_suspicion_factor`
+stops it being quietly added later without a fresh measurement. What the
+projection *is* good for is kept: an assertion an operator can see ("where did
+you expect her, how sure were you"), bridging a gap, and a comparison callable
+on a subject already suspicious for another reason. What would make it
+discriminate is stated so it is not rediscovered: prediction has to be
+**route-aware**, and the zone layer's customary lanes (ADR-030) are what a
+corridor model would be fitted to.
+
+**Two defects the build found in itself.**
+
+1. **`survey_pattern` was claimed on 151 of 209 tracks.** The rule asked for
+   four long legs and three near-reciprocal turns, and any multi-week coastal
+   rotation supplies both — long legs on passage, reciprocals at each end. A
+   survey is not "has some reciprocal turns"; it is *made of* them and goes
+   nowhere. Requiring the reciprocals to be a quarter of all course changes and
+   straightness to be under 0.35 takes it to 0 false claims on whole tracks,
+   while windowed classification still finds genuine patterns.
+
+2. **The scenario's reserved MMSI block collides with an ITU reserved form, and
+   the identity rule fired on the entire synthetic fleet.**
+   `scenario.identifiers` mints into 999000000-999999999 precisely because 999
+   is not an assignable MID; ITU-R M.585 separately reserves the two-digit
+   prefix `99` for aids to navigation. Both true, and together they made
+   `check_mmsi_form` report all 222 scenario vessels as "misrepresenting what
+   kind of station it is" — at 0.8 confidence, through the one detector built to
+   have no false positives. `_is_project_reserved` exempts the block, as a
+   statement about *this project's identifier space* and never about ground
+   truth — the same line `graph.identity.sensor_ref_is_synthetic` already walks
+   — and the exemption is narrow enough that a genuine AtoN MMSI is still
+   caught.
+
+**What is NOT built, and why it is being said rather than implied.**
+
+The brief's *declared destination against implied and historical destination*,
+and *declared arrival time against plausible arrival time*, are **not
+implemented**. The reason is data, not effort: `ais_position` carries no
+declared destination or ETA, because the scenario generator emits AIS position
+reports and no message-5 voyage data. Building the comparison against a column
+that does not exist would produce a detector that can never fire — the dead-rule
+failure this project has now hit twice (`dark_contact` versus `dark_vessel` in
+ADR-031, and the whole family of never-firing detectors STATE.md tracks). The
+honest sequence is: extend the scenario AIS emitter with declared destination
+and ETA, regenerate, then build the comparison against real (synthetic) inputs.
+That is the first item of Area 2's remainder.
+
+**Consequences.**
+
+* Two new detectors, both gated and both for opposite reasons.
+  `identity_contradiction` is gated **low** (0.40) because its checks are
+  arithmetic rather than inferential — there is no marginal, threshold-sensitive
+  finding for a gate to hold back. `notable_activity` is gated **high** (0.55)
+  because an activity is a description, not a finding: only three activities are
+  eligible at all, and most vessels are transiting or anchored.
+* The ranked list gains its first `identity` and `motion` factors sourced from
+  Area 2, which is the brief's own test that an area was wired in rather than
+  built in isolation.
+* The arithmetic identity checks **cannot fire on scenario data by
+  construction** and are built for the landed real GFW corpus. Their precision
+  must be measured there, on the laptop; until then they are "built, unverified
+  on host" (CLAUDE.md §5).
+* `run_anomaly_library` takes `identities` and `baselines` as optional inputs,
+  so a caller written against the original six detectors keeps working and the
+  new ones stay quiet rather than raising.

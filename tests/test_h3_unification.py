@@ -6,6 +6,7 @@ nothing while every row count looks healthy.
 """
 from __future__ import annotations
 
+import ast
 import pathlib
 
 import h3
@@ -35,19 +36,73 @@ def test_tiling_module_is_gone():
 _H3_DIRECT_ALLOWED = {"h3util.py", "laptop_doctor.py"}
 
 
+#: The h3 API names no module outside `_H3_DIRECT_ALLOWED` may call.
+_BANNED_H3_CALLS = ("latlng_to_cell", "geo_to_h3")
+
+
+def _h3_call_sites(path: pathlib.Path) -> list[str]:
+    """Real calls to the banned h3 names — not mentions of them.
+
+    **Parsed rather than grepped, and docstrings are excluded deliberately.**
+    Several modules *document* this rule ("hand-rolling `latlng_to_cell` here is
+    precisely how the joins go silently wrong") and a substring search cannot
+    tell a promise not to do something from doing it. `baselines.py` was flagged
+    by the grep version for a docstring saying it must not do the thing it does
+    not do — the same false positive `_truth_references` in test_scenario.py was
+    written to avoid, one guard along.
+
+    What counts is an attribute access or a bare call on one of those names,
+    which is what actually computes a cell.
+    """
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except SyntaxError:                                          # pragma: no cover
+        return []
+    hits: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr in _BANNED_H3_CALLS:
+            hits.append(f"{node.attr} (line {node.lineno})")
+        elif isinstance(node, ast.Name) and node.id in _BANNED_H3_CALLS:
+            hits.append(f"{node.id} (line {node.lineno})")
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                if alias.name in _BANNED_H3_CALLS:
+                    hits.append(f"import {alias.name} (line {node.lineno})")
+    return hits
+
+
 def test_no_module_computes_cells_outside_the_helper():
     """Only h3util may compute cells. One grid, one code path (ADR-003)."""
     offenders = []
     for p in PKG.rglob("*.py"):
         if p.name in _H3_DIRECT_ALLOWED:
             continue
-        src = p.read_text(encoding="utf-8")
-        if "latlng_to_cell" in src or "geo_to_h3" in src:
-            offenders.append(p.relative_to(REPO))
+        for hit in _h3_call_sites(p):
+            offenders.append(f"{p.relative_to(REPO)}:{hit}")
     assert not offenders, (
         "these modules compute H3 cells themselves instead of using h3util: "
         f"{offenders}"
     )
+
+
+def test_the_h3_guard_can_actually_fail(tmp_path):
+    """A guard that cannot fail is not a guard.
+
+    Negative control, matching the one `test_the_isolation_check_can_actually_
+    fail` gives the ground-truth guard: a module that really does call the h3
+    API must be caught, and one that merely writes the name in prose must not.
+    """
+    bad = tmp_path / "bad.py"
+    bad.write_text("import h3\ncell = h3.latlng_to_cell(1.0, 2.0, 7)\n")
+    assert _h3_call_sites(bad), "the guard failed to catch a real call"
+
+    good = tmp_path / "good.py"
+    good.write_text('"""Never call latlng_to_cell here — use h3util."""\n'
+                    "# geo_to_h3 is banned outside the helper\n"
+                    "x = 1\n")
+    assert not _h3_call_sites(good), (
+        "the guard flagged a docstring — it must distinguish a promise not to "
+        "compute a cell from computing one")
 
 
 def test_nothing_derives_a_coarse_cell_from_a_fine_one():

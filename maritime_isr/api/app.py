@@ -259,6 +259,35 @@ def create_app() -> FastAPI:
             raise HTTPException(404, f"no subject {subject_id!r} on the list")
         return a
 
+    # ---- per-area baselines (ADR-032) ------------------------------------
+    @api.get("/baselines", dependencies=guard)
+    def baselines(limit: int = Query(default=500, ge=1, le=settings.max_page),
+                  usable_only: bool = True) -> dict:
+        """What normal looks like, per area — the inspectable artifact.
+
+        `coverage` is not decoration. A layer with 212 usable cells out of 770
+        will fall back to its global threshold in most of the picture, and an
+        operator told "area baselines are in use" would reasonably assume
+        otherwise.
+        """
+        from .. import baselines as bl
+
+        rows = bl.load_baselines()
+        index = bl.BaselineIndex(rows)
+        items = index.usable() if usable_only else rows
+        items = sorted(items, key=lambda b: -b.n_observations)[:limit]
+        real = sum(1 for b in items if not b.is_synthetic)
+        return {
+            "count": models.SplitCount(
+                real=real, synthetic=len(items) - real).model_dump(),
+            "total_matched": len(rows),
+            "coverage": index.coverage(),
+            "items": [b.as_dict() for b in items],
+            "note": (None if rows else
+                     f"No baselines landed. Run `{service.CLI} baselines "
+                     f"derive`."),
+        }
+
     # ---- events / scenes / ports ----------------------------------------
     @api.get("/events", dependencies=guard)
     def events(kinds: Optional[str] = Query(default=None,

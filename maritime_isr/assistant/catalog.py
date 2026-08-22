@@ -184,7 +184,26 @@ FACTOR_KINDS: dict[str, FactorSpec] = dict([
        actions=("check_imaging_opportunity", "compare_own_history",
                 "monitor")),
 
+    _s("notable_activity", family="motion", area="Area 2 (predictive AIS)",
+       weight=0.5,
+       label="Unusual activity",
+       blurb="motion that matches a behaviour worth a second look — a survey "
+             "pattern, erratic manoeuvring, or drifting",
+       actions=("cue_eo_camera", "call_vhf", "compare_own_history",
+                "query_zone_history", "monitor")),
+
     # ---- declared identity ---------------------------------------------
+    _s("identity_contradiction", family="identity",
+       area="Area 2 (predictive AIS)",
+       weight=0.75,
+       label="Declared identity does not hold together",
+       blurb="the identity this hull broadcasts contradicts itself or the "
+             "registry — a failed IMO check digit, an MMSI country prefix "
+             "that disagrees with the declared flag, or a name or call sign "
+             "the registry does not carry",
+       actions=("check_registry", "call_vhf", "compare_own_history",
+                "escalate"),
+       repeats=REPEAT_RESTATEMENT),
     _s("ais_spoofing", family="identity", area="roadmap 2.2 / 5.2",
        weight=0.85,
        label="Identity contradiction on the air",
