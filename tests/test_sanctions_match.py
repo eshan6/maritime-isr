@@ -385,13 +385,25 @@ def test_every_match_row_carries_provenance(tmp_path, monkeypatch):
 
 
 def test_no_identity_landed_is_a_clear_message(capsys):
+    """The hint must name a command that works **on the machine reading it**.
+
+    PR #36 fixed seventeen hints that hard-coded the `maritime-isr` console
+    script, which only exists once pip has put its scripts directory on PATH —
+    on the operator's Windows laptop it did not, so every one of them named a
+    command that answers `CommandNotFoundException`. `config.CLI` resolves the
+    working spelling at import time.
+
+    This assertion was then written against the `python -m` half of that
+    resolution, which made it a test of the *sandbox's* PATH rather than of the
+    message. It passes where the console script is absent and fails where it is
+    present, which is backwards: an editable install is the normal developer
+    setup. Asserting against `CLI` checks the property that actually matters —
+    the hint names whatever this machine can run.
+    """
+    from maritime_isr.config import CLI
+
     assert sm.run() == 0
-    # The hint names `python -m maritime_isr.cli`, not the `maritime-isr`
-    # console script: that script only exists after a `pip install`, and
-    # naming a command the operator does not have is the defect ADR/PR #36
-    # fixed. This assertion was left behind pointing at the old wording.
-    assert ("Run `python -m maritime_isr.cli ingest gfw-vessels` first"
-            in capsys.readouterr().out)
+    assert f"Run `{CLI} ingest gfw-vessels` first" in capsys.readouterr().out
 
 
 def test_zero_matches_is_reported_as_a_real_result(tmp_path, monkeypatch, capsys):

@@ -200,8 +200,19 @@ Package root is `maritime_isr/`. Module boundaries are firm:
 ```
 ingest/    one module per source; lands raw + normalizes to canonical schema
 process/   SAR preprocessing, detection, track building, features
+           (activity classification and forward projection live in
+            `tracks/` — they read motion only, so radar and AIS get the
+            same answer without a source-specific branch; ADR-032)
 fusion/    association engine + dark-vessel logic (THE fusion core — keep it source-agnostic)
            (an empty `fuse/` package also exists, unused — do not put code there)
+assistant/ the MDA assistant (ADR-031): the ranked Vessel of Interest object —
+           factor catalog, decomposable score, plain-language narration,
+           recommended next actions, grounded Q&A. ASSEMBLES, never detects:
+           a collector that started detecting would be a second, uncalibrated
+           copy of a rule that already exists.
+baselines.py  per-area behavioural baselines (ADR-032) — what normal looks like
+           in *this* cell, derived from landed positions and landed as an
+           inspectable artifact. Reports distributions; never decides.
 graph/     ontology, edge store, event engine, confidence decay
 rules/     anomaly library, risk scoring
 eval/      the permanent evaluation harness

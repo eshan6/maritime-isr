@@ -8,7 +8,63 @@ session. `CLAUDE.md`, `ARCHITECTURE.md`, `DECISIONS.md` are stable contracts;
 > between status buckets, record what was verified vs assumed, log anything now
 > broken, and set "Next up." If you don't update it, the next session starts blind.
 
-**Last updated:** 2026-08-22 — **"which ones are the actual vessels?"** Reported
+**Last updated:** 2026-08-22 (second session) — **IDEX Challenge 82, Areas 1
+and 2 built.** The system now has one object at its centre: a ranked Vessel of
+Interest carrying its reasons, its evidence, a score that decomposes exactly to
+the factor, a proposed next action tied to the factor that motivated it, and a
+question answerer that retrieves rather than generates (ADR-031). Area 2 fills
+that frame with declared-identity authenticity, activity classification from
+motion alone, forward projection as a first-class assertion, and the per-area
+behavioural baselines the requirement asks for twice and the system did not have
+(ADR-032).
+
+**Five defects were found by building the frame, and every one of them was
+invisible while the output was a flat alert queue:**
+
+1. **42 of 43 `dark_rendezvous` alerts fired inside a berth or a designated
+   anchorage** — 32 of them 470 m from the Mangalore port coordinate. Two hulls
+   within 500 m at under 2 knots is the encounter definition, and alongside a
+   terminal that describes every ship in the port. Now 43 → 1; dark-contact
+   precision and recall unchanged at 100% / 86%.
+2. **All 9 `dark_vessel` alerts were recorded as REAL data.** `add_alert`
+   derives `is_synthetic` from the subject node; the detector pointed at a
+   string nothing had created, so the lookup found nothing and the flag
+   defaulted to 0. ADR-019 rests the whole real/synthetic split on that column.
+3. **`reported-gap` edges were reachable from no graph view at all** — an edge
+   family the product holds and cannot draw, so the graph looked complete and
+   was not.
+4. **`survey_pattern` was claimed on 151 of 209 tracks** — a coastal rotation
+   supplies long legs and reciprocal turns, which was all the first rule asked
+   for. Now 0 on whole tracks, with genuine patterns still found in windows.
+5. **The scenario's reserved MMSI block collides with an ITU reserved form**, so
+   the identity rule reported all 222 synthetic vessels as "misrepresenting what
+   kind of station it is" — at 0.8 confidence, through the one detector built to
+   have no false positives.
+
+**Measured on the scenario corpus, seed 7, after all of it:** the alert queue is
+**16 alerts** (was 55) across 9 detectors, and the ranked list is **35 subjects**
+drawn from 2,713 tracked targets — about 1 in 78 of the picture. `dark_rendezvous`
+43 → 1, `dark_vessel` 9 (all now correctly flagged synthetic), `notable_activity`
+3, `identity_contradiction` **0**. That last zero is expected and is not a clean
+picture: the arithmetic identity checks cannot fire on scenario identifiers by
+construction, and the corpus carries one registry source so the consistency check
+has nothing to compare against. They are built for the landed **real** GFW
+identity corpus and must be measured there, on the laptop.
+
+Area baselines: **770 cells, 212 usable (27.5%)** at H3 res 5. The local normals
+are genuinely different — Kandla approach p95 = 12.0 kn over 19,768 observations
+of 128 vessels; Mumbai anchorage p95 = 6.5 kn with a median of 0.0.
+
+**And one capability was measured *out* of the product.** Departure from a
+vessel's own dead-reckoned track flagged **87–98% of the fleet** at every
+operating point that flagged anything at all, with no plateau anywhere in the
+sweep. Every vessel alters course at every waypoint; a cone tight enough to
+notice is tight enough to notice everything. Under ADR-004 it is built, kept as
+an inspectable assertion, and **not** promoted to a suspicion factor — with a
+test that stops it being quietly re-added without a fresh measurement. See
+ADR-032(e).
+
+Prior entry: 2026-08-22 — **"which ones are the actual vessels?"** Reported
 as "the map key and the map have become too cluttered and crowded", and the
 question underneath it was the real finding: an operator could not tell a ship
 at her position this instant from a pin dropped two years ago. Eighteen of
@@ -156,6 +212,8 @@ on Eshan's machine.
 | 6.0 → 6.3 | Phase 6 product surface (API + UI + export) | 🟡 | **The M6 demo definition is now fully built** (ADR-024/025): map, ranked findings, plain-English reason, one-click incident report. Sandbox-green and browser-verified; **never run against the real corpus**. Graph opens on the whole network and the scrubber no longer disappears (ADR-027). |
 | — | Coastal radar as a source (`ingest/radar`, `fusion/radar_ais`, `api/radar/*`, Radar tab) | 🟡 | **Not a spec unit** — ADR-028 + **ADR-029**. A simulated CSN picture over the same vessel truth as the AIS, landed through a real connector into `radar_track_report`, correlated by the existing association engine, filtered by the existing dark cascade, served over three API routes and drawn in the UI. **Precision 100%, recall 43% on the synthetic picture; correlation resolves 98.2% of resolvable tracks to the right hull.** Sandbox-green; **never run on the laptop**, and no real radar feed exists. |
 | — | Maritime zone layer (`zones/`, `ingest/zones`, `/api/zones`, map geography + draw tool) | 🟡 | **Not a spec unit** — ADR-030. Port areas, anchorages, terminals/SPMs, customary lanes, the four migrated sensitive areas and operator geofences, as landed rows with provenance and an H3 cell index. Zone entry/exit are landed events. **The four statutory limits are absent by decision** and arrive only through the connector. Sandbox-green; **never run on the laptop**. |
+| — | **IDEX Area 1 — the MDA assistant** (`assistant/`, `/api/voi`, `maritime-isr voi`, Assistant tab) | 🟡 | **Not a spec unit** — ADR-031. The ranked Vessel of Interest object: factor catalog, a score that decomposes exactly to the factor, plain-language narration, next actions with computed feasibility and stated capability, and a question answerer that retrieves rather than generates. Sandbox-green, browser-verified; **never run on the laptop**. |
+| — | **IDEX Area 2 — predictive AIS analysis** (`anomaly/identity`, `tracks/activity`, `tracks/projection`, `baselines.py`) | 🟡 | **Not a spec unit** — ADR-032. Identity authenticity (IMO check digit, MMSI/flag, registry consistency), activity classification from motion alone, forward projection as an assertion, per-area baselines as a landed artifact. **The arithmetic identity checks cannot fire on scenario data by construction** and must be measured on the landed real GFW corpus. Track-departure detection is built and deliberately **not** a suspicion factor — measured at 87-98% of the fleet. |
 | — | Imaging opportunities over AIS gaps (`overpass`) | 🟡 | **Not a spec unit** — ADR-026, outside the 0.0–6.3 numbering. The first determination that is ours rather than GFW's. Needs no pixels; joins the 636 landed scene footprints against flagged gaps. Sandbox-green; **never run against the real corpus**. |
 
 **Ingest rework detail (units 0.1 / 0.3 / 0.4), 2026-07-29:**

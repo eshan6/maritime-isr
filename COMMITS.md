@@ -769,3 +769,112 @@ and which are pins. Hovering a graph edge lights it up and names it — "MMSI",
 "IMO number", "sanctioned under" — instead of doing nothing.
 *Failure:* a blank white page means a stale `dist/` — rebuild with
 `npm run build` in `frontend/`.
+
+---
+
+## IDEX Challenge 82 — Area 1: the ranked Vessel of Interest (ADR-031)
+
+The requirement names six capability areas and states one outcome twice: rank
+Vessels of Interest with supporting evidence and cut operator workload. Five
+areas are feeders; one **is** the object. This project had the feeders — an
+anomaly library, a radar dark cascade, a sanctions matcher, an object graph —
+and no object. Alerts sat in a flat queue, risk was a four-component index on a
+different screen, and nothing tied a reason to a next action.
+
+`maritime_isr/assistant/` is that object. Served at `/api/voi`, driven from
+`maritime-isr voi`, shown on a new **Assistant** tab.
+
+* **The score decomposes exactly.** Noisy-OR over independent factors, allocated
+  back in log space, so the parts sum to the whole to floating point — asserted
+  in the tests, because that identity is the entire claim. A composite an
+  operator cannot take apart is worthless to them.
+* **A "Vessel" of Interest need not be a vessel.** 52 of 55 alerts land on a
+  contact or a detection, not a hull. A target nobody can name is what makes a
+  finding.
+* **Recommendations compute feasibility and state capability.** "Call her on
+  VHF" is worked out against the station network's real geometry, and an
+  unavailable action is shown with its reason. Most actions say plainly that
+  the system cannot perform them — the EO loop is Area 5, paperwork Area 4,
+  radio Area 6.
+* **The question answerer has no generative step.** Retrieval against a closed
+  intent set, three outcomes, and the middle one — "the system holds no record
+  of that", phrased about the record rather than the vessel — is most of the
+  value.
+
+**Three defects the ranked list exposed**, all invisible in a flat queue:
+
+1. 42 of 43 `dark_rendezvous` alerts fired inside a berth or designated
+   anchorage — 32 of them 470 m from the Mangalore port coordinate. **43 → 1**;
+   dark-contact precision and recall unchanged at 100% / 86%.
+2. All 9 `dark_vessel` alerts were filed as **real** data. `add_alert` derives
+   `is_synthetic` from the subject node; the detector pointed at a string
+   nothing had created, so the flag defaulted to 0.
+3. `reported-gap` edges were reachable from no graph view at all.
+
+---
+
+## IDEX Challenge 82 — Area 2: predictive analysis of AIS tracks (ADR-032)
+
+Four capabilities, and one measured *out* of the product.
+
+* **Declared identity authenticity** (`anomaly/identity.py`) — IMO check digit,
+  MMSI country prefix against declared flag, registry consistency, MMSI
+  structural form. Three outcomes each: `contradiction`, `ok`, `not_checkable`.
+  The MID table is deliberately partial; an unallocated prefix makes no claim.
+* **Activity classification** (`tracks/activity.py`) — in `tracks/`, reading
+  motion only, so radar and AIS get the identical answer with no
+  source-specific branch. That is Area 3's requirement satisfied by placement,
+  enforced by a test.
+* **Forward projection** (`tracks/projection.py`) — a first-class assertion with
+  a cone that grows with lead time and is capped by physics.
+* **Per-area baselines** (`baselines.py`) — the requirement's "maintained,
+  inspectable artifact", derived per H3 res-5 cell and landed. Measured: 770
+  cells, 212 usable. Kandla approach p95 = 12.0 kn over 19,768 observations;
+  Mumbai anchorage p95 = 6.5 kn, median 0.0. `is_unusual` is three-valued —
+  "cannot say" is not "normal".
+
+**Track-departure detection is built and deliberately not a suspicion factor.**
+Swept across every operating point it flagged **87-98% of the fleet**, with no
+plateau. Every vessel alters course at every waypoint. Kept as an inspectable
+assertion, with a test stopping it being re-added without a fresh measurement.
+
+**Four defects the build found in itself**, each one a detector that could not
+have worked:
+
+1. `survey_pattern` claimed on **151 of 209 tracks** — a coastal rotation
+   supplies long legs and reciprocal turns. Fixed by requiring reciprocals to be
+   a majority of *alterations* (not of every fix-to-fix step) and a turn rate a
+   voyage does not reach. Now 3 of 209.
+2. The scenario's reserved MMSI block collides with ITU's aid-to-navigation
+   prefix, so the identity rule reported **all 222 synthetic vessels** as
+   contradictions — through the one detector built to have no false positives.
+3. The `notable_activity` gate was set at 0.55 **above the 0.496 maximum the
+   detector could produce**. Zero alerts, and not because the picture was clean.
+4. The local baseline halved a survey pattern's score for having an ordinary
+   *speed* — a category error that silenced the three genuine patterns it found.
+   A baseline now scales a score only where the activity's signature is that
+   metric.
+
+**What is not built, and is said rather than implied:** declared destination
+against implied and historical destination, and declared ETA against plausible
+arrival. `ais_position` carries no declared destination or ETA — the generator
+emits no AIS message-5 voyage data — and building a comparison against a column
+that does not exist produces a detector that can never fire. The sequence is:
+extend the scenario AIS emitter, regenerate, then build the comparison.
+
+Verify:
+
+```
+python -m maritime_isr.cli scenario generate --seed 7
+rm -f data/graph.sqlite && python tools/run_scenario_pipeline.py
+python -m pytest tests/test_assistant.py tests/test_predictive.py -q
+python -m maritime_isr.cli voi list --top 10
+python -m maritime_isr.cli voi show <subject-id>
+python -m maritime_isr.cli baselines show
+cd frontend && npm run build && cd .. && python -m maritime_isr.api   # /assistant
+```
+
+*Success:* the Assistant tab opens on a ranked list whose scores add up on
+screen, each row explains itself in sentences, and the follow-up box refuses
+questions the system cannot ground.
+*Failure:* a blank page means a stale `dist/` — rebuild in `frontend/`.

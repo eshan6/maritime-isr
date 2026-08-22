@@ -97,6 +97,18 @@ CONTEXT_EDGE_TYPES = {
     "identity": ("identified-as",),
     "port": ("docked-at",),
     "flag": ("flagged-to",),
+    #: **`reported-gap` was reachable from no view at all.** It is neither
+    #: structural nor a member of any context family, so switching every layer
+    #: on still left 14 edges in the graph that the web could never draw — and
+    #: the test asserting "ask for every context family and the two numbers meet
+    #: exactly" was failing for that reason rather than for a layout one.
+    #:
+    #: An edge family the product holds and cannot show is worse than one it
+    #: does not hold: the graph looks complete and is not. Gaps stay off by
+    #: default like the other context layers, because a gap node hangs off a
+    #: single hull and adds a leaf per gap rather than a relationship between
+    #: hulls.
+    "gap": ("reported-gap",),
 }
 
 

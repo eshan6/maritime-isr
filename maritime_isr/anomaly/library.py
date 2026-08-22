@@ -28,12 +28,15 @@ import math
 
 import pandas as pd
 
-from ..config import (ANOMALY_THRESHOLDS, GEOFENCE_LOITER_MIN_HOURS,
+from ..config import (ANCHORAGE_RADIUS_KM, ANOMALY_THRESHOLDS,
+                      GEOFENCE_LOITER_MIN_HOURS, PORT_RADIUS_KM,
                       RENDEZVOUS_NEAR_KM, RENDEZVOUS_PARTY_SLACK_S,
                       RENDEZVOUS_WINDOW_S)
-from ..graph.identity import (ensure_contact_node, resolve_mmsi,
-                              track_subject_id)
+from ..graph.identity import (ensure_contact_node, ensure_detection_node,
+                              resolve_mmsi, track_subject_id)
 from ..ports import PORTS as _PORTS
+from ..ports import at_waiting_area
+from ..schemas.keys import vessel_node_id
 from ..zones.derive import SENSITIVE_AREAS as _SENSITIVE_AREAS
 
 # --- sensitive geometry (geofence layer, roadmap 5.2 #4) ------------------
@@ -102,7 +105,14 @@ def detect_dark_vessels(store, verdicts: list[dict], *, source_ref: str) -> list
     for v in verdicts:
         if v["status"] != "dark_candidate":
             continue
-        did = f"detection:{v['detection_id']}"
+        # The subject is published as a node before the alert points at it.
+        # It used to be a bare f-string, so `add_alert` looked it up, found
+        # nothing, and defaulted `is_synthetic` to False — every dark-vessel
+        # alert in the scenario corpus was filed as real data. See
+        # `ensure_detection_node`.
+        did = ensure_detection_node(store, v["detection_id"],
+                                    scene_id=v.get("scene_id"),
+                                    props=dict(length_m=v.get("length_m")))
         ev = [dict(edge="dark_candidate", src=did, dst="sensor:sentinel1-syn",
                    confidence=round(v["dark_score"], 3), source="fusion_core",
                    source_ref=source_ref,
@@ -212,6 +222,40 @@ def detect_dark_rendezvous(store, encounters: list[dict],
             untracked.append(a)
 
     for e in encounters:
+        # **A meeting at a berth is a berth, not a transfer.** Two hulls lying
+        # within 500 m of each other at under 2 knots is the encounter
+        # primitive's definition, and inside a port or its designated waiting
+        # area that describes every ship alongside and every ship in the queue.
+        #
+        # Measured on seed 7 before this test existed: **42 of 43
+        # dark_rendezvous alerts fired inside a berth or an anchorage** — 32 of
+        # them 470 m from the Mangalore port coordinate, 8 at Mundra, 2 at
+        # Kochi. One alert in forty-three was in open water. A queue that is
+        # 98% berth traffic is the alert-fatigue failure ADR-004 exists to
+        # prevent, and it stayed invisible while the corpus was SAR-only,
+        # because six unmatched contacts in total can only meet each other by
+        # accident. Coastal radar (ADR-028) put thousands of contacts into the
+        # picture and the anchorages lit up.
+        #
+        # `at_waiting_area` is the shared helper `extract_features` already
+        # uses to suppress loiter episodes for exactly this reason — a vessel
+        # stopped off Kandla is waiting for a berth, not loitering. The
+        # rendezvous rule asks the same question of a place and had never been
+        # taught to. Reusing the one helper is what keeps the two rules from
+        # drifting apart again; both layers are needed because a berth radius
+        # does not reach the anchorage that serves it.
+        #
+        # What this costs: a ship-to-ship transfer that genuinely happens at
+        # anchor is now invisible to this rule. That is a real loss and it is
+        # the precision-first trade stated in ADR-004 — bunkering at a
+        # designated anchorage is lawful and routine, so an alert there carries
+        # almost no information, while the same meeting 40 nm offshore carries
+        # most of it. Separating the two needs activity classification (is this
+        # hull anchored, or holding station in open water?), which is Area 2 of
+        # the Section-3 brief and does not exist yet.
+        if at_waiting_area(e["lat"], e["lon"], port_radius_km=PORT_RADIUS_KM,
+                           anchorage_radius_km=ANCHORAGE_RADIUS_KM):
+            continue
         t = e["t_start"].timestamp()
         t_end = pd.Timestamp(e["t_end"]).timestamp()
         # Direct evidence: one of THESE two tracks was unexplained while THIS
@@ -469,9 +513,16 @@ def detect_port_risk(store, tracks: list, *, source_ref: str) -> list[str]:
 
 
 def run_anomaly_library(store, *, tracks, encounters, spoof_events,
-                        associations, verdicts, source_ref: str) -> dict:
-    """Run all six detectors. Order matters only for #5, which correlates
-    with the alerts the earlier detectors produced."""
+                        associations, verdicts, source_ref: str,
+                        identities: list[dict] | None = None,
+                        baselines=None) -> dict:
+    """Run every detector. Order matters only for #5, which correlates with the
+    alerts the earlier detectors produced.
+
+    `identities` and `baselines` are the Area 2 inputs and both default to
+    absent, so a caller written against the original six keeps working — the
+    new detectors stay quiet rather than raising.
+    """
     fired = {}
     fired["dark_vessel"] = detect_dark_vessels(store, verdicts, source_ref=source_ref)
     fired["ais_spoofing"] = detect_spoofing(store, spoof_events, verdicts,
@@ -483,4 +534,201 @@ def run_anomaly_library(store, *, tracks, encounters, spoof_events,
     fired["port_risk_propagation"] = detect_port_risk(store, tracks,
                                                       source_ref=source_ref)
     fired["identity_then_anomaly"] = detect_identity_then_anomaly(store)
+    # Area 2 detectors. Both are optional inputs: a run with no identity rows
+    # and no baseline index still produces the six original detectors, so an
+    # older caller keeps working and the new ones simply stay quiet.
+    fired["identity_contradiction"] = detect_identity_contradiction(
+        store, identities or [], source_ref=source_ref)
+    fired["notable_activity"] = detect_notable_activity(
+        store, tracks, source_ref=source_ref, baselines=baselines)
     return fired
+
+
+# ---------------- 7. declared identity does not hold together (Area 2) ------
+
+def detect_identity_contradiction(store, identities: list[dict], *,
+                                  source_ref: str) -> list[str]:
+    """A hull whose declared identity contradicts itself or the registry.
+
+    Area 2 of the IDEX Challenge 82 brief: *"the software is not able to
+    classify authenticity of static information transmitted on AIS. Hence,
+    AI/ML software is required for anomaly detection in static information."*
+
+    `identities` is a list of current-identity rows — the same shape
+    `gfw_vessel_identity` lands, one per hull. The checks themselves live in
+    `anomaly.identity` and are pure functions over the declared values; this is
+    the part that turns a contradiction into a scored, evidenced alert.
+
+    **A hull can fail more than one check and that is one alert, not three.**
+    The checks are not independent evidence about different things — they are
+    several readings of the same question, "is this identity real" — so they
+    combine as a maximum with a small boost for breadth rather than as a
+    noisy-OR. Two contradictions on one hull is worse than one; it is not
+    nearly-certain.
+
+    **Where this can fire.** Scenario identifiers are minted inside a reserved
+    MMSI block and with valid IMO check digits by construction (ADR-019), so
+    the arithmetic checks cannot fire on synthetic rows — they are built for the
+    landed real GFW corpus and their precision must be measured there. The
+    registry-consistency check fires on either.
+    """
+    from .identity import check_identity
+
+    out: list[str] = []
+    for row in identities:
+        vid = row.get("vessel_id")
+        if not vid:
+            continue
+        findings = check_identity(
+            mmsi=row.get("mmsi"), imo=row.get("imo"), flag=row.get("flag"),
+            name=row.get("ship_name"), call_sign=row.get("call_sign"),
+            vessel_class=row.get("vessel_class"),
+            registry=row.get("registry"))
+        bad = [f for f in findings if f.is_contradiction]
+        if not bad:
+            continue
+
+        node = vessel_node_id(vid)
+        if store.node(node) is None:
+            # The identity table can name a hull the graph has never been told
+            # about. Skipping is right rather than minting a stub: an alert on
+            # a node with no edges is the shadow-stub failure ADR-022 exists to
+            # prevent, and the graph populator is what should create it.
+            continue
+
+        best = max(f.confidence for f in bad)
+        score = min(0.97, best + 0.05 * (len(bad) - 1))
+        ts = pd.Timestamp(row.get("valid_from") or row.get("acquired_at")
+                          or pd.Timestamp.utcnow())
+        ev = [dict(edge="identity-contradiction", src=node,
+                   dst=f"identity:{f.check}", confidence=round(f.confidence, 3),
+                   source="identity_rules", source_ref=source_ref,
+                   props=dict(check=f.check, statement=f.statement, **f.detail))
+              for f in bad]
+        _emit(out, store, "identity_contradiction", node, ts.timestamp(),
+              score, ev,
+              props=dict(checks=[f.check for f in bad],
+                         n_contradictions=len(bad),
+                         statements=[f.statement for f in bad]))
+    return out
+
+
+# ---------------- 8. what the vessel is doing (Area 2) ---------------------
+
+#: Activities that are worth an operator's attention on their own.
+#:
+#: **Most activities are not findings and must not become alerts.** Transiting
+#: is what shipping does; anchored is what shipping does at the end of it.
+#: Emitting an alert per classified activity would put the whole fleet in the
+#: queue — the failure ADR-004 names — so only the behaviours that are unusual
+#: *as behaviours* are raised, and even those are scored low: a survey pattern
+#: is interesting, it is not evidence of wrongdoing.
+#: **Drifting was here and was measured out.** A vessel barely moving off a
+#: working coast is waiting for a berth, has her gear out, or has stopped her
+#: engine — it is one of the most common things in the picture. Measured on the
+#: corpus: 125 drifting windows across the AIS fleet, every one scoring an
+#: identical 0.273, which is a detector firing on a background condition rather
+#: than on an event. What remains are two behaviours that are unusual *as
+#: behaviours*: covering an area in a lawnmower pattern, and changing course far
+#: more than passage requires without the regularity of a working pattern.
+#: Each entry is `(notability, the metric whose local baseline is relevant)`.
+#:
+#: **The second half exists because getting it wrong silenced the detector.**
+#: The first version compared every notable activity's median speed against the
+#: local speed distribution and halved the score where the speed was ordinary.
+#: For a survey pattern that is a category error: the finding is the *pattern* —
+#: six legs and five reciprocal turns over a day — and it is no less a pattern
+#: for being run at a speed other vessels in that cell also use. Measured: three
+#: genuine survey patterns in the AIS fleet, every one halved from ~0.37 to
+#: ~0.19 and dropped below a 0.30 gate. The detector reported a clean picture
+#: because it had been told to ignore the thing it found.
+#:
+#: So a baseline only scales a score when the activity's *signature* is that
+#: metric. Neither behaviour here is speed-defined, so both carry `None` and
+#: the local distribution travels as context on the evidence instead — which is
+#: what a watchkeeper wants anyway ("4 knots, where the local 95th percentile
+#: is 12"). A future speed-defined activity names `sog_kn` and gets the scaling.
+NOTABLE_ACTIVITIES: dict[str, tuple[float, str | None]] = {
+    "survey_pattern": (0.62, None),
+    "manoeuvring_erratically": (0.58, None),
+}
+
+
+def detect_notable_activity(store, tracks: list, *, source_ref: str,
+                            baselines=None) -> list[str]:
+    """Classify what each track is doing and raise only the notable ones.
+
+    Source-agnostic by construction: it reads `tracks.activity`, which takes a
+    built track and never asks which sensor produced it. That is Area 3's
+    requirement — *"the same behaviours should be recognisable whether the track
+    came from radar or AIS. If they are not, that is a defect in the fusion
+    core"* — satisfied by placement rather than by a compatibility shim.
+
+    `baselines` is a `BaselineIndex`. When supplied, an activity in a cell where
+    that activity's kinematics are locally ordinary is scored down: drifting in
+    an approach channel where the local median speed is already near zero is a
+    ship waiting, not a ship adrift. When it is absent, or the cell has too few
+    observations, the global judgement stands and the evidence says so — a rule
+    that could not tell "normal here" from "we have not watched here" would
+    report every unwatched patch of ocean as clean.
+    """
+    from ..tracks.activity import (classify_activity,
+                                   classify_activity_segments)
+
+    out: list[str] = []
+    for tr in tracks:
+        # **Two scales, because these behaviours live at two scales.**
+        # Erratic manoeuvring is visible inside a few hours. A survey pattern is
+        # *defined* by structure across many of them — six legs over a day — and
+        # a six-hour window contains one leg and cannot see the pattern it is
+        # part of. Classifying only in windows silently loses the survey rule
+        # entirely, which is what it did: the detector fired zero alerts while
+        # the whole-track verdict on the same data was `survey_pattern`.
+        #
+        # `_emit` keys an alert on (type, subject, timestamp), so a behaviour
+        # that both scales agree on collapses to one alert rather than two.
+        episodes = list(classify_activity_segments(tr))
+        episodes.append(classify_activity(tr))
+        for act in episodes:
+            spec_ = NOTABLE_ACTIVITIES.get(act.activity)
+            if spec_ is None or act.confidence <= 0:
+                continue
+            base, signature_metric = spec_
+            score = base * act.confidence
+
+            # The local distribution is always attached; it only *scales* the
+            # score when the activity's signature is the metric it describes.
+            # See `NOTABLE_ACTIVITIES`.
+            local = None
+            if baselines is not None:
+                from ..baselines import is_unusual
+                local = is_unusual(
+                    baselines, lat=act.lat, lon=act.lon, metric="sog_kn",
+                    value=act.features.get("sog_median", 0.0))
+                if (signature_metric == "sog_kn" and local is not None
+                        and not local["unusual"]):
+                    # Ordinary for this place. Not silenced — an operator may
+                    # still want it — but it should not compete with a finding.
+                    score *= 0.5
+
+            vid = track_subject_id(store, tr, at=act.t_start)
+            ev = [dict(edge="activity", src=vid,
+                       dst=f"activity:{act.activity}",
+                       confidence=round(act.confidence, 3),
+                       source="activity_classifier", source_ref=source_ref,
+                       props=dict(activity=act.activity, reason=act.reason,
+                                  hours=round(act.duration_hours, 2),
+                                  sensor=tr.source.name,
+                                  local_baseline=local,
+                                  **{k: v for k, v in act.features.items()
+                                     if k in ("sog_median", "turn_rate_deg_min",
+                                              "straightness", "spread_m")}))]
+            _emit(out, store, "notable_activity", vid, act.t_start, score, ev,
+                  props=dict(activity=act.activity,
+                             hours=round(act.duration_hours, 2),
+                             lat=act.lat, lon=act.lon,
+                             reason=act.reason,
+                             sensor=tr.source.name,
+                             track_id=tr.track_id,
+                             local_baseline=local))
+    return out

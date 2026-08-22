@@ -436,6 +436,172 @@ def cmd_alerts(args):
     g.close()
 
 
+def cmd_baselines(args):
+    """Derive or show the per-area baseline layer.
+
+    The whole point of this layer is that it is *inspectable* — the requirement
+    asks for a maintained artifact rather than a constant, and an artifact
+    nobody can print is indistinguishable from a constant.
+    """
+    import pandas as pd
+
+    from . import baselines as bl
+    from .api.reader import open_reader
+    from .config import CLI as _CLI
+
+    if args.action == "derive":
+        with open_reader() as reader:
+            if not reader.has("ais_position"):
+                raise SystemExit(
+                    f"no landed AIS positions to derive from — run "
+                    f"`{_CLI} scenario generate` or land a real corpus first")
+            pos = pd.DataFrame(reader.rows(
+                "SELECT vessel_id, mmsi, lat, lon, sog_kn, cog_deg, ts, "
+                "is_synthetic FROM ais_position"))
+        derived = bl.derive_baselines(pos)
+        n = bl.land_baselines(derived)
+        cov = bl.BaselineIndex(derived).coverage()
+        print(f"derived from {len(pos):,} position(s)")
+        print(f"  landed        : {n:,} cell(s) at H3 res {cov['res']}")
+        print(f"  usable        : {cov['usable']:,} "
+              f"({cov['fraction_usable']:.0%})")
+        print(f"  insufficient  : {cov['insufficient']:,} "
+              f"(under {cov['min_observations']} observations)")
+        print(f"\n  {_CLI} baselines show   to read them")
+        return
+
+    rows = bl.load_baselines()
+    if not rows:
+        raise SystemExit(f"no landed baselines — run `{_CLI} baselines derive`")
+    index = bl.BaselineIndex(rows)
+    cov = index.coverage()
+    print(f"per-area baselines — {cov['usable']:,} usable of {cov['cells']:,} "
+          f"cell(s) at H3 res {cov['res']}\n")
+    usable = sorted(index.usable(), key=lambda b: -b.n_observations)
+    print(f"{'cell':<17}{'lat':>8}{'lon':>8}{'obs':>9}{'ships':>7}"
+          f"{'p50':>7}{'p95':>7}{'p99':>7}{'ships/day':>11}")
+    for b in usable[:args.top]:
+        m = b.metrics.get("sog_kn", {})
+        print(f"{b.h3_cell:<17}{b.lat:>8.2f}{b.lon:>8.2f}"
+              f"{b.n_observations:>9,}{b.n_vessels:>7}"
+              f"{m.get('p50', 0):>7.1f}{m.get('p95', 0):>7.1f}"
+              f"{m.get('p99', 0):>7.1f}"
+              f"{(b.vessels_per_day if b.vessels_per_day is not None else 0):>11.1f}")
+    print(f"\n  Speeds are knots. A cell under {cov['min_observations']} "
+          f"observations reports no distribution at all — a percentile over a "
+          f"handful of\n  points is noise wearing an authoritative face, and "
+          f"`is_unusual` answers 'cannot say' there rather than 'normal'.")
+
+
+def cmd_voi(args):
+    """The MDA assistant from a terminal — the same code the API serves.
+
+    Deliberately the same functions rather than a second assembly path: a CLI
+    that computed the list its own way would eventually disagree with the
+    screen, and the disagreement would surface in front of whoever was being
+    shown the demo.
+    """
+    from . import assistant
+    from .config import CLI as _CLI
+
+    if args.action == "workload":
+        w = assistant.workload()
+        print(f"corpus : {w['corpus']}")
+        for k, v in w["inputs"].items():
+            print(f"  in   {k:<28}{v:>10,}")
+        for k, v in w["outputs"].items():
+            print(f"  out  {k:<28}{v:>10,}")
+        print()
+        print(f"  {w['statement']}")
+        print(f"\n  {w['caveat']}")
+        return
+
+    if args.action == "list":
+        res = assistant.build_list(limit=args.top)
+        c = res["count"]
+        print(f"ranked Vessels of Interest — {c['real']} real, "
+              f"{c['synthetic']} scenario, {res['n_suppressed']} suppressed "
+              f"below {res['min_score']:.2f}\n")
+        for it in res["items"]:
+            syn = " [SYN]" if it["is_synthetic"] else ""
+            print(f"{it['rank']:>3}. {it['score']:.3f}  "
+                  f"{it['display_name'][:44]:<46}{syn}")
+            for f in it["factors"]:
+                print(f"        {f['points']:.3f}  {f['kind']:<24}"
+                      f"conf {f['confidence']:.2f}  ({f['family']})")
+        print()
+        for n in res["notes"]:
+            print(f"  * {n}")
+        for n in res["queue_health"]["notes"]:
+            print(f"  ! {n}")
+        print(f"\n  {_CLI} voi show <subject-id>   for the full account")
+        return
+
+    if not args.subject:
+        raise SystemExit(f"`{_CLI} voi {args.action}` needs a subject id — "
+                         f"run `{_CLI} voi list` to see them")
+
+    if args.action == "show":
+        v = assistant.build_one(args.subject)
+        if v is None:
+            raise SystemExit(f"no subject {args.subject!r} on the list")
+        print(f"{v['display_name']}   score {v['score']:.3f}"
+              + ("   [SCENARIO DATA]" if v["is_synthetic"] else ""))
+        print("-" * 72)
+        print(v["account"])
+        print("\nwhy:")
+        for line in v["account_lines"]:
+            print(f"  - {line}")
+        print("\nthe sum:")
+        for r in v["arithmetic"]["rows"]:
+            print(f"  {r['points']:.3f}  {r['kind']:<24}"
+                  f"weight {r['weight']:.2f} x conf {r['confidence']:.2f} "
+                  f"= {r['standalone']:.2f} standalone  "
+                  f"({r['share_pct']:.0f}% of the score)")
+        print(f"  {v['arithmetic']['sum_of_points']:.3f}  "
+              f"TOTAL (score {v['arithmetic']['score']:.3f}, "
+              f"reconciles: {v['arithmetic']['reconciles']})")
+        print("\nwhat to do next — the system proposes, you decide:")
+        for r in v["recommendations"]:
+            mark = "" if r["feasible"] else "  [NOT AVAILABLE]"
+            print(f"  - {r['headline']}{mark}")
+            print(f"      {r['rationale']}")
+            if r["feasibility"]:
+                print(f"      {r['feasibility']}")
+            print(f"      system can do this: {r['system_capability']}")
+        if args.evidence:
+            print("\nevidence:")
+            for f in v["factors"]:
+                print(f"  {f['kind']}:")
+                for e in f["evidence"]:
+                    print(f"    - {e['label']}")
+                    print(f"        source {e['provenance'].get('source_id')} "
+                          f"ref {e['provenance'].get('source_ref')}")
+        print("\nnot known about this subject:")
+        for n in v["not_known"]:
+            print(f"  - {n}")
+        return
+
+    if args.action == "ask":
+        if not args.question:
+            raise SystemExit(f"`{_CLI} voi ask <subject> --question '...'`")
+        a = assistant.ask(args.subject, args.question)
+        if a is None:
+            raise SystemExit(f"no subject {args.subject!r} on the list")
+        print(f"Q: {a['question']}")
+        print(f"   [{a['outcome']}]"
+              + (f" intent={a['intent']}" if a["intent"] else ""))
+        print()
+        for line in a["text"].splitlines():
+            print(f"   {line}")
+        if a["basis"]:
+            print(f"\n   read: {', '.join(a['basis'])}")
+        if a["suggestions"]:
+            print("\n   what I can answer about this subject:")
+            for s in a["suggestions"]:
+                print(f"     - {s}")
+
+
 def cmd_anomalies(args):
     """Anomaly alert queue, optionally filtered by type, with dispositions."""
     from .config import DATA_ROOT, GRAPH_DB_NAME
@@ -827,6 +993,29 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, default=7,
                    help="generation seed; the same seed reproduces the corpus")
     p.set_defaults(fn=cmd_scenario)
+
+    p = sub.add_parser(
+        "voi", help="the MDA assistant: ranked Vessels of Interest (ADR-031)")
+    p.add_argument("action", choices=["list", "show", "ask", "workload"],
+                   help="list the queue, open one subject, ask a question "
+                        "about one, or print the workload reduction")
+    p.add_argument("subject", nargs="?", default=None,
+                   help="subject id, for `show` and `ask`")
+    p.add_argument("--question", default=None, help="for `ask`")
+    p.add_argument("--top", type=int, default=15)
+    p.add_argument("--evidence", action="store_true",
+                   help="with `show`: print every evidence item, not a count")
+    p.set_defaults(fn=cmd_voi)
+
+    p = sub.add_parser(
+        "baselines",
+        help="per-area behavioural baselines: what normal looks like where "
+             "(ADR-032)")
+    p.add_argument("action", choices=["derive", "show"],
+                   help="derive from landed positions and land the result, "
+                        "or show the landed snapshot")
+    p.add_argument("--top", type=int, default=20)
+    p.set_defaults(fn=cmd_baselines)
 
     p = sub.add_parser("status")
     p.set_defaults(fn=cmd_status)

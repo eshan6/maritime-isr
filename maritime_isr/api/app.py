@@ -22,6 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
+from .. import assistant
 from . import graph_service as gsvc
 from . import models, report, service
 from .settings import settings
@@ -174,6 +175,118 @@ def create_app() -> FastAPI:
                 "Content-Disposition":
                     f'attachment; filename="{report.filename_for(rep)}"',
             })
+
+    # ---- the MDA assistant: ranked Vessels of Interest (ADR-031) ---------
+    #
+    # Returned as plain dicts rather than through `models`, and deliberately.
+    # A factor's `detail` and an evidence item's `detail` are open-shaped by
+    # design — a sanctions designation carries a programme and a match tier, a
+    # loitering finding carries hours and a zone — so a pydantic model would
+    # either flatten every kind to a lowest common denominator or declare
+    # `dict` and validate nothing. Same reasoning as `/tracks` above.
+    @api.get("/voi", dependencies=guard)
+    def voi(synthetic: Optional[bool] = None,
+            limit: int = Query(default=50, ge=1, le=settings.max_page),
+            min_score: float = Query(default=assistant.MIN_SCORE,
+                                     ge=0.0, le=1.0)) -> dict:
+        """The ranked Vessel of Interest list — the assistant's front page.
+
+        Rows carry their factors and the points each contributed, but **not**
+        the evidence: a fifty-row list with every evidence item attached is
+        megabytes, and the evidence belongs on the detail view where somebody
+        is actually reading it.
+
+        `suppressed` is not optional decoration. A subject that carried a
+        signal and was kept off the list is returned with its reason, so "why
+        is this NOT flagged" is answerable from the product rather than only
+        from a terminal (the discipline ADR-028 established for the radar
+        cascade).
+        """
+        return assistant.build_list(synthetic=synthetic, limit=limit,
+                                    min_score=min_score)
+
+    @api.get("/voi/workload", dependencies=guard)
+    def voi_workload() -> dict:
+        """Tracks in, subjects out — the workload reduction, measured.
+
+        Declared before `/voi/{subject_id}` so the literal path wins; FastAPI
+        matches in declaration order and `workload` would otherwise be captured
+        as a subject id.
+        """
+        return assistant.workload()
+
+    @api.get("/voi/catalog", dependencies=guard)
+    def voi_catalog() -> dict:
+        """Every factor kind the assistant can rank, and the six families.
+
+        The families with nothing in them are the point: three of the six are
+        unbuilt areas of the Section-3 brief, and a surface that lists only
+        what it found reads as completeness.
+        """
+        return {
+            "families": assistant.family_coverage(
+                list(assistant.FACTOR_KINDS)),
+            "kinds": [
+                {"kind": s.kind, "label": s.label, "blurb": s.blurb,
+                 "family": s.family, "area": s.area, "weight": s.weight,
+                 "attribution": s.attribution, "actions": list(s.actions)}
+                for s in assistant.FACTOR_KINDS.values()],
+        }
+
+    @api.get("/voi/{subject_id:path}", dependencies=guard)
+    def voi_detail(subject_id: str) -> dict:
+        """One subject in full: every factor, every evidence item, the sum.
+
+        `:path` because a subject id contains colons and may be a contact key
+        like `contact:radar:SYN-MUM:0214`.
+        """
+        v = assistant.build_one(subject_id)
+        if v is None:
+            raise HTTPException(404, f"no subject {subject_id!r} on the list")
+        return v
+
+    @api.post("/voi/{subject_id:path}/ask", dependencies=guard)
+    def voi_ask(subject_id: str, body: models.AssistantQuestion) -> dict:
+        """Ask a question about one subject, in ordinary language.
+
+        The answer is retrieved, never generated: see `assistant.qa`. Three
+        outcomes — `answered`, `no_data` (understood, nothing held) and
+        `unsupported` (outside what this system carries, or not understood) —
+        and the distinction between the second and third is most of the value.
+        """
+        a = assistant.ask(subject_id, body.question)
+        if a is None:
+            raise HTTPException(404, f"no subject {subject_id!r} on the list")
+        return a
+
+    # ---- per-area baselines (ADR-032) ------------------------------------
+    @api.get("/baselines", dependencies=guard)
+    def baselines(limit: int = Query(default=500, ge=1, le=settings.max_page),
+                  usable_only: bool = True) -> dict:
+        """What normal looks like, per area — the inspectable artifact.
+
+        `coverage` is not decoration. A layer with 212 usable cells out of 770
+        will fall back to its global threshold in most of the picture, and an
+        operator told "area baselines are in use" would reasonably assume
+        otherwise.
+        """
+        from .. import baselines as bl
+
+        rows = bl.load_baselines()
+        index = bl.BaselineIndex(rows)
+        items = index.usable() if usable_only else rows
+        items = sorted(items, key=lambda b: -b.n_observations)[:limit]
+        real = sum(1 for b in items if not b.is_synthetic)
+        return {
+            "count": models.SplitCount(
+                real=real, synthetic=len(items) - real).model_dump(),
+            "total_matched": len(rows),
+            "coverage": index.coverage(),
+            "items": [b.as_dict() for b in items],
+            "note": (None if rows else
+                     f"No baselines landed. Run `{service.CLI} baselines "
+                     f"derive`."),
+        }
 
     # ---- events / scenes / ports ----------------------------------------
     @api.get("/events", dependencies=guard)

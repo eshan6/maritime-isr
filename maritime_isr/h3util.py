@@ -46,14 +46,24 @@ import h3
 
 # Named resolutions. Nothing outside this module should hard-code an integer.
 R4 = 4   # coverage model — regional
+R5 = 5   # per-area behavioural baselines (~8 km across)
 R6 = 6   # fusion gating, track/detection indexing
 R7 = 7   # canonical join key (ADR-003)
 R8 = 8   # static-object clustering
 R9 = 9   # fine matching (ADR-003)
 
-#: Every resolution the project uses. Stamped onto located records at ingest so
-#: any consumer can join at the resolution it needs without recomputation — and
-#: so nobody is ever tempted to derive one from another.
+#: Every resolution **stamped onto located records at ingest**, so any consumer
+#: can join at the resolution it needs without recomputation — and so nobody is
+#: ever tempted to derive one from another.
+#:
+#: **R5 is named above but deliberately absent from this tuple.** It is used by
+#: exactly one consumer (`baselines.py`, which aggregates positions into
+#: ~250 km² cells) and adding it here would add a column to every positioned
+#: table in the corpus — a schema change across every landed partition, to
+#: serve one derived artifact that computes the cell itself at derivation time.
+#: Naming it still matters: this module's rule is that no integer resolution is
+#: hard-coded outside it, and a constant that exists here is what lets the
+#: baseline layer honour that rule.
 RESOLUTIONS: tuple[int, ...] = (R4, R6, R7, R8, R9)
 
 #: The old `tiling.py` default. Preserved so fusion behaviour is unchanged by

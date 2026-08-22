@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 # --------------------------------------------------------------------------
@@ -551,3 +551,14 @@ class Stats(BaseModel):
     graph_edges: SplitCount
     corpus_window: dict[str, Optional[str]]
     notes: list[str]
+
+
+class AssistantQuestion(BaseModel):
+    """A question about one subject, in ordinary language.
+
+    Length-capped because the answerer matches on tokens and an unbounded body
+    is a pointless cost. There is no generation step behind this — see
+    :mod:`maritime_isr.assistant.qa` — so the question is never echoed back into
+    a model, only into a keyword match.
+    """
+    question: str = Field(min_length=1, max_length=500)

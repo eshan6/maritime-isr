@@ -330,6 +330,36 @@ ANOMALY_THRESHOLDS = {
     # in for adopted ones — so a finding built on them starts from weaker
     # ground and has to clear a higher bar to reach a queue ADR-004 spends its
     # whole budget keeping short.
+    # --- Area 2: predictive analysis of AIS tracks (ADR-032) -------------
+    #
+    # `identity_contradiction` is gated LOW at 0.40 because its underlying
+    # checks are arithmetic rather than inferential: an IMO check digit either
+    # passes or it does not, and an MMSI country prefix either matches the
+    # declared flag or it contradicts it. The weakest thing that reaches this
+    # gate is a single registry name disagreement at 0.45, which is exactly the
+    # lead an operator should see. There is no room here for the kind of
+    # marginal, threshold-sensitive finding the other gates exist to hold back.
+    "identity_contradiction": 0.40,
+    #
+    # `notable_activity` is gated on the range its score can actually reach,
+    # which is **not** the range the other gates live in.
+    #
+    # An activity alert scores `notability x classification confidence`, and the
+    # classifier deliberately caps its own confidence well below 1 — a rule-based
+    # label over a bounded observation is not something to be certain about. The
+    # first version of this gate was set at 0.55 by analogy with the detectors
+    # around it, and 0.55 is **above the maximum score this detector can
+    # produce**: the arithmetic ceiling is 0.62 x 0.8 = 0.496 for a survey
+    # pattern and lower for everything else. It fired zero alerts on the corpus,
+    # not because the picture was clean but because the gate was unreachable —
+    # the dead-rule failure this project has now hit three times.
+    #
+    # 0.30 is set from the measured range: it admits a well-observed survey
+    # pattern or a sustained erratic manoeuvre and holds back a short or
+    # marginal classification of either. Drifting was removed from the eligible
+    # set entirely rather than gated out (see `library.NOTABLE_ACTIVITIES`),
+    # because a threshold is the wrong tool for "this behaviour is ordinary".
+    "notable_activity":      0.30,
     "maiden_zone_visit":    0.60,
     "lane_deviation":       0.65,
     "anchored_outside_limits": 0.60,

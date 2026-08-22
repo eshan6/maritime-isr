@@ -103,6 +103,10 @@ const CONTEXT_LAYERS = [
   ["identity", "identity", "identity",
    "629 edges to 603 leaf nodes — 67% of the graph is an identity record on a "
    + "stick, and a name change is read on the vessel, not in the web."],
+  ["gap", "ais_gap", "gap",
+   "14 edges. Each one is a reported AIS gap hanging off a single hull, so it "
+   + "adds a leaf rather than a relationship between vessels. It was reachable "
+   + "from no layer at all until now, which made the web quietly incomplete."],
 ];
 
 export function GraphView() {
