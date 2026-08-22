@@ -386,11 +386,23 @@ def list_tracks(*, max_vessels: int = 200, max_points: int = 140) -> dict:
     On the real corpus there is no free AIS, so ais_position is empty and this
     returns an empty list with a note — the honest reason the real map shows no
     moving vessels (ADR-005).
+
+    **The `max_vessels` cap is reported, never silent** — the same rule
+    :func:`list_events` follows, and this endpoint was the one place breaking
+    it. The default cap is 200 and the scenario corpus runs above it (208
+    vessels with positions when this was measured), so hulls were dropped on
+    every call while `note` came back `None` regardless. A map that silently
+    draws 200 of 208 ships is asserting a fleet size it did not measure.
+    `matched_vessels` carries the true count.
     """
     with open_reader() as reader:
         if not reader.has("ais_position"):
-            return {"items": [], "note": "no AIS positions landed"}
+            return {"items": [], "note": "no AIS positions landed",
+                    "matched_vessels": 0, "truncated": False}
         syn_col = "is_synthetic" in reader.columns("ais_position")
+        matched = int(reader.scalar(
+            "SELECT count(*) FROM (SELECT vessel_id FROM ais_position "
+            "WHERE lat IS NOT NULL GROUP BY vessel_id)") or 0)
         vids = reader.rows(
             "SELECT vessel_id, count(*) AS n FROM ais_position "
             "WHERE lat IS NOT NULL GROUP BY vessel_id ORDER BY n DESC "
@@ -423,8 +435,22 @@ def list_tracks(*, max_vessels: int = 200, max_points: int = 140) -> dict:
                 "is_synthetic": bool(pts[0].get("is_synthetic")) if syn_col else False,
                 "points": coords,
             })
-    note = None if items else "no AIS positions (the real corpus has no free AIS)"
-    return {"items": items, "note": note}
+    # Truncation is measured against what the CAP dropped, not against what the
+    # decimator skipped: a vessel with a single position is legitimately absent
+    # (a one-point track cannot be interpolated) and calling that truncation
+    # would cry wolf on every corpus. `matched` is vessels with positions;
+    # `len(vids)` is what the cap let through.
+    truncated = matched > len(vids)
+    if not items:
+        note = "no AIS positions (the real corpus has no free AIS)"
+    elif truncated:
+        note = (f"TRUNCATED — showing {len(vids):,} of {matched:,} vessels with "
+                "positions, the ones with the most positions first. Raise "
+                "`max_vessels` to see the rest.")
+    else:
+        note = None
+    return {"items": items, "note": note,
+            "matched_vessels": matched, "truncated": truncated}
 
 
 # --------------------------------------------------------------------------

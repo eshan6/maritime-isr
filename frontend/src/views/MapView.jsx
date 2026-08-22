@@ -57,24 +57,80 @@ const BASEMAP = {
   ],
 };
 
-const LAYERS = [
-  { id: "positions", label: "Vessel positions", color: "#1a5fb4" },
-  { id: "tracks", label: "Vessel tracks", color: "#7aa8dd" },
-  { id: "density", label: "Event density (whole corpus)", color: "#5b3fa8" },
-  { id: "encounter", label: "Encounters", color: "#b0221b" },
-  { id: "loitering", label: "Loitering", color: "#9a6300" },
-  { id: "port_visit", label: "Port visits", color: "#1f7a4d" },
-  { id: "gap", label: "AIS gaps", color: "#b0221b" },
-  { id: "detections", label: "SAR radar contacts", color: "#00707a" },
-  { id: "scenes", label: "Sentinel-1 footprints", color: "#6039c4" },
-  { id: "ports", label: "Ports", color: "#55636f" },
-  { id: "alerts", label: "Alert markers", color: "#b0221b" },
-  // Coastal radar (ADR-028). No live radar feed stands behind these; the Radar
-  // view carries that disclosure in full, so the layer names here stay plain
-  // rather than repeating a caveat three times in a checkbox list.
-  { id: "radar_coverage", label: "Radar coverage", color: "#0b6e75" },
-  { id: "radar_tracks", label: "Radar tracks", color: "#3aa0a8" },
-  { id: "radar_contacts", label: "Radar dark contacts", color: "#d33682" },
+const VESSEL_COLOR = "#1a5fb4";
+const ALERT_COLOR = "#b0221b";
+
+// **AIS gaps no longer share the encounter red.** Three layers were painted
+// `#b0221b` — encounters, gaps and alert markers — so the key showed three
+// identical swatches against three unrelated meanings and the map drew them as
+// the same dot. Red stays with risk (alerts) and with the encounter, which is
+// the behaviour a transfer looks like.
+//
+// A gap gets near-black, because what a gap IS is a silence: the broadcast
+// stopped. That is the literal fact and the colour says only that much. It is
+// deliberately not a statement that the silence was *intentional* — asserting
+// that needs demonstrated receiver coverage at the position (ADR-005,
+// CLAUDE.md §6), which mostly does not exist here.
+const EVENT_COLOR = {
+  encounter: "#b0221b",
+  loitering: "#9a6300",
+  port_visit: "#1f7a4d",
+  gap: "#1f2933",
+};
+
+// The key, GROUPED — and the grouping is the whole repair. It was a flat run of
+// fourteen checkboxes plus ten more under one heading: twenty-four toggles in a
+// scrolling column, which is an inventory rather than a key. Nothing in it said
+// that four of those layers are history and one of them is now, so a pin that
+// has never moved and a ship at its position this instant read as the same kind
+// of mark.
+//
+// The four groups are the question an operator actually asks of a mark ("what
+// kind of thing is this?"), and they are the same four-way split the marks
+// themselves now carry in weight — see MARK_STYLE.
+const LAYER_GROUPS = [
+  {
+    id: "live",
+    title: "Live traffic",
+    hint: "Moves with the timeline. Drawn where the vessel was at the time on the clock.",
+    layers: [
+      { id: "positions", label: "Vessels", color: VESSEL_COLOR },
+      { id: "tracks", label: "Vessel tracks", color: "#7aa8dd" },
+    ],
+  },
+  {
+    id: "history",
+    title: "Past behaviour",
+    // The sentence this map was missing. Events are deliberately not filtered
+    // by the clock, which is a good decision that was completely invisible: the
+    // pins sat still through an entire playthrough and read as vessels that
+    // had stopped, rather than as places where something once happened.
+    hint: "Fixed pins marking where something happened. These do not move with the timeline.",
+    layers: [
+      { id: "density", label: "Event density (whole corpus)", color: "#5b3fa8" },
+      { id: "encounter", label: "Encounters", color: EVENT_COLOR.encounter },
+      { id: "loitering", label: "Loitering", color: EVENT_COLOR.loitering },
+      { id: "port_visit", label: "Port visits", color: EVENT_COLOR.port_visit },
+      { id: "gap", label: "AIS gaps", color: EVENT_COLOR.gap },
+      { id: "alerts", label: "Alert markers", color: ALERT_COLOR },
+    ],
+  },
+  {
+    id: "sensors",
+    title: "Satellite & radar",
+    hint: "What a sensor saw, whether or not the vessel was broadcasting. "
+      + "A hollow mark has no AIS track associated with it.",
+    // Coastal radar (ADR-028). No live radar feed stands behind these; the Radar
+    // view carries that disclosure in full, so the layer names here stay plain
+    // rather than repeating a caveat three times in a checkbox list.
+    layers: [
+      { id: "detections", label: "SAR radar contacts", color: "#00707a" },
+      { id: "scenes", label: "Sentinel-1 footprints", color: "#6039c4" },
+      { id: "radar_coverage", label: "Radar coverage", color: "#0b6e75" },
+      { id: "radar_tracks", label: "Radar tracks", color: "#3aa0a8" },
+      { id: "radar_contacts", label: "Radar dark contacts", color: "#d33682" },
+    ],
+  },
 ];
 
 // The maritime zone layer (ADR-030), toggled INDEPENDENTLY by kind — a
@@ -94,7 +150,42 @@ const ZONE_LAYERS = [
   { id: "geofence", label: "My drawn areas", color: "#c2410c" },
 ];
 
-const EVENT_COLOR = { encounter: "#b0221b", loitering: "#9a6300", port_visit: "#1f7a4d", gap: "#b0221b" };
+//: Ports sit in the geography group, not with the behaviour pins. A port is a
+//: fixed place on the coast — the same class of thing as an anchorage or a
+//: terminal — and grouping it with "port visits" put a permanent feature next
+//: to a dated event purely because the two share a word.
+const GEOGRAPHY_EXTRA = [{ id: "ports", label: "Ports", color: "#55636f" }];
+
+// How heavily each family of mark is drawn. **This is the clutter fix that is
+// not about layer count.** Eleven layers were circles between radius 4 and 8
+// with the same white stroke, so colour was the only thing separating a vessel
+// at her position this instant from a pin dropped two years ago — and three of
+// those colours collided.
+//
+// MapLibre's circle layer gives no silhouette control without sprite images, so
+// the hierarchy is carried by weight instead, which is the axis that actually
+// governs what the eye reaches first:
+//
+//   * **live** — big, saturated, thick white halo. Reads as an object.
+//   * **history** — small, translucent, hairline stroke. Reads as stipple:
+//     present, countable, and clearly not in the foreground.
+//   * **flag** — a ring, not a disc. An alert is an annotation ABOUT a position,
+//     so it is drawn around one rather than as another thing sitting at it.
+//
+// Sensor marks keep their own filled/hollow encoding (that distinction carries
+// meaning and is not ours to flatten) and are merely nudged down in weight.
+const MARK_STYLE = {
+  live: { radius: 6, opacity: 0.95, strokeWidth: 2.5, strokeColor: "#ffffff" },
+  history: { radius: 3.5, opacity: 0.55, strokeWidth: 0.6, strokeColor: "#ffffff" },
+  //: Fixed installations — ports, radar stations. Permanent features of the
+  //: coast rather than things that happened, so they sit between the two: not
+  //: as loud as a vessel, not as faint as one pin among thousands.
+  context: { radius: 4, opacity: 0.7, strokeWidth: 0.8, strokeColor: "#ffffff" },
+  //: A ring with nothing in the middle. `opacity` here is the FILL's, so zero
+  //: is what makes it an annotation drawn around a position instead of a
+  //: fourteenth kind of dot sitting on one.
+  flag: { radius: 9, opacity: 0, strokeWidth: 3, strokeColor: ALERT_COLOR },
+};
 
 //: Events requested for the individual-dot layers. The dots are the detail
 //: view; `density` is what shows the whole corpus, so this cap no longer hides
@@ -109,26 +200,35 @@ export function MapView() {
   const nav = useNavigate();
   const [ready, setReady] = useState(false);
   const [selected, setSelected] = useState(null);
+  // **Eighteen of twenty-four layers used to be on at first paint.** Every one
+  // of them had been defaulted on for a real reason, each recorded in its own
+  // session — "the footprints were the one unambiguously real thing and they
+  // were hidden", "a contact without its coverage ring invites the
+  // out-of-coverage misreading" — and nobody ever added the reasons up. The
+  // result was a map that opened with everything shouting, which is the same
+  // as opening with nothing legible.
+  //
+  // The opening set is now five: where the ships are, how much has happened
+  // where (density, which is strictly better than the four individual event
+  // layers it summarises), what has been flagged, the real satellite coverage,
+  // and the operator's own drawn areas. Everything else is one click away in
+  // its group, and the groups say what they hold.
   const [visible, setVisible] = useState({
-    positions: true, tracks: false, density: true, encounter: true,
-    loitering: true, port_visit: true, gap: true, detections: true,
-    // Sentinel-1 footprints are REAL satellite coverage — 636 of them on the
-    // laptop corpus — and defaulting the layer off meant the one unambiguously
-    // real thing on the map was hidden until somebody found the checkbox.
-    scenes: true, ports: true, alerts: true,
-    // Coverage and contacts on by default — the coverage rings are what make a
-    // dark contact readable ("we could see there, and heard nothing"), and a
-    // contact drawn without them invites exactly the out-of-coverage-is-not-dark
-    // misreading. The 1,200-odd track polylines are off: they are a dense mat
-    // over the whole coast and are for inspection, not for the headline.
-    radar_coverage: true, radar_tracks: false, radar_contacts: true,
-    // Zones default OFF except the operator's own work and the facility
-    // outlines. Turning the whole geography on by default would bury the
-    // traffic, which is the failure the visual hierarchy exists to prevent.
+    positions: true, tracks: false, density: true,
+    encounter: false, loitering: false, port_visit: false, gap: false,
+    alerts: true,
+    detections: false, scenes: true, ports: false,
+    radar_coverage: false, radar_tracks: false, radar_contacts: false,
     z_eez: false, z_contiguous_zone: false, z_territorial_sea: false,
-    z_imbl: true, z_shipping_lane: false, z_sensitive_area: true,
-    z_port_limit: true, z_anchorage: true, z_oil_terminal: true,
+    z_imbl: false, z_shipping_lane: false, z_sensitive_area: false,
+    z_port_limit: false, z_anchorage: false, z_oil_terminal: false,
     z_geofence: true,
+  });
+  // Which key groups are expanded. `live` and `history` open, because those are
+  // the two an operator reads the map through; the other two are available
+  // without being a wall of text on arrival.
+  const [openGroups, setOpenGroups] = useState({
+    live: true, history: true, sensors: false, geography: false,
   });
   const [data, setData] = useState({
     events: [], ports: [], scenes: [], alerts: [], density: [], detections: [],
@@ -340,45 +440,80 @@ export function MapView() {
       <div ref={mapEl} style={{ position: "absolute", inset: 0 }} />
 
       <div className="layerbox" style={{ maxHeight: "72vh", overflowY: "auto" }}>
-        <h4>Layers</h4>
-        {LAYERS.map((l) => (
-          <label className="layer-toggle" key={l.id}>
-            <input
-              type="checkbox"
-              checked={!!visible[l.id]}
-              onChange={(e) => setVisible((v) => ({ ...v, [l.id]: e.target.checked }))}
-            />
-            <span className="layer-swatch" style={{ background: l.color }} />
-            {l.label}
-          </label>
+        {LAYER_GROUPS.map((g) => (
+          <LayerGroup
+            key={g.id}
+            title={g.title}
+            hint={g.hint}
+            open={!!openGroups[g.id]}
+            onToggle={() => setOpenGroups((s) => ({ ...s, [g.id]: !s[g.id] }))}
+            count={g.layers.filter((l) => visible[l.id]).length}
+            total={g.layers.length}
+          >
+            {g.layers.map((l) => (
+              <label className="layer-toggle" key={l.id}>
+                <input
+                  type="checkbox"
+                  checked={!!visible[l.id]}
+                  onChange={(e) =>
+                    setVisible((v) => ({ ...v, [l.id]: e.target.checked }))}
+                />
+                <span className="layer-swatch" style={{ background: l.color }} />
+                {l.label}
+              </label>
+            ))}
+          </LayerGroup>
         ))}
 
-        <h4 style={{ marginTop: 12 }}>Maritime geography</h4>
-        {ZONE_LAYERS.map((l) => {
-          const missing = (data.missingKinds || []).includes(l.id);
-          return (
-            <label
-              className="layer-toggle"
-              key={l.id}
-              title={missing
-                ? "Not loaded — a statutory limit this system will not derive. "
-                  + "Load a published file with `maritime-isr ingest zones`."
-                : l.label}
-              style={{ opacity: missing ? 0.42 : 1 }}
-            >
+        <LayerGroup
+          title="Geography"
+          hint="Fixed places and boundaries. Drawn as outlines under the traffic."
+          open={!!openGroups.geography}
+          onToggle={() => setOpenGroups((s) => ({ ...s, geography: !s.geography }))}
+          count={GEOGRAPHY_EXTRA.filter((l) => visible[l.id]).length
+                 + ZONE_LAYERS.filter((l) => visible[`z_${l.id}`]
+                                             && !(data.missingKinds || []).includes(l.id)).length}
+          total={GEOGRAPHY_EXTRA.length
+                 + ZONE_LAYERS.filter((l) => !(data.missingKinds || []).includes(l.id)).length}
+        >
+          {GEOGRAPHY_EXTRA.map((l) => (
+            <label className="layer-toggle" key={l.id}>
               <input
                 type="checkbox"
-                disabled={missing}
-                checked={!missing && !!visible[`z_${l.id}`]}
+                checked={!!visible[l.id]}
                 onChange={(e) =>
-                  setVisible((v) => ({ ...v, [`z_${l.id}`]: e.target.checked }))}
+                  setVisible((v) => ({ ...v, [l.id]: e.target.checked }))}
               />
               <span className="layer-swatch" style={{ background: l.color }} />
               {l.label}
-              {missing && <span className="muted"> — not loaded</span>}
             </label>
-          );
-        })}
+          ))}
+          {ZONE_LAYERS.map((l) => {
+            const missing = (data.missingKinds || []).includes(l.id);
+            return (
+              <label
+                className="layer-toggle"
+                key={l.id}
+                title={missing
+                  ? "Not loaded — a statutory limit this system will not derive. "
+                    + "Load a published file with `maritime-isr ingest zones`."
+                  : l.label}
+                style={{ opacity: missing ? 0.42 : 1 }}
+              >
+                <input
+                  type="checkbox"
+                  disabled={missing}
+                  checked={!missing && !!visible[`z_${l.id}`]}
+                  onChange={(e) =>
+                    setVisible((v) => ({ ...v, [`z_${l.id}`]: e.target.checked }))}
+                />
+                <span className="layer-swatch" style={{ background: l.color }} />
+                {l.label}
+                {missing && <span className="muted"> — not loaded</span>}
+              </label>
+            );
+          })}
+        </LayerGroup>
 
         {/* Draw. The requirement's "draw a box anywhere and I'll tell you who
             was in it" begins here, and the control stays in the layer box
@@ -514,6 +649,33 @@ export function MapView() {
   );
 }
 
+// One collapsible section of the key. The header carries `n of m` so a
+// collapsed group still says whether anything inside it is drawn — collapsing
+// is meant to reduce reading, not to hide state, and a closed group that gave
+// no count would make "is the radar layer on?" unanswerable without opening it.
+function LayerGroup({ title, hint, open, onToggle, count, total, children }) {
+  return (
+    <div className="layer-group">
+      <button
+        type="button"
+        className="layer-group-head"
+        aria-expanded={open}
+        onClick={onToggle}
+      >
+        <span className={`layer-group-caret ${open ? "open" : ""}`}>▸</span>
+        <span className="layer-group-title">{title}</span>
+        <span className="layer-group-count muted">{count}/{total}</span>
+      </button>
+      {open && (
+        <div className="layer-group-body">
+          {hint && <div className="layer-group-hint muted">{hint}</div>}
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function addAoi(m) {
   m.addSource("aoi", {
     type: "geojson",
@@ -574,6 +736,51 @@ function busiestInstant(tracks) {
   return at;
 }
 
+//: Where an alert marker belongs, and on what basis — or null if nothing on
+//: this client can place it honestly.
+//:
+//: **The old rule was `data.events.find(e => e.vessel_id === a.subject)`**: the
+//: first event of that vessel in the response, in whatever order the API
+//: returned it. Events come back ordered by `start_time`, so in practice that
+//: was the vessel's EARLIEST known event — a flag raised last week could be
+//: pinned to a port call two months earlier, and the map asserted a position
+//: the alert had never claimed.
+//:
+//: An alert carries a timestamp, and this client already interpolates vessel
+//: positions to any instant. So:
+//:
+//:   1. the subject's own track, interpolated to the alert's timestamp — the
+//:      only genuinely correct answer, and available whenever she has a track;
+//:   2. failing that, her event NEAREST IN TIME to the alert rather than first
+//:      in the list — still a proxy, and the label says so;
+//:   3. failing both, nothing. A vessel with no track and no located event has
+//:      no defensible position, and a marker dropped on the sea anyway is the
+//:      map inventing evidence.
+function alertPosition(alert, tracks, events) {
+  const tSec = alert.ts ? Date.parse(alert.ts) / 1000 : null;
+  if (tSec != null && !Number.isNaN(tSec)) {
+    const tr = tracks.find((t) => t.vessel_id === alert.subject);
+    const pos = tr && posAt(tr.points, tSec);
+    if (pos) return { pos, basis: "her position at the time of the alert" };
+  }
+  let best = null, bestGap = Infinity;
+  for (const e of events) {
+    if (e.vessel_id !== alert.subject || e.lat == null || e.lon == null) continue;
+    // With no alert timestamp to compare against, every candidate scores the
+    // same and the first located event wins — the old behaviour, but now only
+    // in the case where nothing better is knowable.
+    const evSec = e.start_time ? Date.parse(e.start_time) / 1000 : null;
+    const gap = (tSec == null || evSec == null || Number.isNaN(evSec))
+      ? Infinity : Math.abs(evSec - tSec);
+    if (gap < bestGap || best === null) { best = e; bestGap = gap; }
+  }
+  if (!best) return null;
+  return {
+    pos: [best.lon, best.lat],
+    basis: `nearest known event (${best.kind.replace(/_/g, " ")})`,
+  };
+}
+
 function renderVessels(m, tracks, clockSec, on, onSelect) {
   const feats = [];
   for (const tr of tracks) {
@@ -585,7 +792,7 @@ function renderVessels(m, tracks, clockSec, on, onSelect) {
       properties: { vessel_id: tr.vessel_id },
     });
   }
-  upsertCircleLayer(m, "vessels", feats, "#1a5fb4", on, onSelect, 5);
+  upsertCircleLayer(m, "vessels", feats, VESSEL_COLOR, on, onSelect, MARK_STYLE.live);
 }
 
 function renderStatic(m, data, tracks, visible, onSelect) {
@@ -601,7 +808,8 @@ function renderStatic(m, data, tracks, visible, onSelect) {
           label: `${kind.replace(/_/g, " ")}${e.place ? " · " + e.place : ""}`,
         },
       }));
-    upsertCircleLayer(m, `ev-${kind}`, feats, EVENT_COLOR[kind], visible[kind], onSelect, 4);
+    upsertCircleLayer(m, `ev-${kind}`, feats, EVENT_COLOR[kind], visible[kind],
+                      onSelect, MARK_STYLE.history);
   }
 
   // track polylines
@@ -620,24 +828,28 @@ function renderStatic(m, data, tracks, visible, onSelect) {
       geometry: { type: "Point", coordinates: [p.lon, p.lat] },
       properties: { vessel_id: "", label: `Port · ${p.name || p.id}` },
     }));
-  upsertCircleLayer(m, "ports", portFeats, "#55636f", visible.ports, onSelect, 4);
+  upsertCircleLayer(m, "ports", portFeats, "#55636f", visible.ports, onSelect,
+                    MARK_STYLE.context);
 
-  // alert markers (at the alert subject's first known event location)
+  // Alert markers. See `alertPosition` — the placement rule used to be "the
+  // first event of this vessel we happen to hold", which is a position the
+  // alert never claimed.
   const alertPts = [];
   for (const a of data.alerts) {
-    const ev = data.events.find((e) => e.vessel_id === a.subject && e.lat != null);
-    if (ev) {
-      alertPts.push({
-        type: "Feature",
-        geometry: { type: "Point", coordinates: [ev.lon, ev.lat] },
-        properties: {
-          vessel_id: a.subject,
-          label: `⚑ ${String(a.anomaly_type || "").replace(/_/g, " ")} · ${a.subject_name || ""}`,
-        },
-      });
-    }
+    const at = alertPosition(a, tracks, data.events);
+    if (!at) continue;
+    alertPts.push({
+      type: "Feature",
+      geometry: { type: "Point", coordinates: at.pos },
+      properties: {
+        vessel_id: a.subject,
+        label: `⚑ ${String(a.anomaly_type || "").replace(/_/g, " ")} · `
+          + `${a.subject_name || ""} — ${at.basis}`,
+      },
+    });
   }
-  upsertCircleLayer(m, "alerts", alertPts, "#b0221b", visible.alerts, onSelect, 7, true);
+  upsertCircleLayer(m, "alerts", alertPts, ALERT_COLOR, visible.alerts, onSelect,
+                    MARK_STYLE.flag);
 
   // SAR radar contacts. A contact with no matched MMSI is drawn hollow — it is
   // the SHAPE of a dark vessel, not a dark vessel. Asserting darkness needs
@@ -929,7 +1141,7 @@ function renderRadar(m, data, radarTracks, visible) {
       },
     }));
   upsertCircleLayer(m, "radar-stations", stationFeats, "#0b6e75",
-                    visible.radar_coverage, () => {}, 4);
+                    visible.radar_coverage, () => {}, MARK_STYLE.context);
 
   const trackFeats = (radarTracks || []).map((tr) => ({
     type: "Feature",
@@ -1124,7 +1336,8 @@ function upsertDetectionLayer(m, id, feats, on) {
   if (m.getLayer(id)) m.setLayoutProperty(id, "visibility", on ? "visible" : "none");
 }
 
-function upsertCircleLayer(m, id, feats, color, on, onSelect, radius = 5, star = false) {
+function upsertCircleLayer(m, id, feats, color, on, onSelect,
+                           style = MARK_STYLE.context) {
   const fc = { type: "FeatureCollection", features: feats };
   const src = m.getSource(id);
   if (src) src.setData(fc);
@@ -1133,11 +1346,15 @@ function upsertCircleLayer(m, id, feats, color, on, onSelect, radius = 5, star =
     m.addLayer({
       id, type: "circle", source: id,
       paint: {
-        "circle-radius": star ? radius + 1 : radius,
+        "circle-radius": style.radius,
         "circle-color": color,
-        "circle-opacity": 0.85,
-        "circle-stroke-width": star ? 2 : 1,
-        "circle-stroke-color": "#fff",
+        "circle-opacity": style.opacity,
+        "circle-stroke-width": style.strokeWidth,
+        // A ring mark strokes in its own colour; everything else strokes white
+        // to separate it from whatever it overlaps.
+        "circle-stroke-color": style.strokeColor === ALERT_COLOR ? color
+                                                                 : style.strokeColor,
+        "circle-stroke-opacity": 1,
       },
     });
     m.on("click", id, (e) => {

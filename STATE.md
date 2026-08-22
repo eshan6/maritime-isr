@@ -8,13 +8,26 @@ session. `CLAUDE.md`, `ARCHITECTURE.md`, `DECISIONS.md` are stable contracts;
 > between status buckets, record what was verified vs assumed, log anything now
 > broken, and set "Next up." If you don't update it, the next session starts blind.
 
-**Last updated:** 2026-08-21 — **the timeline player ran and nothing on the map
+**Last updated:** 2026-08-22 — **"which ones are the actual vessels?"** Reported
+as "the map key and the map have become too cluttered and crowded", and the
+question underneath it was the real finding: an operator could not tell a ship
+at her position this instant from a pin dropped two years ago. Eighteen of
+twenty-four layers were on at first paint, eleven of them were circles of near
+identical size, and three unrelated meanings shared one red. The key is now four
+collapsible groups that say what they hold, the opening set is five layers, mark
+weight separates live from historical from sensor, AIS gaps have their own
+colour, `/tracks` reports the cap it had always applied in silence, alert markers
+stopped claiming a position they never had, and the graph labels identity edges
+by identifier rather than calling all 607 of them "identified as". See the
+section at the end of this file.
+
+Prior entry: 2026-08-21 — **the timeline player ran and nothing on the map
 moved.** The scrubber was playing the *corpus* window (2012→2026, on a thin tail
 of real GFW records) when only the *AIS* window (the eight-week narrative, 52
 days) can move a vessel: 99% of the bar covered days with no positions, one
 playthrough took ten hours, and the default playhead sat past the last position
 so the map opened empty. Both spans are now served, the scrubber plays the one
-that can move, and it says which. See the section at the end of this file.
+that can move, and it says which.
 
 Prior entry: 2026-08-16 (third session) — **Build 2: the maritime zone
 layer** (ADR-030). The system understood four hardcoded circles; it now holds a
@@ -3344,3 +3357,165 @@ canvas contradicts by 92% is how an operator concludes the view is broken.
   for a reason that had nothing to do with the code under test. Rebuilt with
   `python -m maritime_isr.cli graph-populate`. Worth fixing separately — a test
   run should not be able to destroy the operator's corpus.
+---
+
+## The map said everything and distinguished nothing (2026-08-22)
+
+Reported as *"the map key and the map have become too cluttered and crowded"*,
+alongside a question that turned out to be the actual finding:
+
+> which ones are the actual vessels? which are the loitering ones (they stay
+> stationary in one place for days as the timeline player progresses)
+
+**Nothing on that map was loitering in place.** Exactly one layer moves — the
+interpolated AIS positions. Every other coloured dot is an event marker pinned
+where something once happened, deliberately not filtered by the clock so that
+nothing blinks during playback. That decision is right and stays. What was
+wrong is that the map never said so, and drew both as a small coloured circle,
+so a pin that has never moved read as a ship that had stopped.
+
+### What was actually wrong
+
+| | before |
+|---|---|
+| layers on at first paint | **18 of 24** |
+| layers drawn as circles r4–r8 | **11** |
+| distinct meanings sharing `#b0221b` | **3** (encounters, AIS gaps, alert markers) |
+| checkboxes in one flat scrolling column | **24** |
+| anything stating that event pins ignore the clock | **nothing** |
+
+Every default-on layer had been turned on for a real reason, each recorded in
+its own past session — "the footprints were the one unambiguously real thing and
+they were hidden", "a contact drawn without its coverage ring invites the
+out-of-coverage misreading". Each was right on its own. Nobody ever added them
+up. That is the failure mode worth remembering: **a view degrades by locally
+correct decisions, so no single commit looks wrong in review.**
+
+### The fix
+
+**The key is four groups**, collapsible, each with one line saying what kind of
+thing it holds — *Live traffic* ("moves with the timeline"), *Past behaviour*
+("fixed pins marking where something happened; these do not move with the
+timeline"), *Satellite & radar*, *Geography*. A collapsed group still shows
+`n/m`, because collapsing is meant to reduce reading, not to hide state.
+
+**Mark weight carries the family.** MapLibre circles give no silhouette control
+without sprites, so the hierarchy is weight, which is the axis that governs what
+the eye reaches first anyway: live = large, saturated, thick white halo;
+history = small, translucent, hairline; alerts = a *ring* rather than a disc,
+because an alert is an annotation about a position rather than another object
+at one. Sensor marks keep their filled/hollow encoding — that distinction
+carries meaning and is not ours to flatten.
+
+**The opening set is five layers**: vessels, event density, alerts, Sentinel-1
+footprints, drawn areas. Density is strictly better than the four individual
+event layers it summarises, which is why they start off.
+
+**AIS gaps left the encounter red** for near-black. What a gap is, is a
+*silence*. The colour says that much and no more — it is deliberately not a
+claim that the silence was intentional, which needs demonstrated receiver
+coverage at the position (ADR-005, CLAUDE.md §6).
+
+**`/tracks` reports its cap.** It capped at `max_vessels=200` and returned
+`note: None` regardless — measured here, **200 of 208** vessels drawn with
+nothing anywhere saying so. `/events` has reported its cap since ADR-024; this
+was the one endpoint still breaking the rule. Truncation is measured against
+what the *cap* dropped, never against what the decimator skipped: a vessel with
+one position legitimately has no track, and counting that as truncation would
+fire the warning on every corpus and train the operator to ignore it.
+
+**Alert markers stopped inventing a position.** The marker was drawn at
+`events.find(e => e.vessel_id === subject)` — the vessel's *earliest* located
+event, because events arrive ordered by `start_time`. A flag raised last week
+could be pinned to a port call two months earlier. Now: her track interpolated
+to the alert's own timestamp; failing that, her event nearest **in time**, with
+the label saying which; failing both, no marker. A vessel with no track and no
+located event has no defensible position, and dropping a marker on the sea
+anyway is the map manufacturing evidence.
+
+**The notes bar stopped covering the key.** Both panels sat at `left: 12px`, and
+the notes paint later — so the disclosures covered the controls they qualify.
+
+### The graph, same session
+
+**607 identity edges all read "identified as"** — the one phrase they have in
+common and the one that carries no information. A vessel points at an MMSI, an
+IMO, a call sign and a name; an IMO is welded to the hull and a name is paint.
+The edges already carried `props["kind"]`; nothing shipped it to the client.
+Now `identity_kind` rides the edge payload, gated on the closed
+`schemas.keys.IDENTITY_KINDS` vocabulary so a populator/UI drift degrades to the
+generic label instead of rendering a raw spelling on the canvas.
+
+Measured on the landed graph: **225 MMSI, 224 name, 99 call sign, 59 IMO, 0
+unlabelled.**
+
+*The trap here, and it would have been invisible:* `GraphEdge` is a pydantic
+model and pydantic drops undeclared keys. Adding the field to the service alone
+would have worked on `/graph/all` and silently not on
+`/vessels/{id}/neighbourhood` — the same canvas labelling the same edge two
+different ways depending on which view opened it. There is a test pinning it.
+
+**Hovering an edge did nothing.** `cy.on("mouseover", ...)` was bound to `node`
+only, so pointing at a relationship gave no highlight, no label and no cursor
+change; the only way to learn what a link was, was to click it. Edge hover now
+raises the edge and both endpoints, and reveals that one edge's label — the sole
+place in this view where hover uncovers hidden text, because the whole-network
+view sets `shownLabel` to `""` on all ~1,900 edges, so a hover that neither
+highlights nor names answers nothing. The style rule is **last in the
+stylesheet** on purpose: cytoscape resolves by source order and
+`edge[current = 0]` pins ended edges to opacity 0.28, so declared any earlier,
+hovering a closed relationship would have raised everything about it except its
+visibility.
+
+### Explicitly NOT done
+
+- **Event pins still ignore the timeline.** Offered and declined — they are
+  context for the window, not moments in it, and blinking pins during playback
+  is the failure the current behaviour exists to prevent.
+- **No synthetic labelling was added to the map.** Offered and declined. Note
+  that everything that moves on this map is still synthetic (ADR-005: no free
+  AIS for this AOI), and the map does not say so; the Vessels list and the
+  incident report still carry the label.
+
+### Verified
+
+Chromium against a live uvicorn backend on a freshly generated scenario corpus
+(`scenario generate --seed 7` + `graph-populate`), measured through the DOM and
+a live `cy` handle rather than read off a screenshot:
+
+| check | result |
+|---|---|
+| key renders four groups, not a flat list | `[Live traffic, Past behaviour, Satellite & radar, Geography]` |
+| collapsed groups still report state | `1/2, 2/6, 1/5, 1/7` |
+| opening layer set | 3 of 8 visible toggles on |
+| "these do not move with the timeline" on screen | present |
+| `/tracks` truncation reaches the notes bar | "showing 200 of 208 vessels" |
+| gaps no longer share the encounter red | `rgb(176,34,27)` vs `rgb(31,41,51)` |
+| identity edges carry a kind over HTTP | 607 edges, 0 unlabelled |
+| hovering an edge highlights it | class applied, both endpoints raised, label revealed, cleared on mouseout |
+
+`python -m pytest -q` → **694 passed, 18 skipped, 1 failed**. The one failure is
+`test_sanctions_match.py::test_no_identity_landed_is_a_clear_message`, which
+reproduces identically on the base commit: it hard-codes the
+`python -m maritime_isr.cli` branch of `config.CLI` and so fails wherever the
+console script is on PATH, which is what `pip install -e .` does. **Still worth
+fixing separately** — it should assert against `config.CLI`, not one of its
+branches. It has now been the reported pre-existing failure for two sessions
+running; it is cheap and it is noise on every run.
+
+### Status
+
+- 🟡 **Verified against a real backend in a real browser, on a generated
+  scenario corpus — not on the laptop.** The exit test is Eshan opening the map
+  and being able to say which marks are ships without asking.
+- The one basemap-tile failure in the browser run is this sandbox's proxy
+  blocking `basemaps.cartocdn.com`; every layer this change touches is served
+  from localhost and rendered fine.
+
+### Next up
+
+- The brittle `config.CLI` assertion above.
+- Nothing on the map distinguishes real from synthetic. Declined this session
+  and correctly so — it was not what was asked — but it remains the largest
+  honesty gap on the primary screen, and it should be a deliberate decision
+  rather than an omission that persists by default.

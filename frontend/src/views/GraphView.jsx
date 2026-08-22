@@ -13,7 +13,10 @@
 //     (flag, port, identity) recedes to warm grey, and red means risk and only
 //     risk. The only ring on a node means "sanctioned".
 //   * Node and edge labels are on by DEFAULT. Hovering fades everything outside
-//     the hovered neighbourhood; it never reveals text that was hidden.
+//     the hovered neighbourhood. It reveals hidden text in exactly one case —
+//     the single edge under the cursor — because on the whole-network view no
+//     edge carries a label at rest, and a hover that neither highlights nor
+//     names the link answers nothing. Nodes still never reveal.
 //   * Zoom is bounded so the graph can never be lost off-scale, with explicit
 //     zoom and fit controls rather than wheel-only.
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -35,7 +38,7 @@ import { api } from "../api.js";
 // when randomize is off — see the measurement in the commit message.
 cytoscape.use(fcose);
 import {
-  edgeCategoryColor, edgeTypeLabel, fmtDate, humanKey, nodeTypeColor,
+  edgeCategoryColor, edgeLabel, fmtDate, humanKey, nodeTypeColor,
   nodeTypeSize, num, shortId,
 } from "../lib/format.js";
 
@@ -474,10 +477,31 @@ export function GraphView() {
             "border-color": "#1a5fb4", "border-width": 4, "z-index": 30 } },
         { selector: ".focus-nbr", style: { "z-index": 25 } },
         { selector: "edge.focus-nbr", style: { opacity: 0.9, width: 2.2 } },
+        // The hovered relationship. **Last in the stylesheet on purpose** —
+        // cytoscape resolves conflicts by source order, and `edge[current = 0]`
+        // above pins ended edges to opacity 0.28. Declared any earlier, hovering
+        // a closed relationship would raise everything about it except its
+        // visibility. Here it keeps the dash (never overridden, so "was true"
+        // still reads as past) and wins on opacity and width.
+        //
+        // It also REVEALS its own label, which no other hover in this view
+        // does. The rule elsewhere is that hovering never uncovers hidden text,
+        // and that rule is right for the neighbourhood fade — it would re-run
+        // label de-collision mid-gesture. One edge is different: the
+        // whole-network view sets `shownLabel` to "" on all ~1,900 of them, so
+        // an operator pointing at a link to ask what it is got no highlight and
+        // no answer. Revealing exactly one element's `label` touches no layout.
+        { selector: "edge.hovered", style: {
+            width: 3.2, opacity: 1, "z-index": 22,
+            label: "data(label)", "text-opacity": 1,
+            color: "#1b2a38",
+            "text-background-opacity": 1,
+            "text-background-padding": 3,
+          } },
       ],
     });
 
-    const clearHl = () => cy.elements().removeClass("faded hl");
+    const clearHl = () => cy.elements().removeClass("faded hl hovered");
     // Hover-fade only where it is affordable — see INTERACTIVE_MAX_ELEMENTS.
     // On a large web the neighbourhood is still raised, it is just not raised
     // by pushing everything else down.
@@ -490,6 +514,29 @@ export function GraphView() {
       e.target.closedNeighborhood().removeClass("faded").addClass("hl");
     });
     cy.on("mouseout", "node", clearHl);
+
+    // **Edge hover, which did not exist.** `mouseover` was bound to `node`
+    // only, so pointing at a relationship produced nothing — no highlight, no
+    // label, no cursor change — and the sole way to find out what a link was
+    // was to click it and read the side panel. Same affordability test as the
+    // node path: fade the rest where the element count allows, raise the edge
+    // and both of its endpoints either way.
+    cy.on("mouseover", "edge", (e) => {
+      const edge = e.target;
+      // Match the inline size `syncScreenScale` gives labelled edges, so a
+      // revealed label sits at the same scale as the ones already on screen
+      // instead of at whatever the stylesheet constant is at this zoom.
+      edge.style("font-size", (LABEL_PX / (cy.zoom() || 1)) * 0.85);
+      if (cy.elements().length > INTERACTIVE_MAX_ELEMENTS) {
+        edge.addClass("hovered");
+        edge.connectedNodes().addClass("hl");
+        return;
+      }
+      cy.elements().addClass("faded");
+      edge.connectedNodes().removeClass("faded").addClass("hl");
+      edge.removeClass("faded").addClass("hovered");
+    });
+    cy.on("mouseout", "edge", clearHl);
     cy.on("tap", "node", (e) => {
       const d = e.target.data();
       setInfo({ type: "node", data: d });
@@ -1025,7 +1072,7 @@ const edgeId = (e) => `${e.edge_type}|${e.source}|${e.target}|${e.t_start || ""}
 
 function edgeElement(e, { showLabel }) {
   const ownership = e.edge_type === "owned-by" || e.edge_type === "operated-by";
-  const label = edgeTypeLabel(e.edge_type);
+  const label = edgeLabel(e);
   return {
     data: {
       id: edgeId(e),
@@ -1034,6 +1081,11 @@ function edgeElement(e, { showLabel }) {
       label,
       shownLabel: showLabel ? label : "",
       edge_type: e.edge_type,
+      // Carried onto the element so the detail card can re-derive the same
+      // label from `e.target.data()` — the card reads element data, not the
+      // API row, and without this it would fall back to "identified as" on the
+      // very edges the canvas has just labelled "MMSI".
+      identity_kind: e.identity_kind || null,
       color: edgeCategoryColor(e.edge_type),
       ownership: ownership ? 1 : 0,
       width: ownership ? 2 : 1.2,
@@ -1062,7 +1114,7 @@ function DetailCard({ info, onClose }) {
       <div className="graph-detail-head">
         <div>
           <div className="eyebrow">{isNode ? d.kind.replace(/_/g, " ") : "relationship"}</div>
-          <h3>{isNode ? d.label : edgeTypeLabel(d.edge_type)}</h3>
+          <h3>{isNode ? d.label : edgeLabel(d)}</h3>
         </div>
         <button className="iconbtn" onClick={onClose}>×</button>
       </div>

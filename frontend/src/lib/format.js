@@ -71,7 +71,28 @@ export function anomalyLabel(t) {
   return ANOMALY_META[t]?.label || t || "Anomaly";
 }
 
-export function edgeTypeLabel(t) {
+// What each KIND of identity edge actually asserts. `identified-as` is the one
+// edge type in the ontology whose name carries no information: every vessel has
+// several, and on the canvas they were all drawn "identified as" — the one
+// thing they have in common. An MMSI, an IMO and a painted name are three
+// claims of very different strength (a hull number is welded on; a name is
+// paint), and the label is where that distinction is free to make.
+//
+// Keys are `schemas.keys.IDENTITY_KINDS`, which is a closed vocabulary; the
+// server only sends a kind that is in it, and an unknown one falls back to the
+// generic relationship label rather than being rendered raw.
+const IDENTITY_KIND_LABEL = {
+  mmsi: "MMSI",
+  imo: "IMO number",
+  call_sign: "call sign",
+  name: "ship name",
+  flag: "flag",
+};
+
+export function edgeTypeLabel(t, identityKind) {
+  if (t === "identified-as" && IDENTITY_KIND_LABEL[identityKind]) {
+    return IDENTITY_KIND_LABEL[identityKind];
+  }
   const m = {
     "flagged-to": "flagged to",
     "docked-at": "docked at",
@@ -84,6 +105,14 @@ export function edgeTypeLabel(t) {
     "duplicate_mmsi": "duplicate MMSI",
   };
   return m[t] || (t || "").replace(/[-_]/g, " ");
+}
+
+//: The label for one edge as the API returns it — the shape every caller with a
+//: whole edge object should use, so the identity-kind argument cannot be
+//: forgotten at one call site and passed at another.
+export function edgeLabel(edge) {
+  if (!edge) return "";
+  return edgeTypeLabel(edge.edge_type, edge.identity_kind);
 }
 
 // Node colour by SEMANTIC FAMILY, not by "one hue per type".
