@@ -8,7 +8,49 @@ session. `CLAUDE.md`, `ARCHITECTURE.md`, `DECISIONS.md` are stable contracts;
 > between status buckets, record what was verified vs assumed, log anything now
 > broken, and set "Next up." If you don't update it, the next session starts blind.
 
-**Last updated:** 2026-08-22 (second session) — **IDEX Challenge 82, Areas 1
+**Last updated:** 2026-08-24 — **IDEX Challenge 82, Area 3 built: what the
+radar picture is *of*.** Three capabilities, and the honest result on each is
+different, which is the point of measuring rather than asserting.
+
+1. **Vessel type from motion alone** (`tracks/vessel_type.py`). A random forest
+   over 13 motion-only features — speed distribution, turn rate, stop
+   behaviour, leg geometry. Held-out **hulls**, never chips or tracks, so no
+   vessel appears on both sides of the split. **65% accurate on the eight fine
+   classes; 90% accurate on the coarse vocabulary the confusion matrix itself
+   produced.** The model is not asked to make a distinction it cannot make: the
+   confusion matrix is read back and classes that trade places are merged, so
+   `Aframax / bulker / product_tanker` and `Suezmax / VLCC` are reported as one
+   answer each and the classifier returns `cannot_separate` rather than a
+   confident wrong hull type. Below 0.45 confidence it says `unknown`.
+   **A tanker sub-class is NOT a claim this system can make** — it is a claim
+   the requirement invites and the data refuses, and the 90% figure is only
+   honest because the vocabulary was cut to fit it.
+2. **Vessel-to-vessel interaction** (`tracks/interactions.py`) — moving in
+   company, shadowing, converging and holding, transfer pattern. **Zero
+   findings on the corpus at the 120-minute gate, and that zero is reported
+   rather than tuned away.** The sweep found a cliff, not a plateau: 8 findings
+   at 60 minutes, every one of them ordinary background fleet traffic on the
+   same coastal route, 0 at 120. And `transfer_pattern` **cannot be validated
+   on this corpus at all** — the scenario's transfer counterparties are dark by
+   design, so the pattern's whole point is that only one side of it is ever
+   visible. It is built, it is untested against a positive, and it says so.
+3. **The contact profile** (`fusion/contact_profile.py`) — one sentence per
+   radar contact: *"Likely merchant, transiting, no transponder, about 175 m."*
+   Produced on all **8** dark contacts. It **assembles and never re-decides**:
+   the darkness verdict comes from the cascade that already made it, with a test
+   that fails if the profile ever starts deciding for itself.
+
+The queue on the corpus is unchanged in shape — 16 alerts, `dark_vessel` 9,
+`dark_rendezvous` 1 — and the three new detectors (`identity_contradiction`,
+`notable_activity`, `vessel_interaction`) all sit at **0** on it. Each zero has
+a stated cause: identity arithmetic cannot fire on scenario identifiers; the
+re-derived activity thresholds retired the 151 false survey claims and left no
+notable activity behind them; interactions found no pair above the gate. These
+are SYNTHETIC-SUITE numbers (CLAUDE.md §4.6) and say nothing about a real
+Coastal Surveillance Network feed, which this system has never seen. See
+ADR-033.
+
+Prior entry: 2026-08-22 (second session) — **IDEX Challenge 82, Areas 1
 and 2 built.** The system now has one object at its centre: a ranked Vessel of
 Interest carrying its reasons, its evidence, a score that decomposes exactly to
 the factor, a proposed next action tied to the factor that motivated it, and a
@@ -214,6 +256,7 @@ on Eshan's machine.
 | — | Maritime zone layer (`zones/`, `ingest/zones`, `/api/zones`, map geography + draw tool) | 🟡 | **Not a spec unit** — ADR-030. Port areas, anchorages, terminals/SPMs, customary lanes, the four migrated sensitive areas and operator geofences, as landed rows with provenance and an H3 cell index. Zone entry/exit are landed events. **The four statutory limits are absent by decision** and arrive only through the connector. Sandbox-green; **never run on the laptop**. |
 | — | **IDEX Area 1 — the MDA assistant** (`assistant/`, `/api/voi`, `maritime-isr voi`, Assistant tab) | 🟡 | **Not a spec unit** — ADR-031. The ranked Vessel of Interest object: factor catalog, a score that decomposes exactly to the factor, plain-language narration, next actions with computed feasibility and stated capability, and a question answerer that retrieves rather than generates. Sandbox-green, browser-verified; **never run on the laptop**. |
 | — | **IDEX Area 2 — predictive AIS analysis** (`anomaly/identity`, `tracks/activity`, `tracks/projection`, `baselines.py`) | 🟡 | **Not a spec unit** — ADR-032. Identity authenticity (IMO check digit, MMSI/flag, registry consistency), activity classification from motion alone, forward projection as an assertion, per-area baselines as a landed artifact. **The arithmetic identity checks cannot fire on scenario data by construction** and must be measured on the landed real GFW corpus. Track-departure detection is built and deliberately **not** a suspicion factor — measured at 87-98% of the fleet. |
+| — | **IDEX Area 3 — radar picture classification** (`tracks/vessel_type`, `tracks/interactions`, `fusion/contact_profile`) | 🟡 | **Not a spec unit** — ADR-033. Vessel type from motion alone: **65% fine / 90% coarse on held-out hulls**, with the coarse vocabulary derived from the confusion matrix so the model is never asked to separate `Aframax/bulker/product_tanker` or `Suezmax/VLCC`. Interaction detection (company, shadowing, converging-and-holding, transfer): **0 findings on the corpus at the 120-minute gate**, reported not tuned; `transfer_pattern` is **unvalidatable here** because the scenario's counterparties are dark by design. Contact profiles produced on all 8 dark contacts. Sandbox-green; **never run on the laptop**, and no real CSN feed exists. |
 | — | Imaging opportunities over AIS gaps (`overpass`) | 🟡 | **Not a spec unit** — ADR-026, outside the 0.0–6.3 numbering. The first determination that is ours rather than GFW's. Needs no pixels; joins the 636 landed scene footprints against flagged gaps. Sandbox-green; **never run against the real corpus**. |
 
 **Ingest rework detail (units 0.1 / 0.3 / 0.4), 2026-07-29:**

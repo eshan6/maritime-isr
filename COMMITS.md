@@ -878,3 +878,84 @@ cd frontend && npm run build && cd .. && python -m maritime_isr.api   # /assista
 screen, each row explains itself in sentences, and the follow-up box refuses
 questions the system cannot ground.
 *Failure:* a blank page means a stale `dist/` — rebuild in `frontend/`.
+
+---
+
+## IDEX Challenge 82 — Area 3: what the radar picture is *of* (ADR-033)
+
+Areas 1 and 2 gave the system a subject and a set of reasons. Area 3 asks the
+question underneath a radar plot that AIS normally answers for free: *what kind
+of ship is that, what is it doing with the ship next to it, and what do I say
+about it in one line?* Three capabilities, three different honest answers.
+
+**1. Vessel type from motion alone** — `maritime_isr/tracks/vessel_type.py`.
+
+Thirteen features, all motion: speed percentiles and spread, time stopped, time
+at manoeuvring speed, turn rate, course spread, straight-leg geometry, report
+cadence. No length, no identity, no declared type — because a radar contact has
+none of those, and a feature the sensor cannot supply is a feature that makes
+the model useless exactly when it is needed.
+
+The split is by **hull**, never by track and never by chip. A vessel that
+appears in training may not appear in test in any form. On held-out hulls:
+**65% accurate over the eight fine classes, 90% over the coarse vocabulary.**
+
+The coarse vocabulary is not hand-written. The confusion matrix is read back
+after training and classes that trade places above a threshold are merged by
+union-find, which produced `[Aframax, bulker, product_tanker]` and
+`[Suezmax, VLCC]` as single answers and left `fishing`, `general_cargo`,
+`reefer` standing alone. When a track lands in a merged group the classifier
+returns `cannot_separate` with the group named, and below 0.45 confidence it
+returns `unknown`. **The 90% figure is only honest because the vocabulary was
+cut to fit what the data supports** — a tanker sub-class from motion is a claim
+the requirement invites and this data refuses.
+
+**2. Vessel-to-vessel interaction** — `maritime_isr/tracks/interactions.py`.
+
+Four patterns: moving in company, shadowing, converging and holding, and the
+transfer pattern (two hulls close, slow, and stably separated long enough to
+pass something between them). Pair search is pre-filtered through H3 res 6 so
+the candidate set is a hash join and not a cross product — the first version
+tripped a 200,000-pair guard; the filtered search runs in about 2 seconds.
+
+**It finds nothing on this corpus, and that is the reported result.** The
+min-duration sweep found a cliff rather than a plateau: 8 findings at 60
+minutes, every one of them ordinary fleet traffic sharing a coastal route, and
+0 at 120. The gate is set at 120 and the zero stands. Separately,
+`transfer_pattern` **cannot be validated here at all**: the scenario's transfer
+counterparties (`chain_a`, `chain_b`, `coast_dark_party`, `spoof_partner`) are
+dark by design, and `spine`/`receiver_alpha` never come within 500 m in a shared
+epoch across any of the 72 pairings. Built, untested against a positive, said
+out loud rather than implied by a green test.
+
+**3. The contact profile** — `maritime_isr/fusion/contact_profile.py`.
+
+One sentence per radar contact: *"Likely merchant, transiting, no transponder,
+about 175 m."* Type from (1), activity from `tracks/activity` (Area 2), length
+from the detection, transponder state from the dark cascade that already
+decided it. It **assembles and never re-decides** — a collector that started
+deciding darkness would be a second, uncalibrated copy of a rule that already
+exists — and a test fails if it ever does. Produced on all 8 dark contacts.
+
+**Wired into the queue.** `detect_vessel_interactions` joins the anomaly
+library behind a 0.35 gate, and `detect_dark_vessels` now carries profiles onto
+its alerts. On the corpus all three new detectors sit at 0 (`vessel_interaction`
+per the sweep above; `identity_contradiction` and `notable_activity` from Area 2
+for causes already recorded), and the queue is unchanged at 16 alerts.
+
+All figures here are **synthetic-suite** figures from a simulated radar network
+over simulated traffic. No real Coastal Surveillance Network feed has ever been
+seen by this system, and real-feed numbers will be lower (CLAUDE.md §4.6).
+
+Verify:
+
+```
+python -m pytest tests/test_radar_classification.py -q
+rm -f data/graph.sqlite && python tools/run_scenario_pipeline.py
+```
+
+*Success:* the test file reports 25 passed / 2 skipped (the two skips are the
+positive-case transfer tests this corpus cannot supply), and the pipeline prints
+`interactions : 0 (none)` with the alert tally unchanged at 16.
+*Failure:* an accuracy floor assertion firing means the classifier regressed —
+read the printed confusion matrix before touching a threshold.

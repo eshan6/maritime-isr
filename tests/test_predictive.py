@@ -552,6 +552,30 @@ def store(tmp_path):
     return GraphStore(tmp_path / "g.sqlite")
 
 
+def _lawnmower(track_id="SYN-TEST:0001", t0=1_780_000_000):
+    """A realistic survey track: short legs, turning often, going nowhere.
+
+    **Sized from the measured fleet, not from intuition.** A merchant on a
+    multi-port rotation turns every 4-6 hours (0.17-0.28 legs/hour measured); a
+    vessel actually working a lawnmower turns every 30-60 minutes. The first
+    version of this fixture ran 6 legs over 25 hours — 0.24 legs/hour, squarely
+    in the merchant band — and it only passed because the threshold was wrong
+    in the same direction. Twelve legs of 50 minutes is 1.2 legs/hour, which is
+    what the behaviour actually looks like.
+    """
+    rows = []
+    for leg in range(12):
+        east = leg % 2 == 0
+        rows += _leg(t0 + leg * 3_000, 6,
+                     lat=14.0 + 0.02 * leg,
+                     lon=(66.0 if east else 66.25),
+                     sog=4.0, cog=(90.0 if east else 270.0),
+                     step_s=600, dlon=(0.05 if east else -0.05))
+    tr = _Track(rows, track_id=track_id)
+    tr.has_identity = False
+    return tr
+
+
 def test_the_activity_gate_is_reachable_by_its_own_detector():
     """The measured defect: a gate above the detector's arithmetic ceiling.
 
@@ -629,16 +653,7 @@ def test_a_survey_pattern_becomes_an_alert_with_its_reason(store):
     """Drives the activity detector end to end over a lawnmower track."""
     from maritime_isr.anomaly.library import detect_notable_activity
 
-    rows, t0 = [], 1_780_000_000
-    # Six parallel legs, each 25 fixes at 10-minute steps, alternating course.
-    for leg in range(6):
-        east = leg % 2 == 0
-        rows += _leg(t0 + leg * 15_000, 25, lat=14.0 + 0.05 * leg,
-                     lon=(66.0 if east else 66.6), sog=4.0,
-                     cog=(90.0 if east else 270.0),
-                     dlon=(0.025 if east else -0.025))
-    track = _Track(rows, track_id="SYN-TEST:0001")
-    track.has_identity = False
+    track = _lawnmower()
 
     fired = detect_notable_activity(store, [track], source_ref="unit")
     assert fired, "a lawnmower pattern must be able to reach the queue"
@@ -674,26 +689,21 @@ def test_a_baseline_travels_as_context_without_silencing_a_pattern(store):
     from maritime_isr.anomaly.library import detect_notable_activity
     from maritime_isr.graph import GraphStore
 
-    rows, t0 = [], 1_780_000_000
-    for leg in range(6):
-        east = leg % 2 == 0
-        rows += _leg(t0 + leg * 15_000, 25, lat=14.0 + 0.05 * leg,
-                     lon=(66.0 if east else 66.6), sog=4.0,
-                     cog=(90.0 if east else 270.0),
-                     dlon=(0.025 if east else -0.025))
-
     def fresh_track(tid):
-        tr = _Track(rows, track_id=tid)
-        tr.has_identity = False
-        return tr
+        return _lawnmower(track_id=tid)
 
-    # A baseline in which 4 knots is entirely ordinary for this cell.
+    # A baseline in which 4 knots is entirely ordinary, built at the track's
+    # OWN centroid — a baseline in a neighbouring H3 cell answers "cannot say"
+    # and the test would pass while proving nothing.
+    centre = act.classify_activity(_lawnmower())
     ts = pd.Timestamp("2026-06-01", tz="UTC")
     local = pd.DataFrame([
-        dict(vessel_id=f"v{i % 20}", lat=14.15, lon=66.3, sog_kn=12.0,
-             cog_deg=90.0, ts=ts + pd.Timedelta(hours=i), is_synthetic=True)
+        dict(vessel_id=f"v{i % 20}", lat=centre.lat, lon=centre.lon,
+             sog_kn=12.0, cog_deg=90.0,
+             ts=ts + pd.Timedelta(hours=i), is_synthetic=True)
         for i in range(300)])
     index = bl.BaselineIndex(bl.derive_baselines(local))
+    assert index.at(centre.lat, centre.lon) is not None
 
     detect_notable_activity(store, [fresh_track("SYN-A:1")], source_ref="unit")
     without = [a["score"] for a in store.alerts()]
@@ -719,3 +729,114 @@ def test_only_a_signature_metric_scales_a_score():
         assert metric is None or isinstance(metric, str), (
             f"{activity} must name the metric its signature IS, or None — "
             f"a baseline may only scale a score it has a bearing on")
+
+
+# ==========================================================================
+# 6. measured accuracy against ground truth
+#
+# **The section that was missing, and its absence let a broken classifier ship.**
+# Everything above exercises a code path; none of it asked whether the answers
+# are *right*. Measured against the declared `vessel_class` — which is ground
+# truth in the strict sense, because the generator built each track *from* the
+# class — the first build scored **0 of 45 fishing vessels** and every one of
+# its three `survey_pattern` claims was a merchant on a multi-port rotation.
+#
+# `vessel_class` is legitimate to read here: this is the evaluation harness,
+# which runs after the pipeline, and CLAUDE.md §8 requires it on every model
+# change. The classifier itself never sees it.
+# ==========================================================================
+
+#: Floors, not targets. Set below the measured figures so ordinary variation
+#: does not fail the build, and high enough that a regression of the kind that
+#: shipped last time cannot pass.
+FISHING_RECALL_FLOOR = 0.75
+FISHING_PRECISION_FLOOR = 0.85
+
+
+@pytest.fixture(scope="module")
+def classified_fleet():
+    """Every AIS track, classified, beside the class it was generated from."""
+    from maritime_isr.api import graph_service as gsvc
+    from maritime_isr.api.reader import open_reader
+    from maritime_isr.tracks.builder import build_tracks
+
+    if not gsvc.graph_exists():
+        pytest.skip("no landed corpus — run tools/run_scenario_pipeline.py")
+    with open_reader() as r:
+        if not r.has("ais_position") or not r.has("gfw_vessel_identity"):
+            pytest.skip("corpus lacks AIS positions or vessel identity")
+        pos = pd.DataFrame(r.rows("SELECT * FROM ais_position"))
+        ident = {str(x["mmsi"]): x for x in r.rows(
+            "SELECT mmsi, vessel_class FROM gfw_vessel_identity "
+            "WHERE mmsi IS NOT NULL")}
+    if pos.empty:
+        pytest.skip("no AIS positions landed")
+    tracks, _ = build_tracks(pos, source=AIS)
+    out = []
+    for t in tracks:
+        cls = (ident.get(str(t.mmsi)) or {}).get("vessel_class") or "unknown"
+        out.append((cls, act.classify_activity(t)))
+    return out
+
+
+def test_fishing_vessels_are_recognised_as_fishing(classified_fleet):
+    """Measured 0 of 45 before the thresholds were derived from the fleet.
+
+    `TURNY_MIN_DEG_MIN` was 4.0 while the fishing turn-rate p90 is 3.53 — the
+    gate sat above the population it was meant to admit, so no trawler in the
+    corpus could ever reach it.
+    """
+    fish = [a for cls, a in classified_fleet if cls == "fishing"]
+    if len(fish) < 10:
+        pytest.skip("too few fishing vessels in this corpus to measure")
+    hit = sum(1 for a in fish if a.activity == "fishing")
+    recall = hit / len(fish)
+    assert recall >= FISHING_RECALL_FLOOR, (
+        f"fishing recall {recall:.0%} ({hit}/{len(fish)}) is below the "
+        f"{FISHING_RECALL_FLOOR:.0%} floor — the activity thresholds have "
+        f"drifted away from the population they were measured against")
+
+
+def test_the_fishing_class_is_not_claimed_on_merchants(classified_fleet):
+    fish_calls = [cls for cls, a in classified_fleet if a.activity == "fishing"]
+    if len(fish_calls) < 5:
+        pytest.skip("too few fishing calls to measure precision")
+    right = sum(1 for c in fish_calls if c == "fishing")
+    precision = right / len(fish_calls)
+    assert precision >= FISHING_PRECISION_FLOOR, (
+        f"fishing precision {precision:.0%} ({right}/{len(fish_calls)}) is "
+        f"below the {FISHING_PRECISION_FLOOR:.0%} floor")
+
+
+def test_no_merchant_is_called_a_survey_pattern(classified_fleet):
+    """The measured false-positive class, enforced.
+
+    All three survey claims on the corpus were merchants — a product tanker at
+    0.216 legs/hour, a bulker at 0.258, a general cargo at 0.174 — because
+    `SURVEY_MIN_LEGS_PER_HOUR` was 0.1, below the merchant p90 of 0.281.
+    """
+    bad = [cls for cls, a in classified_fleet
+           if a.activity == "survey_pattern"
+           and cls in ("product_tanker", "bulker", "general_cargo", "Aframax",
+                       "Suezmax", "VLCC", "reefer")]
+    assert not bad, (
+        f"{len(bad)} merchant(s) classified as running a survey pattern: "
+        f"{collections_counter(bad)}. A multi-port rotation is not a lawnmower.")
+
+
+def collections_counter(items):
+    import collections as _c
+    return dict(_c.Counter(items))
+
+
+def test_merchants_on_passage_are_recognised_as_transiting(classified_fleet):
+    """The commonest thing in the picture must be got right, or nothing else
+    on the list can be trusted."""
+    merch = [a for cls, a in classified_fleet
+             if cls in ("product_tanker", "bulker", "general_cargo", "Aframax",
+                        "Suezmax", "VLCC", "reefer")]
+    if len(merch) < 20:
+        pytest.skip("too few merchants to measure")
+    transiting = sum(1 for a in merch if a.activity == "transiting")
+    assert transiting / len(merch) >= 0.5, (
+        f"only {transiting}/{len(merch)} merchants read as transiting")

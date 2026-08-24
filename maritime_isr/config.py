@@ -360,6 +360,16 @@ ANOMALY_THRESHOLDS = {
     # set entirely rather than gated out (see `library.NOTABLE_ACTIVITIES`),
     # because a threshold is the wrong tool for "this behaviour is ordinary".
     "notable_activity":      0.30,
+    # --- Area 3: classification of radar data (ADR-033) ------------------
+    #
+    # Gated at 0.35, which admits a confident transfer or a sustained shadowing
+    # and holds back company and converging entirely — those two cannot reach
+    # it at any confidence (0.40 x 0.99 = 0.396 for company is above it, so
+    # company at high confidence *can* reach it; converging at 0.55 x 0.99
+    # comfortably does). The intent is that a formation alone is context and a
+    # transfer alone is a finding, and the weights in
+    # `library.NOTABLE_INTERACTIONS` carry that rather than the gate.
+    "vessel_interaction":    0.35,
     "maiden_zone_visit":    0.60,
     "lane_deviation":       0.65,
     "anchored_outside_limits": 0.60,

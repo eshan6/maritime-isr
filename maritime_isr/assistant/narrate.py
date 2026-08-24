@@ -89,10 +89,14 @@ def narrate_factor(f: Factor, *, name: str) -> str:
         length = d.get("length_m")
         size = f" about {float(length):.0f} m long" if length else ""
         where = _fmt_pos(d.get("lat"), d.get("lon"))
+        # The inferred profile, when Area 3 supplied one. "Probable fishing
+        # vessel, loitering, no transponder" is intelligence; a position is not.
+        statement = d.get("statement")
+        profile = (f" From her motion alone: {statement}" if statement else "")
         return (f"Radar is holding a contact{size}"
                 + (f" at {where}" if where else "")
                 + ", and nothing is broadcasting an AIS position there. "
-                + f"The system rates that {conf}.{again}")
+                + f"The system rates that {conf}.{profile}{again}")
 
     if f.kind == "transponder_shutdown":
         mins = _hours(d.get("dark_minutes")) or 0.0
@@ -136,6 +140,19 @@ def narrate_factor(f: Factor, *, name: str) -> str:
         zone = d.get("zone") or "an area"
         return (f"{name} entered {zone} for the first time on record, having "
                 f"worked this coast elsewhere. {conf.capitalize()}.{again}")
+
+    if f.kind == "vessel_interaction":
+        kind = str(d.get("kind") or "interaction").replace("_", " ")
+        h = _hours(d.get("hours"))
+        cross = (" This one pairs a named hull with an unidentified contact — "
+                 "the kind of event no single sensor can see."
+                 if d.get("cross_sensor") else "")
+        follower = d.get("follower")
+        lead = (f"{name} was the following vessel." if follower else "")
+        return (f"{name} was {kind} with another track"
+                + (f" for {h:.1f} hours" if h else "")
+                + f". {d.get('reason') or ''}".rstrip()
+                + f" {conf.capitalize()}.{cross} {lead}{again}".rstrip())
 
     if f.kind == "notable_activity":
         act = str(d.get("activity") or "unusual motion").replace("_", " ")
