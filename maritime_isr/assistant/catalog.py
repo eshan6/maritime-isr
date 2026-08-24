@@ -192,6 +192,15 @@ FACTOR_KINDS: dict[str, FactorSpec] = dict([
        actions=("cue_eo_camera", "call_vhf", "compare_own_history",
                 "query_zone_history", "monitor")),
 
+    _s("vessel_interaction", family="motion",
+       area="Area 3 (radar classification)",
+       weight=0.6,
+       label="Interaction with another vessel",
+       blurb="behaviour in relation to another track — a transfer, one vessel "
+             "shadowing another, or two keeping formation",
+       actions=("cue_eo_camera", "call_vhf", "compare_own_history",
+                "dispatch_patrol", "monitor")),
+
     # ---- declared identity ---------------------------------------------
     _s("identity_contradiction", family="identity",
        area="Area 2 (predictive AIS)",

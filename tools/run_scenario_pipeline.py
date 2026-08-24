@@ -557,6 +557,26 @@ def _area2_inputs():
     return identities, index
 
 
+def _area3_interactions(tracks):
+    """Vessel-to-vessel interactions over the whole picture (ADR-033).
+
+    Degrades to an empty list rather than raising: a picture too dense for the
+    pair search is a real condition and the rest of Phase 5 should still run.
+    The guard's message names the count, so the reason is not lost.
+    """
+    from maritime_isr.tracks.interactions import detect_interactions, summarise
+
+    try:
+        itx = detect_interactions(list(tracks))
+    except RuntimeError as exc:
+        print(f"  interactions   : SKIPPED — {exc}")
+        return []
+    s = summarise(itx)
+    print(f"  interactions   : {s['total']} ({s['by_kind'] or 'none'}), "
+          f"{s['cross_sensor']} cross-sensor")
+    return itx
+
+
 def run_anomalies(store: GraphStore, tracks_out: dict,
                   fusion_out: dict) -> dict:
     """Phase 5 over the combined corpus — the real anomaly library.
@@ -587,6 +607,11 @@ def run_anomalies(store: GraphStore, tracks_out: dict,
     # and inspectable rather than living for the duration of one call.
     identities, baselines = _area2_inputs()
 
+    # ---- Area 3 inputs (ADR-033) -----------------------------------------
+    # The pair search is the expensive half of interaction detection, so it is
+    # run once here and handed to the detector rather than run inside it.
+    interactions = _area3_interactions(tracks_out["tracks"])
+
     t0 = time.time()
     fired = run_anomaly_library(
         store,
@@ -597,7 +622,8 @@ def run_anomalies(store: GraphStore, tracks_out: dict,
         verdicts=fusion_out["verdicts"],
         source_ref="scenario-combined",
         identities=identities,
-        baselines=baselines)
+        baselines=baselines,
+        interactions=interactions)
     print(f"  ran in {time.time() - t0:.0f}s")
     for atype, ids in sorted(fired.items()):
         print(f"    {atype:<26}{len(ids):>6} alert(s)")

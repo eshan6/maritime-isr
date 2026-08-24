@@ -100,8 +100,19 @@ def _emit(out, store, atype, subject, ts, score, evidence, props=None):
 
 # ---------------- 1. dark vessel ----------------
 
-def detect_dark_vessels(store, verdicts: list[dict], *, source_ref: str) -> list[str]:
+def detect_dark_vessels(store, verdicts: list[dict], *, source_ref: str,
+                        profiles: dict | None = None) -> list[str]:
+    """Unmatched contacts that survived the Phase 3 cascade.
+
+    `profiles` maps a verdict's `detection_id` to a
+    `fusion.contact_profile.ContactProfile` dict — what kind of vessel the
+    motion suggests and what she appears to be doing (Area 3). It is carried on
+    the alert rather than recomputed downstream, because it is *description of
+    this finding* and belongs with it. Absent, the alert is exactly what it was
+    before: a position and a darkness verdict.
+    """
     out = []
+    profiles = profiles or {}
     for v in verdicts:
         if v["status"] != "dark_candidate":
             continue
@@ -118,9 +129,12 @@ def detect_dark_vessels(store, verdicts: list[dict], *, source_ref: str) -> list
                    source_ref=source_ref,
                    props=dict(length_m=v["length_m"],
                               hearable=v.get("hearable_conf")))]
+        prof = profiles.get(v["detection_id"]) or {}
         _emit(out, store, "dark_vessel", did, pd.Timestamp(v["ts"]).timestamp(),
               v["dark_score"], ev,
-              props=dict(lat=v["lat"], lon=v["lon"], length_m=v["length_m"]))
+              props=dict(lat=v["lat"], lon=v["lon"], length_m=v["length_m"],
+                         profile=prof or None,
+                         statement=prof.get("statement")))
     return out
 
 
@@ -515,7 +529,7 @@ def detect_port_risk(store, tracks: list, *, source_ref: str) -> list[str]:
 def run_anomaly_library(store, *, tracks, encounters, spoof_events,
                         associations, verdicts, source_ref: str,
                         identities: list[dict] | None = None,
-                        baselines=None) -> dict:
+                        baselines=None, interactions=None) -> dict:
     """Run every detector. Order matters only for #5, which correlates with the
     alerts the earlier detectors produced.
 
@@ -541,6 +555,10 @@ def run_anomaly_library(store, *, tracks, encounters, spoof_events,
         store, identities or [], source_ref=source_ref)
     fired["notable_activity"] = detect_notable_activity(
         store, tracks, source_ref=source_ref, baselines=baselines)
+    # Area 3. The pair search is the expensive part, so a caller that has
+    # already run it passes the result rather than paying twice.
+    fired["vessel_interaction"] = detect_vessel_interactions(
+        store, tracks, source_ref=source_ref, interactions=interactions)
     return fired
 
 
@@ -731,4 +749,84 @@ def detect_notable_activity(store, tracks: list, *, source_ref: str,
                              sensor=tr.source.name,
                              track_id=tr.track_id,
                              local_baseline=local))
+    return out
+
+
+# ---------------- 9. interactions between vessels (Area 3) -----------------
+
+#: Which interactions are worth an operator's attention, and what each is worth.
+#:
+#: A transfer is the reason this analysis exists. Shadowing is unusual enough to
+#: raise on its own. Company and converging are context — two vessels keeping
+#: formation is interesting beside another finding and is not, by itself, a
+#: reason to task anything, so they are carried at a weight that cannot reach
+#: the gate alone.
+NOTABLE_INTERACTIONS = {
+    "transfer_pattern": 0.80,
+    "shadowing": 0.62,
+    "converging_and_holding": 0.55,
+    "moving_in_company": 0.40,
+}
+
+
+def detect_vessel_interactions(store, tracks: list, *, source_ref: str,
+                               interactions=None) -> list[str]:
+    """Raise the interactions worth looking at, on both parties.
+
+    Area 3 of the IDEX Challenge 82 brief names interactions outright and says
+    where their value is: *"an interaction between a radar track and a silent
+    contact is exactly the event nobody else can see."* A cross-sensor
+    interaction is therefore scored up — not because the behaviour is worse,
+    but because it is a claim only a fused picture can make, and an operator
+    should know that is what they are looking at.
+
+    `interactions` may be precomputed (the pair search is the expensive part and
+    a caller that already ran it should not pay twice). Left None, it is run
+    here over `tracks`.
+
+    **Both parties get the alert.** An interaction is a fact about a pair, and a
+    watchkeeper opening either hull needs to see it — recording it against one
+    of the two would make the queue depend on which vessel they happened to
+    click.
+    """
+    from ..tracks.interactions import detect_interactions
+
+    if interactions is None:
+        interactions = detect_interactions(tracks)
+    by_id = {tr.track_id: tr for tr in tracks}
+
+    out: list[str] = []
+    for itx in interactions:
+        base = NOTABLE_INTERACTIONS.get(itx.kind)
+        if base is None:
+            continue
+        score = base * itx.confidence
+        if itx.cross_sensor:
+            # Only a fused picture can see this. Worth 15% more, capped.
+            score = min(0.99, score * 1.15)
+
+        for tid, other in ((itx.track_id_a, itx.track_id_b),
+                           (itx.track_id_b, itx.track_id_a)):
+            tr = by_id.get(tid)
+            if tr is None:
+                continue
+            vid = track_subject_id(store, tr, at=itx.t_start)
+            ev = [dict(edge="interacted-with", src=vid, dst=f"track:{other}",
+                       confidence=round(itx.confidence, 3),
+                       source="interaction_classifier", source_ref=source_ref,
+                       props=dict(kind=itx.kind, reason=itx.reason,
+                                  hours=round(itx.duration_hours, 2),
+                                  mean_separation_m=round(
+                                      itx.mean_separation_m, 1),
+                                  cross_sensor=itx.cross_sensor,
+                                  follower=itx.follower,
+                                  interaction_id=itx.interaction_id))]
+            _emit(out, store, "vessel_interaction", vid, itx.t_start, score, ev,
+                  props=dict(kind=itx.kind, counterpart_track=other,
+                             hours=round(itx.duration_hours, 2),
+                             lat=itx.lat, lon=itx.lon,
+                             cross_sensor=itx.cross_sensor,
+                             follower=itx.follower,
+                             reason=itx.reason,
+                             sensor=tr.source.name))
     return out

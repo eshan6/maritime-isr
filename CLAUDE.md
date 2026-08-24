@@ -200,11 +200,15 @@ Package root is `maritime_isr/`. Module boundaries are firm:
 ```
 ingest/    one module per source; lands raw + normalizes to canonical schema
 process/   SAR preprocessing, detection, track building, features
-           (activity classification and forward projection live in
-            `tracks/` — they read motion only, so radar and AIS get the
-            same answer without a source-specific branch; ADR-032)
+           (activity classification, forward projection, vessel-type
+            inference and vessel-to-vessel interactions live in `tracks/` —
+            they read motion only, so radar and AIS get the same answer
+            without a source-specific branch; ADR-032, ADR-033)
 fusion/    association engine + dark-vessel logic (THE fusion core — keep it source-agnostic)
            (an empty `fuse/` package also exists, unused — do not put code there)
+           `contact_profile.py` describes a contact that correlates to nothing —
+           inferred type + activity + zone (ADR-033). It PROFILES, never
+           re-decides darkness: the cascade owns that verdict.
 assistant/ the MDA assistant (ADR-031): the ranked Vessel of Interest object —
            factor catalog, decomposable score, plain-language narration,
            recommended next actions, grounded Q&A. ASSEMBLES, never detects:

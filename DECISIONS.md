@@ -2440,3 +2440,121 @@ That is the first item of Area 2's remainder.
 * `run_anomaly_library` takes `identities` and `baselines` as optional inputs,
   so a caller written against the original six detectors keeps working and the
   new ones stay quiet rather than raising.
+
+---
+
+## ADR-033 — Classification of radar data, and a vocabulary derived from the confusion matrix *(Accepted)*
+**2026-08-22. Section 3, Area 3 of the IDEX Challenge 82 brief.**
+
+**Context.** Radar gives kinematics and position and nothing else. The
+requirement asks for vessel type, activity and interactions, all from motion,
+and the brief is clear about why it matters: *"radar is their primary sensor and
+it is the only sensor that sees a vessel which does not want to be seen."*
+
+**Decision — five parts.**
+
+**(a) The output vocabulary is derived from the confusion matrix, not
+declared.** The brief's instruction is explicit — *"a small set of classes it
+can genuinely separate, with honest confidence, is worth far more than a long
+list of classes it guesses at"* — and the tempting implementation is a
+hand-written list of coarse classes. That is a claim about the world. What this
+system is entitled to make is a claim about its model, so `confusable_groups`
+reads the measured confusion matrix and merges any pair mistaken for each other
+more than 25% of the time. If a later feature genuinely separates a bulker from
+a tanker, the groups shrink on their own and nothing needs editing.
+
+Measured over 209 AIS tracks, split by hull:
+
+| | |
+|---|---|
+| fine accuracy | 65% |
+| **coarse accuracy** | **90%** |
+| cannot separate | `[Aframax, bulker, product_tanker]`, `[Suezmax, VLCC]` |
+| derived vocabulary | fishing, general_cargo, merchant, reefer |
+
+Fishing is unmistakable at 14/16 — a third of the speed and three times the turn
+rate. Reefer is 5/5. **The tanker/bulker/cargo cluster is not separable from
+motion and never will be**, because a laden bulker and a laden product tanker at
+13 knots on a great-circle course are doing the same thing. Saying so is the
+product.
+
+**(b) Split by hull, never by track.** CLAUDE.md's anti-pattern list bans
+splitting an ML dataset by chip rather than by scene. Tracks from one vessel are
+the same hazard one domain along: a hull on both sides lets the model memorise
+her rather than her class. `train()` groups on the hull key and the accuracy
+above is measured on held-out hulls.
+
+**(c) Trained on AIS, applied to radar — which is only sound because the
+features are motion and nothing else.** No feature reads an identifier, a
+message rate, or a sensor name, and `test_type_features_are_sensor_blind`
+asserts the feature vector is byte-identical for the same track presented as AIS
+and as radar. That is Area 3's requirement — *"the same behaviours should be
+recognisable whether the track came from radar or AIS. If they are not, that is
+a defect in the fusion core"* — satisfied by construction rather than by a
+compatibility shim.
+
+**(d) Interactions are a new module, and the anchorage exclusion has to happen
+before the pair search.** `detect_encounters` finds sustained proximity at low
+speed and cannot describe two ships steaming in company two miles apart.
+`tracks/interactions.py` classifies *relative* motion instead: how the
+separation behaves, whether the courses agree, whether one holds a constant
+bearing astern.
+
+Excluding anchorages at classification time is correct and far too late — every
+hull in an anchorage is near every other hull for days, so the candidate set is
+dominated by pairs that will be discarded. The pair-sample guard tripped at
+200,000 before the filter existed. Testing `at_waiting_area` per resampled point
+is the obvious fix and is also too slow (3.1 million points against 35 gazetteer
+entries). Precomputing the *cells* turns it into a set lookup — the same
+hash-join move the architecture already runs on — and the search drops to two
+seconds.
+
+**(e) The contact profile is where Area 3 pays off.** *"'Unidentified contact'
+is a position. 'Probable fishing vessel, loitering, no transponder, inside
+territorial waters' is intelligence."* Everything needed already existed and had
+never been assembled. `fusion/contact_profile.py` joins the cascade's verdict,
+the inferred type, the inferred activity and the zone layer onto one object and
+produces exactly that sentence. Measured on the eight dark contacts in the
+corpus, it produces lines like *"Likely merchant, transiting, no transponder,
+about 175 m"* — and, where it cannot, it says which part is missing and why.
+
+It **profiles, it does not detect**: darkness was decided by the cascade and is
+not revisited, and `test_the_profile_does_not_re_decide_darkness` greps for the
+cascade's own variables to keep it that way.
+
+**What the interaction detector measured, and what that means.**
+
+A sweep over the combined 1,517-track picture found another cliff rather than a
+plateau:
+
+| min_minutes | interactions | of which real |
+|---|---|---|
+| 60 | 8 | **0** — all background fleet traffic sharing a lane |
+| 120 | 0 | — |
+| 180 | 0 | — |
+
+So the gate is set at 120 minutes and the honest consequence is stated rather
+than tuned away: **this detector produces zero findings on the current corpus**,
+because the corpus contains no formation that persists past an hour. That is a
+fact about the corpus and not a capability claim; all four behaviours are driven
+end to end by fixtures.
+
+The transfer case could not be validated at all, and the reason is worth
+recording: **the scenario's transfer counterparties are dark by design.**
+`chain_a`, `chain_b`, `coast_dark_party` and `spoof_partner` have no AIS track,
+which is the point of those scenarios. Checked across all 18 x 4 track pairings,
+`vessel:spine` and `vessel:receiver_alpha` never come within 500 m in a shared
+epoch on any sensor. The transfers are therefore not observable as sustained
+close co-location in the landed data, and a detector that claimed them would be
+claiming something the corpus does not contain.
+
+**Consequences.**
+
+* The ranked list gains a `vessel_interaction` factor kind and dark-contact
+  factors gain an inferred profile in their narration — the brief's own test
+  that an area was wired in rather than built beside.
+* A caller that already ran the pair search hands the result to
+  `run_anomaly_library` rather than paying for it twice.
+* Every figure here is measured on the synthetic corpus, trained on tracks whose
+  class the generator also chose. Real performance will be lower and must be
+  re-measured on the deploy host (CLAUDE.md §4.6).

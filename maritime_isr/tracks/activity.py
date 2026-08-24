@@ -93,10 +93,23 @@ FISHING_MIN_KN, FISHING_MAX_KN = 1.5, 5.0
 TRANSIT_MIN_KN = 6.0
 
 #: Course steadiness, in degrees of absolute heading change per minute,
-#: averaged over the track. A merchant on passage holds under a degree a
-#: minute; a trawler working a ground turns an order of magnitude more.
+#: averaged over the track.
+#:
+#: **Both numbers are measured, and the second one was wrong by enough to make
+#: the fishing rule dead.** Over 209 AIS tracks whose declared class is ground
+#: truth the generator built the track from:
+#:
+#:     merchant turn rate   p50 1.23   p90 2.12
+#:     fishing  turn rate   p10 2.54   p50 3.23   p90 3.53
+#:
+#: `TURNY_MIN_DEG_MIN` was 4.0 — *above the fishing p90*. No trawler in the
+#: corpus could reach it, and the measured consequence was 0 of 45 fishing
+#: vessels classified as fishing. 2.3 sits in the gap between the merchant p90
+#: and the fishing p10, which is where a threshold belongs: chosen from the
+#: separation between two populations rather than from an intuition about what
+#: "turny" means.
 STEADY_MAX_DEG_MIN = 1.5
-TURNY_MIN_DEG_MIN = 4.0
+TURNY_MIN_DEG_MIN = 2.3
 
 #: A vessel at anchor swings on her cable. The radius is set by the scope of
 #: chain out plus the ship's length, and 800 m covers a large hull in deep
@@ -116,34 +129,45 @@ SURVEY_MIN_LEGS = 4
 SURVEY_RECIPROCAL_TOL_DEG = 35.0
 SURVEY_MIN_LEG_MINUTES = 12.0
 
-#: What fraction of a track's course changes must be near-reciprocal before it
-#: is a pattern rather than a voyage that happens to double back.
+#: What fraction of a track's *alterations* are near-reciprocal.
 #:
-#: **Measured**: without this the rule called 151 of 209 tracks a survey. A
-#: coastal rotation between two ports supplies reciprocal turns at each end and
-#: long legs in between, which satisfies "four legs and three reciprocals" on
-#: any multi-week track. A vessel genuinely running a lawnmower spends most of
-#: her course changes on the turn at the end of a leg.
-#: Measured against *alterations*, not against every fix-to-fix step. A 150-fix
-#: lawnmower contains 5 turns and 144 steps of holding course; dividing by the
-#: latter gave a reciprocal fraction of 0.03 and the rule could not fire at all.
+#: Measured against alterations rather than against every fix-to-fix step: a
+#: 150-fix lawnmower contains 5 turns and 144 steps of holding course, and
+#: dividing by the latter gave a reciprocal fraction of 0.03 — the rule could
+#: not fire at all.
+#:
+#: Measured over the corpus by declared class: a working trawler's alterations
+#: are 10% reciprocal (p50 0.100, p90 0.139), because she turns every which way
+#: over a ground; a merchant's are 39%, because a rotation goes out and comes
+#: back. This gate alone does not separate a survey from a merchant — both sit
+#: near 0.5 — which is why `SURVEY_MIN_LEGS_PER_HOUR` exists.
 SURVEY_MIN_RECIPROCAL_FRACTION = 0.5
 
 #: And a survey goes nowhere: net displacement is small against distance run.
 #: A passage that doubles back once is still a passage.
 SURVEY_MAX_STRAIGHTNESS = 0.35
 
-#: How often a survey turns. **This is what separates a lawnmower from a
-#: career**, and it is the gate the first two attempts were missing.
+#: How often the vessel turns. **This is the gate that actually separates a
+#: lawnmower from a voyage, and it was set from a hand-built fixture rather
+#: than from the fleet — so it did not.**
 #:
-#: A there-and-back coastal rotation over eight weeks accumulates long legs,
-#: near-reciprocal turns and a straightness near zero — every survey signature —
-#: because it ends up where it started. What it does *not* do is turn often: it
-#: runs a leg every few days. A vessel actually working a pattern turns every
-#: half hour to an hour. Measured on the corpus, the two are more than an order
-#: of magnitude apart (0.24 legs/hour for a lawnmower against 0.016 for a
-#: rotation), so 0.1 sits in open space between them rather than on either.
-SURVEY_MIN_LEGS_PER_HOUR = 0.1
+#: Measured over 209 AIS tracks against the declared class the generator built
+#: each track from:
+#:
+#:     merchant legs/hour   p50 0.223   p90 0.281
+#:     fishing  legs/hour   p10 1.060   p50 1.263
+#:
+#: At 0.1 every merchant in the picture cleared it, and the measured consequence
+#: was that all three `survey_pattern` claims on the corpus were merchants on
+#: multi-port rotations — a product tanker at 0.216 legs/hour, a bulker at
+#: 0.258, a general cargo at 0.174 — none of them surveying anything. Every one
+#: also had a reciprocal fraction just over the 0.5 bar, so that gate did not
+#: catch them either.
+#:
+#: 0.5 is the geometric midpoint of the gap between the two measured
+#: populations. It excludes all three false claims with margin and leaves room
+#: for a genuine survey, which turns far more often than a rotation does.
+SURVEY_MIN_LEGS_PER_HOUR = 0.5
 
 #: A course change this large is an alteration rather than steering noise.
 #: Shared with `_count_legs`, which uses it to end a leg — the two must agree
@@ -366,8 +390,12 @@ def classify_activity(track, *, i0: int = 0, i1: Optional[int] = None
     # 3. Fishing — trawling speed with repeated heading reversals. The speed
     #    band alone is not enough: a vessel manoeuvring in a channel is also
     #    slow, and a drifting one is slower still.
+    # Straightness < 0.6: measured fishing p90 is 0.544, so the old 0.5 cut off
+    # the top decile of genuine trawlers for no gain — merchants sit at p50 0.61
+    # with a p10 of 0.002, so the two populations are separated by turn rate and
+    # speed here, not by straightness, and this gate only has to not exclude.
     if (FISHING_MIN_KN <= sog <= FISHING_MAX_KN
-            and turn >= TURNY_MIN_DEG_MIN and straight < 0.5):
+            and turn >= TURNY_MIN_DEG_MIN and straight < 0.6):
         return out("fishing", base * 0.75,
                    f"Working at {sog:.1f} kn — trawling speed — turning "
                    f"{turn:.1f}°/min with a straightness of {straight:.2f}. "
