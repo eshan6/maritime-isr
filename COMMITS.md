@@ -1171,3 +1171,54 @@ python -m pytest tests/test_voyage.py -q
 and `voyage_contradiction 2 alert(s)`.
 *Failure:* a voyage count in the dozens means a gate regressed — read
 `MIN_SHORTFALL_H` and `UNDERWAY_MIN_KN` before touching anything else.
+
+---
+
+## Area 4 — pre-arrival notifications, and nine defects that presented as silence
+
+**What this unit is.** The IDEX Challenge 82 brief's Area 4: arrival
+notifications reach the Coast Guard as PDF, Word and spreadsheet attachments by
+email, carrying vital information that cannot be stored or fused because of its
+format. This lands them — five formats into one record shape, every value
+carrying the passage it was read from and a locator an analyst can point at —
+and then compares what the paperwork declares against what the track shows.
+
+**New modules**
+
+* `maritime_isr/ingest/pans/` — the connector. `readers.py` (one reader per
+  format, all emitting the same `Label: value` passages, each with an earned
+  confidence), `extract.py` (format-blind; synonym table, OCR confusion fold,
+  day-first date parsing), `resolve.py` (IMO → call sign → normalised name, no
+  fuzzy matching), `land.py`.
+* `maritime_isr/anomaly/paperwork.py` — three three-valued checks: declared last
+  port, declared arrival window, declared ballast against a laden draught.
+* `maritime_isr/scenario/pans.py` + `scenarios/group_p.py` — the document
+  generator and scenarios P1-P8.
+* `tests/test_pans.py` — 27 tests.
+
+**Three new detectors**, `paperwork_contradiction`, `notification_unmatched` and
+`arrival_without_notification`, with factor kinds, narration and gates.
+
+**The nine defects are the point of this entry.** The unit suite was green and
+the extraction stage reported 3,107 fields from 292 documents. The alert counts
+were what exposed the area: 24 unmatched against 1 authored, 10 unnotified
+arrivals against 1, 8 paperwork contradictions against 2. Full account in
+ADR-036. No threshold was moved to fix any of them — every fix is to a join, a
+corpus inconsistency, or a value read from the wrong place.
+
+Verify:
+
+```
+python -m maritime_isr.cli scenario generate --seed 7
+rm -f data/graph.sqlite && python tools/run_scenario_pipeline.py
+python -m pytest tests/test_pans.py -q
+```
+
+*Success:* the stage prints `5/5 available` readers and ~295 documents with
+0 unreadable, and the tallies read `paperwork_contradiction 3`,
+`notification_unmatched 2-3`, `arrival_without_notification 1`.
+*Failure:* a paperwork count in the dozens means a rule is joining a
+declaration to the wrong event again — read `match_arrival` and the
+`prior_calls` branch of `check_last_port` before touching any threshold. A
+count of 0 is worse: it means a check is returning "not checkable" for the whole
+corpus, which is what the filing-time defect looked like.

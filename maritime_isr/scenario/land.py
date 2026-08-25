@@ -57,6 +57,11 @@ T_ORGS = "scenario_organizations"
 #: `ingest.aisstream` writes from the live feed, so the declaration travels the
 #: identical code path real data will (ADR-019, ADR-035).
 T_VOYAGE = "ais_voyage"
+#: Arrival notifications as extracted from the inbox (ADR-036). Listed in
+#: ALL_TABLES so `scenario clear` removes them; the *documents* under
+#: `pans_inbox/` are cleared separately by `run.clear`, because a stale PDF on
+#: disk would be re-extracted into a corpus that no longer contains its vessel.
+T_NOTIFICATION = "arrival_notification"
 T_OWNERSHIP = "scenario_ownership"
 
 EVENT_TABLES = {
@@ -71,7 +76,7 @@ EVENT_TABLES = {
 #: table would leave orphan synthetic rows behind and quietly poison the next
 #: real-vs-synthetic split.
 ALL_TABLES = (T_IDENTITY, *EVENT_TABLES.values(), T_POSITIONS, T_DETECTIONS,
-              T_SANCTIONS, T_ORGS, T_OWNERSHIP, MATCH_TABLE, T_RADAR, T_VOYAGE,
+              T_SANCTIONS, T_ORGS, T_OWNERSHIP, MATCH_TABLE, T_RADAR, T_VOYAGE, T_NOTIFICATION,
               # Derived radar products. Listed so `scenario clear`
               # removes them too — a clear that silently missed a
               # table would leave orphan synthetic rows behind.

@@ -38,10 +38,28 @@ dependencies = [
 
 [project.optional-dependencies]
 sar = ["pyroSAR>=0.25", "rasterio>=1.3"]
+# Area 4 — arrival notifications (ADR-036). Reading and writing the formats the
+# requirement names: PDF, Word and spreadsheet.
+#
+# **Optional, and the extractor degrades per format rather than per install.**
+# A laptop without `python-docx` still reads the spreadsheets and the PDFs, and
+# says which formats it could not open instead of failing to import. The
+# requirement's own framing is that the input is whatever arrives by email; a
+# connector that refuses to start because one reader is missing is worse than
+# one that reads three formats and reports the fourth as unread.
+#
+# OCR is separately optional and separately reported: `pytesseract` is a wrapper
+# around a *binary* that pip cannot install, so it is the one dependency here
+# that can be present and still not work. See `ingest.pans.readers`.
+pans = ["python-docx>=1.1", "openpyxl>=3.1", "reportlab>=4.0", "pypdf>=4.0",
+        "pillow>=10.0"]
+ocr = ["pytesseract>=0.3"]
 # Phase 6 serving layer (maritime_isr/api). Kept optional so the ingest/CLI path
 # has no web dependency; install with `pip install -e ".[api]"` to run the API.
 api = ["fastapi>=0.110", "uvicorn>=0.29"]
-dev = ["pytest>=8.0", "ruff>=0.4", "fastapi>=0.110", "uvicorn>=0.29", "httpx>=0.27"]
+dev = ["pytest>=8.0", "ruff>=0.4", "fastapi>=0.110", "uvicorn>=0.29", "httpx>=0.27",
+       "python-docx>=1.1", "openpyxl>=3.1", "reportlab>=4.0", "pypdf>=4.0",
+       "pillow>=10.0", "pytesseract>=0.3"]
 
 [project.scripts]
 maritime-isr = "maritime_isr.cli:main"

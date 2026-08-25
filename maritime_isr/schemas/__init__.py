@@ -280,8 +280,10 @@ from .keys import (IDENTITY_KINDS, identity_node_id, native_vessel_id,
 from .provenance import ENVELOPE_COLUMNS, Provenance, git_sha, utcnow
 from .records import (
     SCHEMA_VERSION,
+    ArrivalNotification,
     Detection,
     DetectionMethod,
+    ExtractedField,
     PositionReport,
     RadarTrackReport,
     SceneCatalogEntry,

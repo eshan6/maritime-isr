@@ -131,6 +131,127 @@ class VoyageDeclaration(BaseModel):
         return v
 
 
+class ExtractedField(BaseModel):
+    """One value pulled out of a document, with the passage it came from.
+
+    **The brief's requirement, in its own words: "An extracted field that cannot
+    be traced back to its source text is not usable as evidence."** So a value
+    never travels alone here. It carries the raw text it was read from, where in
+    the document that text sat, how it was read, and how confident the reader is
+    — and a watchkeeper can be shown the line rather than asked to trust a cell
+    in a table.
+
+    That discipline is the same one the provenance envelope applies to a whole
+    row (CLAUDE.md §4.1), pushed down to the field. It has to be per-field
+    because the confidence genuinely differs per field within one document: a
+    vessel name OCR'd off a fax at 0.6 and an IMO number read from a spreadsheet
+    cell at 1.0 are not equally believable, and a document-level confidence
+    would flatten both into a number that describes neither.
+    """
+
+    value: Optional[str] = Field(default=None, description="the parsed value")
+    raw: Optional[str] = Field(
+        default=None, description="the source text exactly as it was read")
+    passage: Optional[str] = Field(
+        default=None,
+        description="the surrounding line or cell, for showing an operator")
+    locator: Optional[str] = Field(
+        default=None,
+        description="where in the document: 'page 1', 'Sheet1!B7', 'table 2 "
+                    "row 3'. Not an offset — an operator has to be able to find "
+                    "it by eye")
+    method: Optional[str] = Field(
+        default=None, description="how it was read: label_scan, table_cell, "
+                                  "ocr_label_scan, electronic_field")
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+
+    @property
+    def known(self) -> bool:
+        return self.value not in (None, "")
+
+
+class ArrivalNotification(BaseModel):
+    """A Pre-Arrival Notification of Ships, whatever format it arrived in.
+
+    *"Pre-Arrival Notification of Ships data reaches the Coast Guard as PDF,
+    Word and spreadsheet attachments by email. It contains vital information but
+    cannot be stored in a structured database or fused with AIS because of its
+    format."* — the IDEX Challenge 82 brief, Area 4.
+
+    **One record shape for every format, including the electronic one.** The
+    requirement asks explicitly that the system stay compatible with the
+    electronic feed the national logistics portal is expected to publish, and
+    the way to honour that is for the electronic feed to be *another reader
+    producing this same record* — not a second pipeline. A structured feed
+    arrives with confidence 1.0 and `method="electronic_field"`; a scan arrives
+    at whatever OCR earned. Everything downstream reads one shape and can tell
+    the difference by looking at the field, which is where the difference
+    actually lives.
+
+    `vessel_id` is filled in by resolution and is **deliberately nullable**. A
+    notification that resolves to nothing is not a failed parse — the brief is
+    explicit that it is a finding, and a schema that required a vessel id would
+    force the connector to either invent one or drop the row.
+    """
+
+    notification_id: str = Field(..., description="deterministic: source|doc")
+    document_name: str
+    document_format: str = Field(
+        ..., description="pdf | pdf_scan | docx | xlsx | electronic")
+
+    # ---- what the paperwork declares. Every one carries its own passage. ----
+    vessel_name: ExtractedField = Field(default_factory=ExtractedField)
+    imo: ExtractedField = Field(default_factory=ExtractedField)
+    call_sign: ExtractedField = Field(default_factory=ExtractedField)
+    flag: ExtractedField = Field(default_factory=ExtractedField)
+    last_port: ExtractedField = Field(default_factory=ExtractedField)
+    arrival_port: ExtractedField = Field(default_factory=ExtractedField)
+    eta: ExtractedField = Field(default_factory=ExtractedField)
+    cargo: ExtractedField = Field(default_factory=ExtractedField)
+    crew_count: ExtractedField = Field(default_factory=ExtractedField)
+    owner: ExtractedField = Field(default_factory=ExtractedField)
+    agent: ExtractedField = Field(default_factory=ExtractedField)
+    #: The date the form itself carries. Read like every other field, and for a
+    #: reason: it is the instant every paperwork rule measures against, and the
+    #: alternative — the attachment's modification time — is when somebody
+    #: scanned it. See `ingest.pans.land._received_at`.
+    filed_at: ExtractedField = Field(default_factory=ExtractedField)
+
+    #: Filled by resolution. None means the notification matched no hull we
+    #: hold, which is a finding rather than an error.
+    vessel_id: Optional[str] = Field(default=None)
+    resolved_by: Optional[str] = Field(
+        default=None, description="which identifier resolved her: imo, "
+                                  "call_sign, name, or None")
+    resolution_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+
+    received_at: datetime
+    #: `declared` when `received_at` came off the form, `file_mtime` when the
+    #: form carried no date and the filesystem was all we had. Carried on the
+    #: row rather than inferred, because a rule that quotes a filing time has to
+    #: be able to say whether anybody actually filed at that time.
+    received_at_source: str = Field(
+        default="declared", description="declared | file_mtime")
+    prov: Provenance
+
+    @field_validator("received_at")
+    @classmethod
+    def _utc(cls, v: datetime) -> datetime:
+        if v.tzinfo is None:
+            raise ValueError("received_at must be tz-aware UTC")
+        return v.astimezone(timezone.utc)
+
+    def fields(self) -> dict:
+        """The declared fields, by name. Order is the order a form asks them."""
+        return {k: getattr(self, k) for k in (
+            "vessel_name", "imo", "call_sign", "flag", "last_port",
+            "arrival_port", "eta", "cargo", "crew_count", "owner", "agent")}
+
+    @property
+    def read_fields(self) -> int:
+        return sum(1 for f in self.fields().values() if f.known)
+
+
 class RadarTrackReport(BaseModel):
     """One track report from one coastal surveillance radar station.
 

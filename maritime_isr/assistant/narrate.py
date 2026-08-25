@@ -187,6 +187,43 @@ def narrate_factor(f: Factor, *, name: str) -> str:
         return (lead + " " + " ".join(str(x) for x in statements[:2])
                 + f" {conf.capitalize()}.")
 
+    if f.kind == "paperwork_contradiction":
+        statements = d.get("statements") or []
+        doc = d.get("document")
+        fmt = str(d.get("document_format") or "").replace("_", " ")
+        where = (d.get("locators") or [None])[0]
+        # **The passage, not the field name.** The brief's bar for Area 4 is
+        # that an extracted value is only evidence if it can be traced back to
+        # its source text, and a sentence read aloud on a radio is exactly where
+        # that has to hold: "the form says" is worth nothing without the line.
+        quoted = (d.get("passages") or [None])[0]
+        source = ""
+        if doc:
+            source = (f" Read from {doc}"
+                      + (f" ({fmt})" if fmt else "")
+                      + (f", {where}" if where else "") + ".")
+        shown = f' The form reads: "{quoted}".' if quoted else ""
+        return (f"{name}'s arrival notification says something her own track "
+                f"disproves. " + " ".join(str(x) for x in statements[:2])
+                + f" {conf.capitalize()}.{source}{shown}")
+
+    if f.kind == "notification_unmatched":
+        declared = d.get("declared_name") or "an unnamed vessel"
+        imo = d.get("imo") or d.get("declared_imo")
+        port = d.get("arrival_port")
+        return (f"An arrival notification was filed for {declared}"
+                + (f", IMO {imo}" if imo else "")
+                + (f", inbound to {port}" if port else "")
+                + ", and no hull this system holds matches it. "
+                + f"{d.get('reason') or ''}".rstrip()
+                + f" {conf.capitalize()}.")
+
+    if f.kind == "arrival_without_notification":
+        port = d.get("port") or "a port"
+        return (f"{name} arrived and berthed at {port}, and no arrival "
+                f"notification was ever received for her. {conf.capitalize()}."
+                f"{again}")
+
     if f.kind == "assessed_ais_disabling":
         n_gaps = int(d.get("n_gaps") or 1)
         return (f"Global Fishing Watch assessed "

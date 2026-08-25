@@ -46,6 +46,8 @@ FAMILY_GRAPH = "graph_ownership"
 FAMILY_BEHAVIOURAL = "behavioural_geographic"
 FAMILY_DECOY = "decoy"
 FAMILY_BOUNDARY = "capability_boundary"
+#: Area 4 (ADR-036): what the paperwork declares against what the track shows.
+FAMILY_PAPERWORK = "paperwork"
 
 
 @dataclass

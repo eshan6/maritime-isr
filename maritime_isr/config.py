@@ -354,6 +354,31 @@ ANOMALY_THRESHOLDS = {
     # nobody can name are about equally worth a watchkeeper's minute.
     "voyage_contradiction": 0.50,
     #
+    # --- Area 4: arrival notifications (ADR-036) -------------------------
+    #
+    # `paperwork_contradiction` at 0.50, the same bar as a dark contact. A form
+    # that says something the vessel's own track disproves is a strong finding
+    # and a rare one: the corpus files 200-odd honest notifications for every
+    # pair that lie, so the gate is not what keeps this queue short — the fact
+    # that most agents tell the truth is.
+    "paperwork_contradiction": 0.50,
+    #
+    # The two gap detectors are gated at what their evidence is worth, which is
+    # **less than a contradiction and more than nothing**. Neither says a vessel
+    # did anything; both say a record that should exist does not.
+    #
+    # `notification_unmatched` at 0.55 fires on a well-formed form naming a hull
+    # we cannot find. That is genuinely interesting — it is how a ship arrives
+    # under a name nobody holds — but it is also what a typo produces, and the
+    # corpus contains a decoy that is exactly that (P6).
+    "notification_unmatched": 0.55,
+    #
+    # `arrival_without_notification` at 0.50 is the lowest of the three because
+    # its false-positive mode is the commonest: our identity coverage is partial,
+    # and a hull we could not name would look unnotified every time. It fires
+    # only on arrivals we can attribute.
+    "arrival_without_notification": 0.50,
+    #
     # `notable_activity` is gated on the range its score can actually reach,
     # which is **not** the range the other gates live in.
     #

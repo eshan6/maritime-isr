@@ -13,7 +13,7 @@ choreography, then decoys and misses.
 from __future__ import annotations
 
 from . import background, commercial_traffic, decoys, group_a, group_b
-from . import group_c, group_d, group_e, group_f, group_r, group_z
+from . import group_c, group_d, group_e, group_f, group_p, group_r, group_z
 from . import misses
 
 #: Execution order. Background first, then the spine's early identity events,
@@ -40,6 +40,12 @@ ALL = (
     *group_f.SCENARIOS,
     *decoys.SCENARIOS,
     *misses.SCENARIOS,
+    # The paperwork group runs LAST and that is load-bearing, not stylistic:
+    # it builds one notification per port call and therefore needs every port
+    # call the corpus will ever contain to exist already. Running it earlier
+    # would file for the arrivals authored before it and silently miss the
+    # rest, which reads as a corpus full of unnotified arrivals (ADR-036).
+    *group_p.SCENARIOS,
 )
 
 

@@ -101,6 +101,23 @@ def generate(seed: int = 7, *, land: bool = True, radar: bool = True,
                          raise_on_collision=True)
 
     built = world.counts()
+
+    # ---- arrival notifications, written as documents (ADR-036) ----------
+    #
+    # **Written to disk as PDF, Word, spreadsheet and JSON, not landed as
+    # rows.** They are *inputs*: the same standing an unread email attachment
+    # has. The extractor reads the files, exactly as it would read a real
+    # inbox, and lands what it managed to get out of them. Landing the specs
+    # directly would produce a corpus in which extraction always succeeds
+    # perfectly, which is the one thing Area 4 must not assume.
+    if land and getattr(world, "pans_specs", None):
+        from .pans import PANS_DIRNAME, write_notifications
+        inbox = DATA_ROOT / PANS_DIRNAME
+        built["pans_documents"] = sum(
+            v for v in write_notifications(
+                world.pans_specs, inbox, seed=seed).values()
+            if isinstance(v, int))
+
     landed = land_world(world) if land else {}
     validation = validate_world(world)
     return GenerationResult(world, built, landed, validation, ran)
@@ -127,7 +144,25 @@ def clear() -> dict:
     deleted, so a partition that holds both kinds keeps the real ones. The truth
     table is scenario-only and is removed entirely.
     """
+    # The inbox first. A generated document left on disk would be re-extracted
+    # by the next run into a corpus that no longer holds the vessel it names —
+    # which would land as an unmatched-notification finding and be indisputably
+    # our own fault.
+    from .pans import PANS_DIRNAME
+    inbox = DATA_ROOT / PANS_DIRNAME
+    if inbox.exists():
+        n_docs = sum(1 for p in inbox.iterdir() if p.is_file())
+        shutil.rmtree(inbox, ignore_errors=True)
+        if n_docs:
+            removed_docs = n_docs
+        else:
+            removed_docs = 0
+    else:
+        removed_docs = 0
+
     removed: dict[str, int] = {}
+    if removed_docs:
+        removed["pans_inbox (documents)"] = removed_docs
     for table in ALL_TABLES:
         n = 0
         for path in table_day_partitions(table):

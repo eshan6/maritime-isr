@@ -200,6 +200,12 @@ Package root is `maritime_isr/`. Module boundaries are firm:
 
 ```
 ingest/    one module per source; lands raw + normalizes to canonical schema
+           `pans/` is the arrival-notification connector (ADR-036): readers
+           (one per format, all producing the same `Label: value` passages),
+           a format-blind extractor, and a resolver that refuses rather than
+           guesses. The electronic portal feed is **another reader**, never a
+           second pipeline — that is what makes "it drops in without rework"
+           checkable instead of asserted.
 process/   SAR preprocessing, detection, track building, features
            (activity classification, forward projection, vessel-type
             inference and vessel-to-vessel interactions live in `tracks/` —
@@ -211,11 +217,14 @@ fusion/    association engine + dark-vessel logic (THE fusion core — keep it s
            inferred type + activity + zone (ADR-033). It PROFILES, never
            re-decides darkness: the cascade owns that verdict.
 anomaly/   the detector library, plus the pure rule modules it calls:
-           `identity.py` (is her declared identity self-consistent) and
+           `identity.py` (is her declared identity self-consistent),
            `voyage.py` (does her declared destination and ETA match her track,
-            ADR-035). Both are pure functions with three-valued outcomes —
-            contradiction / ok / **not checkable** — and "we could not check"
-            is an answer, never folded into "fine".
+            ADR-035) and `paperwork.py` (does her arrival notification match
+            her track — declared last port, arrival window, declared ballast
+            against a laden draught; ADR-036). All three are pure functions
+            with three-valued outcomes — contradiction / ok / **not
+            checkable** — and "we could not check" is an answer, never folded
+            into "fine".
 coastline.py  distance from land, from the shared 1 km mask (ADR-035). NOT
            bathymetry: operating depth is absent and must not be approximated.
 assistant/ the MDA assistant (ADR-031): the ranked Vessel of Interest object —

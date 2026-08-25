@@ -25,6 +25,7 @@ fleet to protect a headline count would have quietly destroyed the decoy.
 """
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -400,6 +401,50 @@ FACTOR_PRINCIPALS: tuple[CastEntry, ...] = (
               "orders change, and that is not a lie", size=0.4),
 )
 
+#: The arrival-notification principals (ADR-036). Appended last, for the fourth
+#: time and the same reason: a new group must not renumber an existing serial.
+PAPERWORK_PRINCIPALS: tuple[CastEntry, ...] = (
+    CastEntry("paper_false_origin", "bulker", "true_anomaly",
+              "P1: declares a last port her own track puts her 900 km from",
+              size=0.6),
+    CastEntry("paper_impossible_window", "product_tanker", "true_anomaly",
+              "P2: declares an arrival forty hours before she could be there",
+              size=0.45),
+    CastEntry("paper_no_filing", "general_cargo", "true_anomaly",
+              "P3: arrives and berths with no notification ever filed",
+              size=0.5),
+    CastEntry("paper_honest_slip", "general_cargo", "decoy",
+              "P5: an estimate that missed by six hours, which is what an "
+              "estimate is", size=0.4),
+    CastEntry("paper_typo_name", "bulker", "decoy",
+              "P6: the agent transposed two letters and left the IMO blank",
+              size=0.55),
+    CastEntry("paper_poor_scan", "product_tanker", "decoy",
+              "P7: a fax whose OCR reads at reduced confidence", size=0.5),
+)
+
+#: Hulls added after the corpus had already been measured.
+#:
+#: **These are minted from a *derived* RNG, not from `world.rng`.** Appending to
+#: a cast tuple keeps every serial where it was — that is why the tuples above
+#: are ordered the way they are — but it still consumes draws from the shared
+#: stream, and every scenario drawing after `build_vessels` then gets different
+#: numbers. Adding this one Suezmax that way moved the vessel-type model's
+#: coarse accuracy from above its 75% floor to 65%: not because the hull taught
+#: the model anything, but because the entire background fleet was re-rolled
+#: behind it. A derived stream costs nothing and makes a cast addition
+#: genuinely additive, which is what the ordering comments above were already
+#: reaching for.
+LATE_ADDITIONS: tuple[CastEntry, ...] = (
+    # A Suezmax so that her broadcast draught is unambiguously laden. On a
+    # product tanker the ballast and laden draughts straddle the threshold, and
+    # a scenario that only fires because a hull sits near the line tests the
+    # line rather than the rule.
+    CastEntry("paper_false_ballast", "Suezmax", "true_anomaly",
+              "P8: declares no cargo while broadcasting a laden draught",
+              size=0.75),
+)
+
 #: The fishing-fleet-aggregation decoy. Sized to the phenomenon, not to the
 #: headline cast count — see the module docstring.
 FISHING_FLEET_SIZE = 40
@@ -454,10 +499,26 @@ def build_vessels(world: ScenarioWorld) -> None:
     # the corpus exactly where it was. See RADAR_PRINCIPALS.
     # ...and the zone cast after even that, for the same reason again.
     # ...and the factor cast after even that, for the same reason a third time.
-    for entry in (*RADAR_PRINCIPALS, *ZONE_PRINCIPALS, *FACTOR_PRINCIPALS):
+    for entry in (*RADAR_PRINCIPALS, *ZONE_PRINCIPALS, *FACTOR_PRINCIPALS,
+                  *PAPERWORK_PRINCIPALS):
         serial = world.take_serial()
         v = make_vessel(
             world.rng, world.profile, entry.vessel_class,
+            serial=serial, entity_id=entity_id(entry.key),
+            flag=entry.flag, used_names=used_names, role=entry.role,
+            ais_expected=entry.ais_expected, notes=entry.notes,
+            size=entry.size,
+        )
+        world.add_vessel(v)
+
+    # Late additions, from their own stream — see LATE_ADDITIONS. Serials still
+    # come from the shared counter, because a duplicate serial would be a real
+    # collision; only the *random* draws are isolated.
+    late_rng = random.Random(world.seed ^ 0x1A7E)
+    for entry in LATE_ADDITIONS:
+        serial = world.take_serial()
+        v = make_vessel(
+            late_rng, world.profile, entry.vessel_class,
             serial=serial, entity_id=entity_id(entry.key),
             flag=entry.flag, used_names=used_names, role=entry.role,
             ais_expected=entry.ais_expected, notes=entry.notes,
