@@ -31,7 +31,7 @@ from datetime import timedelta
 from .identifiers import mint_sanctions_ref
 from .primitives.org import Organization
 from . import commercial
-from .primitives.vessel import make_vessel, vessel_name
+from .primitives.vessel import make_vessel
 from .world import T0, ScenarioWorld, week
 
 # --------------------------------------------------------------------------
@@ -388,6 +388,16 @@ FACTOR_PRINCIPALS: tuple[CastEntry, ...] = (
               "course, wandering gap. Traffic, not a formation", size=0.6),
     CastEntry("lane_mate_b", "general_cargo", "decoy",
               "F12: the other half of that ordinary lane traffic", size=0.4),
+
+    # ---- the voyage she declares, against the voyage she makes (ADR-035)
+    CastEntry("false_destination", "product_tanker", "true_anomaly",
+              "F13: declares Kandla and steams the other way for two days",
+              size=0.45),
+    CastEntry("impossible_eta", "bulker", "true_anomaly",
+              "F14: declares an arrival no hull could make", size=0.55),
+    CastEntry("diverted_honestly", "general_cargo", "decoy",
+              "F15: declares Mangalore, is diverted to Mormugao mid-passage — "
+              "orders change, and that is not a lie", size=0.4),
 )
 
 #: The fishing-fleet-aggregation decoy. Sized to the phenomenon, not to the

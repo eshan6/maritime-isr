@@ -23,7 +23,7 @@ tell apart would make the whole corpus separable on population membership.
 from __future__ import annotations
 
 from ..geography import NW_ENTRY, PORTS
-from ..primitives.port_call import build_port_call, transit_between
+from ..primitives.port_call import build_port_call
 from ..primitives.track import Leg, VoyagePlan, generate_track
 from ..world import ScenarioWorld, week
 from .common import V, add_loiter, add_port_visit, emit, hours
@@ -44,6 +44,11 @@ ROUTES: dict[str, tuple] = {
 
 #: Coastal fishing, which is what most AIS-visible small craft in this AOI are.
 FISHERS = ("bg_11", "bg_12")
+
+#: Shortest berth worth generating. Below this a call is not a call, and the
+#: right move is to drop it and say so rather than to emit a two-hour berth
+#: nobody would believe.
+MIN_BERTH_HOURS = 4.0
 
 
 def background_traffic(world: ScenarioWorld) -> None:
@@ -71,6 +76,33 @@ def background_traffic(world: ScenarioWorld) -> None:
             pts, spec = build_port_call(
                 v, port, arrive_from=pos, t_start=t, rng=r,
                 anchorage_hours=wait, berth_hours=dwell)
+
+            # **And bound it by the passage as well, which the budget above
+            # does not see.** `remaining_h` is measured from the moment she
+            # *sails*, and the call does not begin until she arrives — bg_8
+            # leaves Kochi for Mumbai, which is two and a half days of steaming
+            # the arithmetic never subtracted. At seed 9 that put her departure
+            # 11.3 hours past the end of the corpus window and the generator
+            # refused the whole run. Seeds 7 and 8 fitted by luck.
+            #
+            # The passage length cannot be known before the call is built —
+            # `_route_legs_around_land` may lengthen it around a headland — so
+            # it is measured afterwards and the berth is shortened to fit. A
+            # shorter call is still a call; a call that ends after the window
+            # is a corpus that only generates at some seeds.
+            overrun_h = (pts[-1].t - (world.t1 - hours(2))).total_seconds() / 3600.0
+            if overrun_h > 0.0:
+                dwell -= overrun_h
+                if dwell < MIN_BERTH_HOURS:
+                    world.clipped.append(
+                        f"BG {key}: call at {port} dropped — the passage there "
+                        f"leaves {dwell + overrun_h:.0f} h of window, under the "
+                        f"{MIN_BERTH_HOURS:.0f} h a berth needs")
+                    break
+                pts, spec = build_port_call(
+                    v, port, arrive_from=pos, t_start=t, rng=r,
+                    anchorage_hours=wait, berth_hours=dwell)
+
             emit(world, key, pts)
             add_port_visit(world, "BG", key, spec)
             pos = (pts[-1].lat, pts[-1].lon)

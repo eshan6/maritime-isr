@@ -213,6 +213,24 @@ FACTOR_KINDS: dict[str, FactorSpec] = dict([
        actions=("check_registry", "call_vhf", "compare_own_history",
                 "escalate"),
        repeats=REPEAT_RESTATEMENT),
+    # **`identity`, not `paperwork`, and the distinction is load-bearing.** The
+    # `paperwork` family is Area 4 — arrival notifications, a document a port
+    # receives — and it is declared empty so `family_coverage` can state the
+    # hole. Filing a voyage declaration there would report that family as
+    # covered while Area 4 remains unbuilt, which is exactly the overstatement
+    # the empty families exist to prevent. A destination broadcast on AIS is
+    # something the vessel says about herself, on the air, in the same message
+    # stream as her name and her call sign.
+    _s("voyage_contradiction", family="identity",
+       area="Area 2 (predictive AIS)",
+       weight=0.70,
+       label="Declared voyage contradicts her own track",
+       blurb="what she broadcast about this voyage does not match what she "
+             "did — an arrival time no hull could make from where she was, or "
+             "a destination she never once steered towards",
+       actions=("call_vhf", "check_arrival_notification",
+                "compare_own_history", "escalate"),
+       repeats=REPEAT_RESTATEMENT),
     _s("ais_spoofing", family="identity", area="roadmap 2.2 / 5.2",
        weight=0.85,
        label="Identity contradiction on the air",

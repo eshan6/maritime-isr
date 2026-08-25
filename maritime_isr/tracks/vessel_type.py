@@ -70,6 +70,7 @@ from typing import Iterable, Optional, Sequence
 import numpy as np
 
 from ..config import PIPELINE_VERSION
+from ..coastline import distance_to_shore_km
 from ..ports import PORTS
 from .activity import activity_features
 from .kalman import epoch_s
@@ -101,7 +102,8 @@ FEATURE_NAMES = (
     "sog_median", "sog_p90", "sog_p10", "sog_std",
     "turn_rate_deg_min", "straightness", "spread_km",
     "slow_fraction", "fast_fraction", "stopped_fraction",
-    "dist_to_nearest_port_km", "span_hours", "night_fraction_moving",
+    "dist_to_nearest_port_km", "dist_to_shore_km",
+    "span_hours", "night_fraction_moving",
 )
 
 
@@ -137,11 +139,20 @@ def type_features(track) -> Optional[dict]:
     fast = float(np.count_nonzero(sog >= 10.0) / n)
     stopped = float(np.count_nonzero(sog <= 1.0) / n)
 
-    # Distance to the nearest known port, at her median position. A working
-    # trawler ranges a fishing ground; a merchant runs between terminals.
+    # Where she works, relative to the land. Two different quantities and both
+    # are signal: a working trawler stays inshore and ranges a ground, a
+    # merchant runs between terminals and crosses open water.
     clat, clon = base["lat"], base["lon"]
     d_port = min((_hav_km(clat, clon, la, lo) for la, lo in PORTS.values()),
                  default=float("nan"))
+
+    # **Distance from shore, which the brief names and this feature set was
+    # faking.** It was `dist_to_nearest_port_km` alone, and that is a different
+    # quantity: the gazetteer holds 34 ports along 2,000 km of coast, so a hull
+    # working five miles off an empty beach scored as 120 km "from shore". The
+    # real measure comes from the same 1 km land mask the SAR detector and the
+    # corpus validator use, so the three cannot disagree about where the sea is.
+    d_shore = float(distance_to_shore_km(clat, clon))
 
     # Diurnal rhythm — the brief names it. Fishing effort is concentrated
     # around dawn and dusk in many fisheries and merchant traffic is not, so
@@ -167,6 +178,7 @@ def type_features(track) -> Optional[dict]:
         "fast_fraction": fast,
         "stopped_fraction": stopped,
         "dist_to_nearest_port_km": float(d_port),
+        "dist_to_shore_km": d_shore,
         "span_hours": float(base["span_minutes"]) / 60.0,
         "night_fraction_moving": float(night_moving),
     }

@@ -18,6 +18,7 @@ The last one, `clean_neighbour`, is the most important item in the corpus.
 """
 from __future__ import annotations
 
+from ..searoute import nearest_water
 from ..geography import (ANCHORAGES, PORTS, destination, point_on_cable,
                          FISHING_GROUND_GUJARAT)
 from ..primitives.encounter import build_rendezvous, coherent, near_miss
@@ -394,15 +395,36 @@ def dx10_fishing_aggregation(world: ScenarioWorld) -> None:
 
     for i, key in enumerate(fleet_keys()):
         v = V(world, key)
-        start = destination(*FISHING_GROUND_GUJARAT, r.uniform(0, 360),
-                            r.uniform(40, 95) * 1852.0)
+        # **A random bearing off the ground can land on Saurashtra, and did.**
+        # Forty hulls are scattered 40-95 nm from the fishing ground on a
+        # uniform bearing; a third of that circle is peninsula. `generate_track`
+        # routes transit *legs* around land but cannot route a vessel that
+        # begins on it, so the passage started ashore and the afloat validator
+        # refused the corpus — at whichever seed happened to draw that bearing.
+        # It went unseen until an unrelated change shifted the RNG stream, which
+        # is how every seed-dependent placement bug in this generator has
+        # surfaced. `nearest_water` is the shared correction and it is the same
+        # one the route builder uses.
+        # **Draw order is preserved exactly**, which is why the start time is
+        # taken here rather than inline in the plan below. Moving a single
+        # `r.uniform` past another re-rolls every parameter of all forty hulls,
+        # and the measured cost of doing it by accident was fishing recall
+        # falling from 86% to 73% — a corpus resample that reads exactly like a
+        # classifier regression. A fix for hulls placed on land must move the
+        # hulls that were on land and nothing else.
+        start = nearest_water(
+            destination(*FISHING_GROUND_GUJARAT, r.uniform(0, 360),
+                        r.uniform(40, 95) * 1852.0),
+            reachable_from=FISHING_GROUND_GUJARAT)
+        depart = t0 + hours(r.uniform(0, 26))
+        work = nearest_water(
+            destination(*FISHING_GROUND_GUJARAT, r.uniform(0, 360),
+                        r.uniform(1500, 14000)),
+            reachable_from=FISHING_GROUND_GUJARAT)
         pts = generate_track(v, VoyagePlan(
-            start=start, start_time=t0 + hours(r.uniform(0, 26)),
+            start=start, start_time=depart,
             legs=[
-                Leg("transit", target=destination(*FISHING_GROUND_GUJARAT,
-                                                  r.uniform(0, 360),
-                                                  r.uniform(1500, 14000)),
-                    speed_kn=v.service_kn),
+                Leg("transit", target=work, speed_kn=v.service_kn),
                 Leg("fishing", target=FISHING_GROUND_GUJARAT,
                     duration_h=r.uniform(26, 52), radius_m=16000.0,
                     speed_kn=r.uniform(2.4, 3.8)),

@@ -286,5 +286,6 @@ from .records import (
     RadarTrackReport,
     SceneCatalogEntry,
     SceneStatus,
+    VoyageDeclaration,
 )
 from .sources import AIS, RADAR, SOURCES, TrackSource, source_by_name

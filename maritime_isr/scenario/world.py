@@ -132,6 +132,11 @@ class ScenarioWorld:
     #: Set by scenarios that clipped something, so the report can say so.
     clipped: list[str] = field(default_factory=list)
 
+    #: AIS message 5 rows: what each vessel *said* about the voyage she was on.
+    #: Landed into `ais_voyage`, the same table `ingest.aisstream` writes from
+    #: the live feed (ADR-035). Written by `common.declare_voyage`.
+    voyage_declarations: list = field(default_factory=list)
+
     #: entity_id -> {name, call_sign, vessel_class} as a **registry** holds it,
     #: which is not always what the vessel broadcasts (ADR-034). Every hull gets
     #: one; a handful disagree. Without a second attestation the registry

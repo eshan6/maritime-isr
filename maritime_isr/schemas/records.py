@@ -54,6 +54,83 @@ class PositionReport(BaseModel):
         return v
 
 
+class VoyageDeclaration(BaseModel):
+    """What a vessel *says* about the voyage she is on — AIS message 5.
+
+    ITU-R M.1371 message 5 ("static and voyage related data") is broadcast every
+    six minutes alongside the position reports, and it carries three things no
+    position report does: where she says she is **going**, when she says she
+    will **arrive**, and how deep she says she is **loaded**. All three are
+    typed in by hand on the bridge and none of them is validated between the
+    keyboard and the air.
+
+    **This is a separate table and not columns on `PositionReport`** because it
+    is a separate message with its own cadence, its own failure modes and its
+    own nullity. A vessel transmits a hundred positions for every voyage
+    declaration; folding them together would either duplicate the declaration a
+    hundred times or leave 99% of the position rows carrying a null nobody could
+    interpret. The real connector (`ingest/aisstream`) receives them as distinct
+    message types and lands them as distinct rows.
+
+    The IDEX Challenge 82 brief, Area 2, asks for exactly what this enables:
+    *"Compare the destination the vessel declares against the destination its
+    behaviour implies, and against where it has historically gone — a declared
+    destination that the track has never been consistent with is one of the
+    strongest and simplest suspicion factors available. Do the same with
+    declared arrival time against plausible arrival time given current position
+    and speed."*
+
+    `destination` is free text as broadcast. It is deliberately **not**
+    normalised here: "JNPT", "NHAVA SHEVA", "IN JNP" and "JNPT >> SIKKA" are all
+    things real transmitters send, and resolving them to a gazetteer entry is a
+    judgement with a confidence, which belongs downstream where a confidence can
+    be attached to it. Landing a cleaned value would throw away the evidence an
+    analyst needs to see.
+    """
+
+    mmsi: int = Field(..., description="Maritime Mobile Service Identity")
+    imo: Optional[int] = Field(default=None)
+    timestamp: datetime = Field(..., description="when the declaration was heard")
+    # A declaration is a *located* record: it was heard somewhere, by something,
+    # at a moment. CLAUDE.md 3 makes that non-negotiable — anything with a
+    # position carries its H3 cells, computed the same way as every other table,
+    # or the joins the whole architecture rests on silently miss it.
+    lat: float = Field(..., ge=-90.0, le=90.0,
+                       description="where she was when she said it")
+    lon: float = Field(..., ge=-180.0, le=180.0)
+    destination: Optional[str] = Field(
+        default=None, description="free text, exactly as broadcast")
+    eta: Optional[datetime] = Field(
+        default=None,
+        description="declared arrival. AIS message 5 carries month/day/hour/"
+                    "minute with no year, so the year is inferred by the "
+                    "connector and a declaration can be ambiguous across a "
+                    "year boundary")
+    draught_m: Optional[float] = Field(
+        default=None, description="declared maximum static draught, metres")
+    nav_status: Optional[int] = Field(default=None)
+    ship_type: Optional[int] = Field(
+        default=None, description="AIS ship-and-cargo type code, 0-99")
+    receiver_source: Optional[str] = Field(default=None)
+    h3_r7: Optional[str] = Field(default=None)
+    h3_r9: Optional[str] = Field(default=None)
+    prov: Provenance
+
+    @field_validator("timestamp")
+    @classmethod
+    def _utc(cls, v: datetime) -> datetime:
+        if v.tzinfo is None:
+            raise ValueError("timestamp must be tz-aware UTC")
+        return v.astimezone(timezone.utc)
+
+    @field_validator("mmsi")
+    @classmethod
+    def _mmsi_range(cls, v: int) -> int:
+        if not (0 < v < 1_000_000_000):
+            raise ValueError(f"MMSI out of 9-digit space: {v}")
+        return v
+
+
 class RadarTrackReport(BaseModel):
     """One track report from one coastal surveillance radar station.
 

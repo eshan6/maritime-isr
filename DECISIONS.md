@@ -2723,3 +2723,109 @@ an open item rather than fixed here.
   unit fixtures and must be measured on the landed real GFW corpus.
 * Every figure here is measured on the **synthetic suite**. Real-feed numbers
   will be lower and must be re-measured on the deploy host (CLAUDE.md §4.6).
+
+---
+
+## ADR-035 — The voyage she declares, and the four defects between the message and the rule *(Accepted)*
+
+**Context.** Area 2 of the IDEX Challenge 82 brief asks for something the system
+did not have, in the plainest terms it uses anywhere:
+
+> Compare the destination the vessel declares against the destination its
+> behaviour implies, and against where it has historically gone — a declared
+> destination that the track has never been consistent with is **one of the
+> strongest and simplest suspicion factors available**. Do the same with
+> declared arrival time against plausible arrival time given current position
+> and speed.
+
+It was not built, and the reason was upstream of any rule: **nothing landed a
+declared destination.** AIS message 5 carries destination, ETA and draught; the
+generator emitted no message 5; and the live connector filtered to
+`PositionReport` and returned `None` for everything else. A comparison against a
+column that does not exist is a detector that can never fire.
+
+**Decision.** Land the message, then write the rules.
+
+* `schemas.records.VoyageDeclaration` — a canonical record, separate from
+  `PositionReport` because message 5 is a separate message with its own cadence
+  and its own nullity. A vessel transmits a hundred positions per declaration;
+  folding them together would either repeat the declaration a hundred times or
+  leave 99% of position rows carrying a null nobody could interpret.
+* `ingest.aisstream._parse_static` — the live connector now subscribes to
+  `ShipStaticData` and lands it. Message 5's ETA has month, day, hour and minute
+  and **no year**, so the year is inferred against the moment it was heard;
+  0/24/60 are the not-available codes and return `None`, because a vessel that
+  declined to state an ETA has said something different from one that stated a
+  wrong one.
+* `anomaly.voyage` — two checks, split the way `anomaly.identity` splits its
+  own. **The arithmetic one**: could any hull get from here to there by then.
+  **The behavioural one**: was she ever heading towards the port she named.
+* The generator declares a destination on **every ordinary port call**, honestly.
+  A rule tested only against liars measures recall and says nothing about
+  precision. 3,091 declarations over 131 hulls is the denominator; group F adds
+  three hulls, two of which lie and one of which is diverted honestly.
+
+**`destination` is landed as free text and deliberately not normalised.**
+"JNPT", "NHAVA SHEVA", "INNSA" and "JNPT>>SIKKA" are all things real
+transmitters send. Resolving them is a judgement with a confidence and belongs
+downstream where a confidence can be attached; landing a cleaned value throws
+away the evidence an analyst has to see. `resolve_destination` matches exactly —
+name, alias, or the leading token of a route string — and returns `None` for
+everything else. **No fuzzy matching:** a missed resolution costs a finding, a
+wrong one tells a watchkeeper a ship is lying about a port we picked for her.
+
+**Declared against *historical* destination is not built, and that is a
+decision.** An unqualified "she has never been there before" fires on every
+vessel's first call at every port — the Z1 lesson from ADR-030, which cost 168
+hulls. A first-ever destination is a fact about our observation window, not
+about the ship. History is available to the assistant as context, not as a rule.
+
+**Four defects, and every one of them made the rule quieter or louder without
+saying so.** The pattern is now familiar enough to be worth naming: each was
+found by watching the alert count rather than by reading the code.
+
+1. **The rule fired on the whole honest fleet: 43 alerts, 41 innocent hulls.**
+   Required speed is distance over *remaining* time, so as the remaining time
+   goes to zero the required speed goes to infinity. A vessel 60 km from her
+   berth with half an hour left on a two-day-old ETA "needs 200 knots". She is
+   late, which is the commonest thing at sea, and nobody retypes an ETA once it
+   slips. The test is now "is she short by an amount no schedule slips by" —
+   six hours — and an **expired** ETA is not checked at all, because the
+   question the brief asks is forward-looking and a passed ETA has stopped
+   asking it.
+
+2. **The heading check read every fix after the declaration, with no end.** So
+   it scored her arrival, her berth and her *next* voyage against a destination
+   she had reached and left days earlier. Bounded at the stated ETA.
+
+3. **A `timestamp[us]` column divided as if it were nanoseconds** — 234 fixes
+   spanning nineteen hours came out as a span of 68 seconds, so the heading
+   check answered "not enough track to say which way she went" about the one
+   hull in the corpus written to steam the wrong way. `tracks.kalman.epoch_s`
+   exists precisely because this bug atomised every track once before; the fix
+   is to use it, and the test is there so a third occurrence is caught by a
+   machine.
+
+4. **Eleven honest hulls were called liars for swinging on their cables.** A
+   ship at anchor yaws through most of the compass over a tide, so *every* step
+   is more than 100 degrees off the bearing to the port she is waiting to enter
+   and the away fraction comes out at a perfect 1.0. The heading check now
+   requires her to be making way at all — three knots, the same line
+   `tracks.interactions` draws, and for the same reason: a rule about direction
+   needs a vessel that has one.
+
+**Result on the corpus:** 43 → 13 → **2**, and the two are the two hulls written
+to lie. Zero false positives across 3,091 declarations from 131 hulls.
+`voyage_contradiction` reaches the ranked list.
+
+**Consequences.**
+
+* `ais_voyage` is a new conformed table and is in `ALL_TABLES`, so
+  `scenario clear` removes it. It was also missing from
+  `api.reader.CONFORMED_TABLES` for one run, with the silent effect that tuple
+  always risks: the generator wrote it, `has()` answered False, and the rule
+  reported no findings over a corpus that contained three.
+* The connector change is on the **PARKED** live path (ADR-013): it is built and
+  correct and has never consumed a live message, because there is no always-on
+  host. Its parser is exercised by fixtures.
+* Every figure here is measured on the **synthetic suite** (CLAUDE.md §4.6).

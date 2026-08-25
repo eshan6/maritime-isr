@@ -53,6 +53,10 @@ T_DETECTIONS = "scenario_detections"
 #: writing one would have invented a table the real system does not have.
 T_SANCTIONS = "scenario_sanctions"
 T_ORGS = "scenario_organizations"
+#: AIS message 5 — what each vessel said about her voyage. The same table
+#: `ingest.aisstream` writes from the live feed, so the declaration travels the
+#: identical code path real data will (ADR-019, ADR-035).
+T_VOYAGE = "ais_voyage"
 T_OWNERSHIP = "scenario_ownership"
 
 EVENT_TABLES = {
@@ -67,7 +71,7 @@ EVENT_TABLES = {
 #: table would leave orphan synthetic rows behind and quietly poison the next
 #: real-vs-synthetic split.
 ALL_TABLES = (T_IDENTITY, *EVENT_TABLES.values(), T_POSITIONS, T_DETECTIONS,
-              T_SANCTIONS, T_ORGS, T_OWNERSHIP, MATCH_TABLE, T_RADAR,
+              T_SANCTIONS, T_ORGS, T_OWNERSHIP, MATCH_TABLE, T_RADAR, T_VOYAGE,
               # Derived radar products. Listed so `scenario clear`
               # removes them too — a clear that silently missed a
               # table would leave orphan synthetic rows behind.
@@ -481,6 +485,32 @@ def land_world(world: ScenarioWorld) -> dict[str, int]:
     land(identity_rows, T_IDENTITY,
          ("vessel_id", "record_kind", "mmsi", "ship_name", "valid_from"),
          day_field="valid_from")
+
+    # ---- voyage declarations, AIS message 5 (ADR-035) ----
+    voyage_rows = []
+    for i, d in enumerate(world.voyage_declarations):
+        row = dict(
+            vessel_id=d["entity_id"],
+            mmsi=str(d["mmsi"]),
+            imo=str(d["imo"]) if d.get("imo") else None,
+            timestamp=d["t"],
+            lat=d["lat"], lon=d["lon"],
+            destination=d["destination"],
+            eta=d["eta"],
+            draught_m=d.get("draught_m"),
+            nav_status=d.get("nav_status"),
+            ship_type=None,
+            receiver_source="ter:synthetic",
+        )
+        # The one shared helper, all five resolutions, never derived from one
+        # another (CLAUDE.md §3, ADR-015). Hand-rolling two of them here is the
+        # exact drift that helper exists to prevent.
+        stamp_h3(row)
+        voyage_rows.append(_stamp(
+            row, source_ref=f"{d['entity_id']}:voyage:{i}",
+            acquired_at=d["t"]))
+    land(voyage_rows, T_VOYAGE, ("vessel_id", "timestamp"),
+         day_field="timestamp")
 
     # ---- behaviour events ----
     by_kind: dict[str, list[dict]] = {k: [] for k in EVENT_TABLES}
