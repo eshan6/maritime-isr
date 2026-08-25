@@ -341,6 +341,19 @@ ANOMALY_THRESHOLDS = {
     # marginal, threshold-sensitive finding the other gates exist to hold back.
     "identity_contradiction": 0.40,
     #
+    # `voyage_contradiction` sits at 0.50 — between the arithmetic identity
+    # checks and the inferential rules, because it contains one of each
+    # (ADR-035). The arithmetic half is an ETA no hull could make, which reaches
+    # 0.50-0.90 and is as certain as a check digit. The behavioural half is
+    # "she never once headed for the port she named", which is scored at 0.55
+    # and is a judgement about a track: real vessels are diverted, and the
+    # measured shape of an honest diversion is in the corpus as F15.
+    #
+    # 0.50 admits both while excluding a lone weak reading, and it is the same
+    # gate `dark_vessel` uses — a paperwork contradiction and a radar contact
+    # nobody can name are about equally worth a watchkeeper's minute.
+    "voyage_contradiction": 0.50,
+    #
     # `notable_activity` is gated on the range its score can actually reach,
     # which is **not** the range the other gates live in.
     #

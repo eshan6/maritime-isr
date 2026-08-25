@@ -70,6 +70,17 @@ ACTIVITIES: dict[str, str] = {
     "manoeuvring_erratically": "changing course far more often than passage "
                                "requires, without the regularity of a working "
                                "or survey pattern",
+    # **`rendezvousing` is named by the brief and is deliberately not here.**
+    # It is not a property of one track. Two vessels closing, holding station
+    # and parting is a statement about a *pair*, and from a single track the
+    # motion is indistinguishable from loitering — which is exactly what this
+    # classifier calls it, correctly, because that is all one track supports.
+    # The capability exists and lives where the second track does:
+    # `tracks.interactions` produces `converging_and_holding` and
+    # `transfer_pattern`, both of which are rendezvous by another name and both
+    # of which carry the counterpart the word implies. Adding a single-track
+    # `rendezvousing` label here would mean claiming a meeting on the evidence
+    # of one participant.
     "unclassified": "nothing in the rule set describes this motion, or there "
                     "is not enough track to say",
 }

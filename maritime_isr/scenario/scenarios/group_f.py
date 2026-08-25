@@ -84,7 +84,7 @@ from ..validate import RULE_IDENTIFIERS
 from ..truth import (DECOY, FAMILY_BEHAVIOURAL, FAMILY_DECOY, FAMILY_IDENTITY,
                      TRUE_ANOMALY, ScenarioTruth)
 from ..world import ScenarioWorld, week
-from .common import V, emit
+from .common import V, declare_voyage, emit
 
 #: Open water off **Karnataka**, clear of every port and anchorage in the
 #: gazetteer and inside modelled terrestrial AIS reception.
@@ -537,6 +537,142 @@ def f12_lane_traffic_decoy(world: ScenarioWorld) -> None:
                "traffic on this coast.")))
 
 
+# ==========================================================================
+# F13-F15 — the voyage she declares against the voyage she makes (ADR-035)
+# ==========================================================================
+
+def f13_declares_one_port_and_steams_for_another(world: ScenarioWorld) -> None:
+    """Declares Kandla, then runs south-west for two days and never turns.
+
+    The brief calls this "one of the strongest and simplest suspicion factors
+    available", and until AIS message 5 was landed the system had no column to
+    read it from.
+
+    **The test is "was she ever heading there", not "did she arrive".** A vessel
+    diverted mid-passage is ordinary and happens to F15 in this same group; a
+    vessel that declared a port and never once pointed at it is making a
+    statement that her own track contradicts from the first hour.
+    """
+    from ...ports import PORTS
+    r = world.rng
+    v = V(world, "false_destination")
+    t0 = week(3, hours=11)
+
+    # She starts off Karnataka. Kandla is 1,100 km north-west. She goes south.
+    start = (14.30, 73.75)
+    legs = [Leg("transit", target=(13.40, 73.30), speed_kn=11.5),
+            Leg("transit", target=(12.30, 73.60), speed_kn=11.5),
+            Leg("transit", target=(11.20, 74.20), speed_kn=11.0)]
+    pts = generate_track(v, VoyagePlan(
+        start=start, start_time=t0, legs=legs), r)
+    emit(world, "false_destination", pts)
+
+    # An ETA that is *achievable* for the distance, so the arithmetic check
+    # stays silent and only the behavioural one fires. Two findings on one hull
+    # would prove nothing about which rule found her.
+    declare_voyage(world, "false_destination", destination="Kandla",
+                   eta=pts[-1].t + timedelta(hours=60),
+                   t_start=t0, t_end=pts[-1].t)
+
+    world.truth.add(ScenarioTruth(
+        scenario_id="F13", scenario_family=FAMILY_BEHAVIOURAL,
+        truth_class=TRUE_ANOMALY, entity_ids=[v.entity_id],
+        t_start=t0, t_end=pts[-1].t, expected_detection=True,
+        expected_anomaly_types=["voyage_contradiction"],
+        notes=("Declares Kandla, 1,100 km north-west, and steams south-west "
+               "for the whole passage. Her declared ETA is achievable, so only "
+               "the behavioural check should fire — the arithmetic one has "
+               "nothing to catch.")))
+    assert PORTS["Kandla"][0] > start[0], "Kandla must be north of her start"
+
+
+def f14_declares_an_arrival_no_hull_could_make(world: ScenarioWorld) -> None:
+    """Off Karnataka, declaring Kandla in nine hours. That needs 130 knots.
+
+    Pure arithmetic, like the IMO check digit: distance over time against a
+    hull-speed ceiling, with no judgement in it except a routing margin taken
+    in the direction that avoids accusing an honest vessel.
+
+    A mistyped ETA is a common and innocent thing, which is exactly why the
+    finding is scored as a lead and not a verdict — but a vessel whose paperwork
+    cannot be true is worth a watchkeeper's minute.
+    """
+    r = world.rng
+    v = V(world, "impossible_eta")
+    t0 = week(5, hours=6)
+
+    legs = [Leg("transit", target=(14.05, 73.55), speed_kn=12.0),
+            Leg("transit", target=(13.35, 74.05), speed_kn=12.0)]
+    pts = generate_track(v, VoyagePlan(
+        start=(14.60, 73.35), start_time=t0, legs=legs), r)
+    emit(world, "impossible_eta", pts)
+
+    # She *is* heading roughly the right way for a coastal passage, so the
+    # behavioural check has no quarrel with her. The arithmetic one does.
+    declare_voyage(world, "impossible_eta", destination="Kandla",
+                   eta=t0 + timedelta(hours=9),
+                   t_start=t0, t_end=pts[-1].t)
+
+    world.truth.add(ScenarioTruth(
+        scenario_id="F14", scenario_family=FAMILY_BEHAVIOURAL,
+        truth_class=TRUE_ANOMALY, entity_ids=[v.entity_id],
+        t_start=t0, t_end=pts[-1].t, expected_detection=True,
+        expected_anomaly_types=["voyage_contradiction"],
+        notes=("Declares Kandla in nine hours from 1,100 km away. No hull in "
+               "this traffic makes 130 knots; the declaration cannot be true "
+               "whatever her intentions are.")))
+
+
+def f15_diverted_honestly(world: ScenarioWorld) -> None:
+    """DECOY: declares Mangalore, is sent to Mormugao halfway, says so.
+
+    Orders change. A charterer re-fixes a cargo, a berth falls through, a
+    weather routing service sends her round. The vessel updates her declaration
+    and carries on, and **none of that is deceit** — which is why the rule tests
+    whether she was *ever* heading to the port she named rather than whether she
+    ended up there.
+
+    This decoy is the reason that distinction exists in the rule at all. Without
+    it "declared destination does not match arrival port" looks like a perfectly
+    good detector, and it would fire on a large fraction of honest commercial
+    traffic.
+    """
+    r = world.rng
+    v = V(world, "diverted_honestly")
+    t0 = week(6, hours=4)
+
+    # South towards Mangalore for the first half — genuinely heading there.
+    first = generate_track(v, VoyagePlan(
+        start=(14.60, 73.40), start_time=t0,
+        legs=[Leg("transit", target=(13.60, 74.10), speed_kn=11.0),
+              Leg("transit", target=(13.10, 74.55), speed_kn=11.0)]), r)
+    emit(world, "diverted_honestly", first)
+    declare_voyage(world, "diverted_honestly", destination="Mangalore",
+                   eta=first[-1].t + timedelta(hours=8),
+                   t_start=t0, t_end=first[-1].t)
+
+    # Then the diversion, declared as soon as it happens.
+    second = generate_track(v, VoyagePlan(
+        start=(first[-1].lat, first[-1].lon),
+        start_time=first[-1].t + timedelta(minutes=30),
+        initial_course_deg=first[-1].cog_deg,
+        initial_sog_kn=first[-1].sog_kn,
+        legs=[Leg("transit", target=(14.20, 73.60), speed_kn=11.5),
+              Leg("transit", target=(15.10, 73.35), speed_kn=11.5)]), r)
+    emit(world, "diverted_honestly", second)
+    declare_voyage(world, "diverted_honestly", destination="Mormugao",
+                   eta=second[-1].t + timedelta(hours=6),
+                   t_start=second[0].t, t_end=second[-1].t)
+
+    world.truth.add(ScenarioTruth(
+        scenario_id="F15", scenario_family=FAMILY_DECOY, truth_class=DECOY,
+        entity_ids=[v.entity_id], t_start=t0, t_end=second[-1].t,
+        expected_detection=False, expected_anomaly_types=[],
+        notes=("Declared Mangalore and was genuinely heading there, then was "
+               "re-fixed to Mormugao and said so. Two declarations, both "
+               "honest at the moment they were made.")))
+
+
 #: Placed after the identity hulls so the truth ledger reads in F order.
 SCENARIOS = (
     f1_to_f5_identity_attestations,
@@ -547,4 +683,7 @@ SCENARIOS = (
     f10_shadowing,
     f11_transfer_both_transmitting,
     f12_lane_traffic_decoy,
+    f13_declares_one_port_and_steams_for_another,
+    f14_declares_an_arrival_no_hull_could_make,
+    f15_diverted_honestly,
 )

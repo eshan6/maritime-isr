@@ -529,7 +529,8 @@ def detect_port_risk(store, tracks: list, *, source_ref: str) -> list[str]:
 def run_anomaly_library(store, *, tracks, encounters, spoof_events,
                         associations, verdicts, source_ref: str,
                         identities: list[dict] | None = None,
-                        baselines=None, interactions=None) -> dict:
+                        baselines=None, interactions=None,
+                        declarations: list[dict] | None = None) -> dict:
     """Run every detector. Order matters only for #5, which correlates with the
     alerts the earlier detectors produced.
 
@@ -559,6 +560,12 @@ def run_anomaly_library(store, *, tracks, encounters, spoof_events,
     # already run it passes the result rather than paying twice.
     fired["vessel_interaction"] = detect_vessel_interactions(
         store, tracks, source_ref=source_ref, interactions=interactions)
+    # What she said about her voyage, against what she did (ADR-035). Optional
+    # like the rest: a corpus with no landed `ais_voyage` rows produces no
+    # voyage findings and no error, because a vessel that never declared a
+    # destination has not contradicted one.
+    fired["voyage_contradiction"] = detect_voyage_contradiction(
+        store, declarations or [], tracks, source_ref=source_ref)
     return fired
 
 
@@ -838,4 +845,126 @@ def detect_vessel_interactions(store, tracks: list, *, source_ref: str,
                              follower=itx.follower,
                              reason=itx.reason,
                              sensor=tr.source.name))
+    return out
+
+
+# ---------- 10. what she says about her voyage (Area 2, ADR-035) -----------
+
+#: How far past a declaration to read her track when she states no ETA.
+#: A destination without an arrival time is still a claim about the next stretch
+#: of passage; two days is long enough to see a course and short enough not to
+#: swallow her next voyage.
+DECLARATION_HORIZON_H = 48.0
+
+
+def detect_voyage_contradiction(store, declarations: list[dict], tracks: list,
+                                *, source_ref: str) -> list[str]:
+    """A vessel whose declared voyage her own track contradicts.
+
+    Area 2 of the IDEX brief: *"Compare the destination the vessel declares
+    against the destination its behaviour implies ... Do the same with declared
+    arrival time against plausible arrival time given current position and
+    speed."*
+
+    `declarations` is a list of `ais_voyage` rows — AIS message 5, one per hull
+    per few hours. The checks live in `anomaly.voyage` and are pure functions;
+    this turns a contradiction into a scored, evidenced alert.
+
+    **One alert per hull per declared destination, not per declaration.** A
+    vessel repeats the same message every six minutes and the corpus keeps one
+    every six hours; scoring each of them separately would put a single lie on
+    the queue thirty times and bury everything else. The strongest reading of
+    one claim is the finding.
+
+    **The two checks combine as a maximum, not a noisy-OR**, for the same reason
+    the identity checks do: they are two readings of one question — is this
+    voyage statement true — and not independent evidence about different things.
+    """
+    from ..tracks.kalman import epoch_s
+    from .voyage import check_arrival_feasible, check_heading_agrees
+
+    # Fixes per hull, in time order, so a declaration can be tested against what
+    # she did next. Built from tracks rather than from raw positions so the
+    # comparison runs over the same smoothed motion every other rule reads.
+    fixes: dict[str, list] = {}
+    for tr in tracks:
+        vid = getattr(tr, "mmsi", None)
+        if vid is None:
+            continue
+        pts = tr.points[tr.points.quality != "outlier"]
+        if len(pts) == 0:
+            continue
+        # `epoch_s`, not `astype("int64") // 1e9`. The naive form silently
+        # mis-scales a `timestamp[us]` column by 1000, and it did here: 234
+        # fixes spanning nineteen hours came out as a span of 68 seconds, so
+        # the heading check answered "not enough track to say which way she
+        # went" on the one hull in the corpus written to steam the wrong way.
+        # The helper exists because this exact bug atomised every track once
+        # before (see `tracks.kalman.epoch_s`).
+        ts = epoch_s(pts["ts"])
+        fixes.setdefault(str(vid), []).extend(
+            zip(ts.tolist(), pts["lat"].tolist(), pts["lon"].tolist()))
+    for v in fixes.values():
+        v.sort()
+
+    # (vessel, destination) -> best finding seen
+    best: dict[tuple, tuple] = {}
+    for row in declarations:
+        vid = row.get("vessel_id")
+        dest = row.get("destination")
+        if not vid or not dest:
+            continue
+        t = pd.Timestamp(row.get("timestamp"))
+        if t.tzinfo is None:
+            t = t.tz_localize("UTC")
+        eta = row.get("eta")
+        eta = pd.Timestamp(eta) if eta is not None else None
+        if eta is not None and eta.tzinfo is None:
+            eta = eta.tz_localize("UTC")
+
+        # **Bounded at the stated arrival, not left open.** A declaration is a
+        # claim about the passage between now and the ETA. Reading every fix
+        # after it would score her arrival, her berth and her *next* voyage
+        # against a destination she reached and left days earlier, and every
+        # honest liner on a rotation would then look like she steamed away from
+        # somewhere she said she was going.
+        horizon = (eta.timestamp() if eta is not None
+                   else t.timestamp() + DECLARATION_HORIZON_H * 3600.0)
+        after = [f for f in fixes.get(str(row.get("mmsi")), [])
+                 if t.timestamp() <= f[0] <= horizon]
+        findings = [
+            check_arrival_feasible(lat=row["lat"], lon=row["lon"],
+                                   declared_at=t, destination=dest, eta=eta),
+            check_heading_agrees(destination=dest, fixes=after),
+        ]
+        bad = [f for f in findings if f.is_contradiction]
+        if not bad:
+            continue
+        top = max(bad, key=lambda f: f.confidence)
+        key = (vid, dest)
+        if key not in best or top.confidence > best[key][0].confidence:
+            best[key] = (top, bad, t, row)
+
+    out: list[str] = []
+    for (vid, dest), (top, bad, t, row) in best.items():
+        node = vessel_node_id(vid)
+        if store.node(node) is None:
+            # Same rule as the identity detector: an alert on a node the graph
+            # was never told about is the shadow-stub failure ADR-022 exists to
+            # prevent. The populator creates vessels, not this.
+            continue
+        score = min(0.97, top.confidence + 0.05 * (len(bad) - 1))
+        ev = [dict(edge="voyage-contradiction", src=node,
+                   dst=f"voyage:{f.check}", confidence=round(f.confidence, 3),
+                   source="voyage_rules", source_ref=source_ref,
+                   props=dict(check=f.check, statement=f.statement,
+                              declared=dest, **f.detail))
+              for f in bad]
+        _emit(out, store, "voyage_contradiction", node, t.timestamp(), score,
+              ev,
+              props=dict(checks=[f.check for f in bad],
+                         declared_destination=dest,
+                         n_contradictions=len(bad),
+                         lat=row.get("lat"), lon=row.get("lon"),
+                         statements=[f.statement for f in bad]))
     return out

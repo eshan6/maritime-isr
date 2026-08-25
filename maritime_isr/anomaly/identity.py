@@ -40,7 +40,28 @@ precision must be measured. Until that run happens on the laptop, they are
 "built, unverified on host" (CLAUDE.md §5) and the tests here exercise them on
 fixtures.
 
-Check 3 fires on either corpus.
+Check 3 fires on either corpus, and check 1 now fires on both: F1 broadcasts an
+IMO with a deliberately corrupted check digit (ADR-034), which is safe because a
+number that fails its own checksum is one no vessel could have been *issued*.
+
+**Check 2 stays unmeasurable on synthetic data, and that was decided rather than
+overlooked.** Constructing a flag contradiction needs a *valid* MID — a real
+country code — and the remaining six digits could then belong to a real hull.
+The 999-block reservation exists precisely to make that impossible, and it is
+worth more than the test coverage: a synthetic vessel wearing a real identity is
+a false accusation sitting in the same tables as our findings, and no downstream
+filter undoes it once a number has been quoted. The same argument rules out a
+malformed-length MMSI, which would be safe in itself but could only be generated
+by relaxing the collision guard, and a safety invariant that has an exception is
+one somebody will widen later.
+
+So checks 2 and 4 are exercised by fixtures — agreement, contradiction, an
+unknown MID, a reserved AtoN prefix, a wrong length and the project's own
+reserved block all have tests — and their precision must be measured on the
+landed real GFW corpus, where the MMSIs and flags are real and nothing has to be
+manufactured. That is a genuine gap in what has been *measured*, and it is
+stated here rather than closed by weakening the thing that makes the corpus
+safe.
 """
 from __future__ import annotations
 

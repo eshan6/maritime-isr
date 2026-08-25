@@ -105,9 +105,82 @@ def add_loiter(world: ScenarioWorld, scenario_id: str, key: str,
         )))
 
 
-def add_port_visit(world: ScenarioWorld, scenario_id: str, key: str,
-                   spec: PortCallSpec) -> LandedEvent:
+#: How often a voyage declaration lands, in hours.
+#:
+#: AIS message 5 is transmitted every six minutes, but a declaration only
+#: *changes* when the bridge retypes it, and a landed corpus that repeated the
+#: identical string every six minutes for a fortnight would be 100,000 rows
+#: saying one thing. Real feeds are deduplicated somewhere between the antenna
+#: and the archive; six hours is the cadence at which the value is worth
+#: re-recording, and it is stated here rather than left implicit because the
+#: arrival check reads the *interval* between declaration and stated ETA.
+DECLARATION_INTERVAL_H = 6.0
+
+
+def declare_voyage(world: ScenarioWorld, key: str, *, destination: str,
+                   eta, t_start, t_end=None) -> int:
+    """Emit AIS message 5 along a vessel's track: where she says she is going.
+
+    Sampled from her own integrated track, so a declaration carries the position
+    she was actually at when she made it — which is what the feasibility check
+    measures the passage from, and what makes the record a *located* one under
+    CLAUDE.md §3.
+
+    Returns the number of declarations emitted. Zero is a legitimate answer: a
+    vessel outside receiver coverage is not heard saying anything, and a
+    scenario that silently assumed otherwise would be measuring a message
+    nobody received.
+    """
     v = V(world, key)
+    track = world.track_of(v.entity_id)
+    if not track:
+        return 0
+    t_end = t_end or track[-1].t
+    step = timedelta(hours=DECLARATION_INTERVAL_H)
+    n, due = 0, t_start
+    for p in track:
+        if p.t < t_start or p.t > t_end:
+            continue
+        if p.t < due:
+            continue
+        if coverage_at(p.lat, p.lon) <= 0.02:
+            # Nothing terrestrial hears her. Same rule the position emitter
+            # applies (ADR-005): silence offshore is absence of evidence.
+            continue
+        world.voyage_declarations.append(dict(
+            entity_id=v.entity_id, mmsi=v.mmsi, imo=v.imo,
+            t=p.t, lat=p.lat, lon=p.lon,
+            destination=destination, eta=eta,
+            draught_m=v.draught_m, nav_status=p.nav_status))
+        n += 1
+        due = p.t + step
+    return n
+
+
+def add_port_visit(world: ScenarioWorld, scenario_id: str, key: str,
+                   spec: PortCallSpec, *, declare: bool = True) -> LandedEvent:
+    """Land the visit, and by default have her declare it on the way in.
+
+    **The declaration defaults to honest, and that is what makes the corpus
+    measurable.** A voyage-comparison rule tested only against liars measures
+    recall and nothing else; it needs a large, boring population of vessels that
+    said where they were going and then went there, or "she declared JNPT" tells
+    you nothing about what a contradiction is worth. Every ordinary port call in
+    the corpus now carries a truthful message 5, and the handful of scenarios
+    that lie pass ``declare=False`` and write their own.
+    """
+    v = V(world, key)
+    if declare:
+        # From the moment she sails for this port until she gets there. The ETA
+        # is her real arrival with an hour or two of honest slack, because a
+        # master who hits the minute is the implausible one.
+        track = world.track_of(v.entity_id)
+        if track:
+            sailed = max(track[0].t, spec.t_arrive - timedelta(days=6))
+            declare_voyage(world, key, destination=spec.port,
+                           eta=spec.t_arrive + timedelta(
+                               hours=round(world.rng.uniform(-2.0, 5.0), 2)),
+                           t_start=sailed, t_end=spec.t_arrive)
     return world.add_event(LandedEvent(
         kind="port_visits",
         event_id=eid(scenario_id, "pv", v.entity_id, spec.t_arrive.isoformat()),

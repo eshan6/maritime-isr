@@ -66,6 +66,7 @@ QUESTION in `STATE.md`; do not silently swap it.
 | **H3, resolution 7** for joins; **res 9** for fine matching | See §3. This is load-bearing architecture, not a detail. |
 | **pyroSAR wrapping ESA SNAP** (`gpt` + workflow XMLs), **not** the `snappy` Python bridge | `snappy` is notoriously brittle to install and version-pin. pyroSAR drives SNAP's command-line `gpt` tool with XML graphs — reproducible, scriptable, far less install pain. |
 | **cron + Python entrypoints**, no Airflow | The orchestration is "run these scripts on a schedule." Airflow is a server, a database, and a UI we'd have to operate for no benefit at this scale. |
+| **AIS message 5 (`ais_voyage`) is a table, not columns on `ais_position`** | A vessel sends a hundred positions per voyage declaration. Folding them together either repeats the declaration a hundred times or leaves 99% of position rows carrying a null nobody can interpret. The real connector receives them as distinct message types (ADR-035). |
 | **h3 v4 library** — use the `latlng_to_cell` API | v4 renamed the functions from v3 (`geo_to_h3` → `latlng_to_cell`). Pin v4 and use v4 names; mixing versions silently breaks joins. |
 | **React + MapLibre GL** on Vercel free tier; **FastAPI** backend on the Oracle VM, reached via **Cloudflare tunnel** | Free hosting both ends; the tunnel exposes the VM API without opening inbound ports (safer, and Oracle's firewall is fiddly). |
 | **Compute: Oracle Cloud always-free ARM VM** (4 cores, 24 GB RAM) | $0 standing cost, enough RAM for SNAP. **Not yet provisioned** — see `STATE.md`. ARM (aarch64) raises real questions for SNAP and ML — see OPEN QUESTIONS. |
@@ -209,6 +210,14 @@ fusion/    association engine + dark-vessel logic (THE fusion core — keep it s
            `contact_profile.py` describes a contact that correlates to nothing —
            inferred type + activity + zone (ADR-033). It PROFILES, never
            re-decides darkness: the cascade owns that verdict.
+anomaly/   the detector library, plus the pure rule modules it calls:
+           `identity.py` (is her declared identity self-consistent) and
+           `voyage.py` (does her declared destination and ETA match her track,
+            ADR-035). Both are pure functions with three-valued outcomes —
+            contradiction / ok / **not checkable** — and "we could not check"
+            is an answer, never folded into "fine".
+coastline.py  distance from land, from the shared 1 km mask (ADR-035). NOT
+           bathymetry: operating depth is absent and must not be approximated.
 assistant/ the MDA assistant (ADR-031): the ranked Vessel of Interest object —
            factor catalog, decomposable score, plain-language narration,
            recommended next actions, grounded Q&A. ASSEMBLES, never detects:

@@ -613,6 +613,28 @@ def _area2_inputs():
     return identities, index
 
 
+def _voyage_declarations() -> list[dict]:
+    """AIS message 5 rows — what each hull said about the voyage she was on.
+
+    Absent is a legitimate answer and not an error: a corpus generated before
+    ADR-035, or a real feed whose connector has not run, has no declarations and
+    the voyage rule simply stays quiet. A vessel that never declared a
+    destination has not contradicted one.
+    """
+    from maritime_isr.api.reader import open_reader
+    with open_reader() as reader:
+        if not reader.has("ais_voyage"):
+            print("  declarations   : no ais_voyage table — voyage checks quiet")
+            return []
+        rows = reader.rows("SELECT * FROM ais_voyage")
+    hulls = len({r.get("vessel_id") for r in rows})
+    named = sum(1 for r in rows if r.get("destination"))
+    with_eta = sum(1 for r in rows if r.get("eta") is not None)
+    print(f"  declarations   : {len(rows):,} row(s) over {hulls:,} hull(s) — "
+          f"{named:,} name a destination, {with_eta:,} state an ETA")
+    return rows
+
+
 def _area3_interactions(tracks):
     """Vessel-to-vessel interactions over the whole picture (ADR-033).
 
@@ -662,6 +684,7 @@ def run_anomalies(store: GraphStore, tracks_out: dict,
     # functions of what they are handed, and so the baseline artifact is landed
     # and inspectable rather than living for the duration of one call.
     identities, baselines = _area2_inputs()
+    declarations = _voyage_declarations()
 
     # ---- Area 3 inputs (ADR-033) -----------------------------------------
     # The pair search is the expensive half of interaction detection, so it is
@@ -678,6 +701,7 @@ def run_anomalies(store: GraphStore, tracks_out: dict,
         verdicts=fusion_out["verdicts"],
         source_ref="scenario-combined",
         identities=identities,
+        declarations=declarations,
         baselines=baselines,
         interactions=interactions)
     print(f"  ran in {time.time() - t0:.0f}s")

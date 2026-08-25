@@ -179,6 +179,14 @@ def narrate_factor(f: Factor, *, name: str) -> str:
         return (lead + " " + " ".join(str(s) for s in statements[:3])
                 + f" {conf.capitalize()}.")
 
+    if f.kind == "voyage_contradiction":
+        statements = d.get("statements") or []
+        dest = d.get("declared_destination")
+        lead = (f"{name} broadcast a voyage her own track contradicts"
+                + (f" — she declared {dest}." if dest else "."))
+        return (lead + " " + " ".join(str(x) for x in statements[:2])
+                + f" {conf.capitalize()}.")
+
     if f.kind == "assessed_ais_disabling":
         n_gaps = int(d.get("n_gaps") or 1)
         return (f"Global Fishing Watch assessed "

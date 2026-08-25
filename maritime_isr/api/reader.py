@@ -35,6 +35,13 @@ from ..config import cfg
 #: simply not registered — the endpoints degrade to empty rather than 500.
 CONFORMED_TABLES = (
     "ais_position",
+    # AIS message 5 — what each hull declared about her voyage (ADR-035). The
+    # generator wrote this table before it was listed here, and the effect was
+    # the silent one this tuple always risks: `has()` answered False, the
+    # voyage rule was handed an empty list, and it reported no findings over a
+    # corpus that contained three. A table absent from this list is a table the
+    # serving layer cannot see, whatever is on disk.
+    "ais_voyage",
     "gfw_vessel_identity",
     "gfw_encounters",
     "gfw_loitering",

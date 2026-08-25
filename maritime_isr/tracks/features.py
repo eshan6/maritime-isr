@@ -31,10 +31,15 @@ ENC_RES = 7  # ~5 km² cells; 500 m radius always inside cell ∪ 1-ring
 # duplicating `scenario.geography.PORTS` and disagreeing with it — 8 ports with
 # **no Sikka and no Vadinar**, the two Gujarat crude terminals most tanker
 # traffic in this AOI calls at, so a full laden voyage into Vadinar produced an
-# empty `port_calls` and every port-based rule saw nothing. Re-exported under
-# the old names because callers and tests import them from here.
-from ..ports import ANCHORAGES as AOI_ANCHORAGES   # noqa: E402
-from ..ports import PORTS as AOI_PORTS             # noqa: E402
+# empty `port_calls` and every port-based rule saw nothing.
+#
+# **`AOI_PORTS` and `AOI_ANCHORAGES` are re-exports and are used elsewhere**
+# (`graph.ingest` imports `AOI_PORTS` from here). A linter reads them as unused
+# because nothing in *this* file touches them, and acting on that removes a
+# name three modules import — which is exactly what happened once. The `F401`
+# suppression is the marker that says so.
+from ..ports import ANCHORAGES as AOI_ANCHORAGES   # noqa: E402,F401
+from ..ports import PORTS as AOI_PORTS             # noqa: E402,F401
 from ..ports import at_waiting_area, port_at       # noqa: E402
 
 
@@ -168,7 +173,8 @@ def detect_encounters(tracks: list) -> list[dict]:
             if s[0] - run[-1][0] <= RESAMPLE_S * 1.5:
                 run.append(s)
             else:
-                runs.append(run); run = [s]
+                runs.append(run)
+                run = [s]
         runs.append(run)
         for run in runs:
             if len(run) < max(2, need):

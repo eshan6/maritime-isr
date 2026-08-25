@@ -1060,3 +1060,114 @@ python -m maritime_isr.cli voi list --top 10
 ranked list carries all three factor kinds.
 *Failure:* an empty `interactions` line means the candidate search regressed —
 read `_ring_for` before touching a threshold.
+
+---
+
+## The voyage she declares, and the four defects between the message and the rule (ADR-035)
+
+Everything still open from the last session, closed. The largest was a capability
+the brief calls out in its own words as *"one of the strongest and simplest
+suspicion factors available"* — and it was not built because **nothing landed a
+declared destination.** AIS message 5 carries destination, ETA and draught; the
+generator emitted no message 5; the live connector filtered to `PositionReport`
+and dropped the rest. A comparison against a column that does not exist is a
+detector that can never fire, so the column came first.
+
+**What landed.** A canonical `VoyageDeclaration`, separate from `PositionReport`
+because message 5 is a separate message with its own cadence and nullity. A
+connector that parses `ShipStaticData` and resolves an ETA that has no year in
+it. A generator that declares a destination on **every ordinary port call,
+honestly** — 3,091 declarations over 131 hulls, because a rule tested only
+against liars measures recall and says nothing about precision. Three new hulls:
+two that lie and one diverted honestly mid-passage, which is the decoy that
+forces the rule to ask "was she *ever* heading there" rather than "did she
+arrive".
+
+`destination` is landed as free text and deliberately not normalised. "JNPT",
+"NHAVA SHEVA", "INNSA" and "JNPT>>SIKKA" are all things real transmitters send;
+resolving them is a judgement with a confidence and belongs downstream.
+`resolve_destination` matches exactly and returns None otherwise — no fuzzy
+matching, because a missed resolution costs a finding and a wrong one tells a
+watchkeeper a ship is lying about a port we picked for her.
+
+**Four defects, found by watching the alert count.**
+
+*43 alerts on 41 innocent hulls.* Required speed is distance over *remaining*
+time, so near arrival it diverges: a vessel an hour from her berth on a stale
+ETA "needs 200 knots". She is late. The test is now a six-hour shortfall, and an
+expired ETA is not checked at all — the brief's question is forward-looking.
+
+*The heading check read every fix after the declaration, with no end*, scoring
+her arrival, her berth and her next voyage against a port she left days earlier.
+
+*A `timestamp[us]` column divided as if nanoseconds.* Nineteen hours came out as
+68 seconds, so the check answered "not enough track to say which way she went"
+about the one hull written to steam the wrong way. `tracks.kalman.epoch_s`
+exists because this atomised every track once before.
+
+*Eleven honest hulls called liars for swinging on their cables.* A ship at
+anchor yaws through the compass, so every step is "away" and the fraction is a
+perfect 1.0 — on a question that should never have been asked.
+
+43 → 13 → **2**, and the two are the two hulls written to lie.
+
+**Also closed.**
+
+*Seed 9 would not generate.* `background.py` budgeted a port call from the
+moment she sails and never subtracted the passage; bg_8 leaves Kochi for Mumbai,
+two and a half days the arithmetic never counted, and her departure landed 11.3
+hours past the corpus window. Seeds 7-10 now all generate.
+
+*Distance from shore was a proxy.* The vessel-type classifier used distance to
+the nearest gazetteer port, so a hull five miles off an empty beach scored as
+120 km from shore. Now computed from the same 1 km land mask the SAR detector
+and the validator use. **Operating depth stays absent and is not faked.**
+
+*`rendezvousing`* is named by the brief and is not a property of one track; it
+lives in `tracks.interactions` as `converging_and_holding` and
+`transfer_pattern`, and the activity module now says so.
+
+*The MMSI checks* stay unmeasurable on synthetic data, recorded as a decision:
+constructing a flag contradiction needs a valid country prefix and could collide
+with a real hull, and a safety invariant with an exception is one somebody
+widens later.
+
+*A re-export removed as "unused"* broke three modules on import — restored with
+the marker that says why it is there.
+
+*The fishing-fleet decoy could start on land, and fixing it re-rolled the whole
+fleet.* Forty hulls scatter on a uniform bearing 40-95 nm from a ground off
+Gujarat, and a third of that circle is the Saurashtra peninsula.
+`generate_track` routes transit legs around land but cannot route a vessel that
+begins on it. The correction is the shared `nearest_water` — and the first
+version of it moved one `r.uniform` call past another, which re-rolled every
+parameter of all forty hulls and dropped fishing recall from 86% to 73%. A
+corpus resample reads exactly like a classifier regression. Draw order is now
+preserved deliberately, with a comment saying why, so the fix moves the hulls
+that were on land and nothing else.
+
+*The original note:* Forty hulls are scattered on a
+uniform bearing 40-95 nm from a ground off Gujarat, and a third of that circle
+is the Saurashtra peninsula. `generate_track` routes transit legs around land
+but cannot route a vessel that begins on it. Latent until an unrelated change
+shifted the RNG stream — which is how every seed-dependent placement bug in this
+generator has surfaced. Now corrected through the shared `nearest_water`.
+
+**Corpus, seed 7:** 27 alerts across 10 detectors. Dark-contact precision 100%,
+recall 62% (5 of 8). Recall read 43%, then 75%, then 62% across this session's
+runs, every move a fresh RNG draw rather than a change in capability; precision
+held at 100% throughout, and it is the number ADR-004 constrains.
+Synthetic-suite figures.
+
+Verify:
+
+```
+python -m maritime_isr.cli scenario generate --seed 7
+rm -f data/graph.sqlite && python tools/run_scenario_pipeline.py
+python -m pytest tests/test_voyage.py -q
+```
+
+*Success:* the pipeline prints `declarations : 3,091 row(s) over 131 hull(s)`
+and `voyage_contradiction 2 alert(s)`.
+*Failure:* a voyage count in the dozens means a gate regressed — read
+`MIN_SHORTFALL_H` and `UNDERWAY_MIN_KN` before touching anything else.
