@@ -297,11 +297,33 @@ def test_every_synthetic_mmsi_is_in_the_reserved_block(world):
         assert is_synthetic_mmsi(m), f"MMSI {m} outside {MMSI_MIN}-{MMSI_MAX}"
 
 
+#: Hulls allowed to wear a malformed IMO, because their scenario *is* the
+#: malformation. Named here as well as declared in the truth row, so widening
+#: the exception takes an edit in two places and cannot happen by accident.
+IMO_CHECKSUM_EXEMPT = {"vessel:bad_imo_hull"}
+
+
 def test_every_synthetic_imo_is_reserved_and_checksum_valid(world):
+    """The band reservation is absolute; the checksum has exactly one exception.
+
+    Being inside 1000000-1999999 is what stops a synthetic hull wearing a real
+    vessel's identity, and nothing is ever exempt from it. The checksum is a
+    different guarantee — it exists so the corpus exercises `normalise_imo`'s
+    validation rather than skipping it — and F1's whole scenario is a hull
+    broadcasting a number that fails it (ADR-034). A corpus where every IMO
+    passes exercises the passing branch 238 times and the failing branch never.
+    """
     imos, _, _ = world.all_identifiers()
     assert imos
+    exempt = {int(world.vessels[e].imo) for e in IMO_CHECKSUM_EXEMPT
+              if e in world.vessels and world.vessels[e].imo}
     for i in imos:
         assert is_synthetic_imo(i), f"IMO {i} outside {IMO_MIN}-{IMO_MAX}"
+        if int(i) in exempt:
+            assert not imo_checksum_ok(str(i)), (
+                f"IMO {i} is listed as deliberately malformed but passes its "
+                f"check digit — the scenario it exists for cannot fire")
+            continue
         assert imo_checksum_ok(str(i)), (
             f"IMO {i} fails its own check digit — it would be rejected by "
             f"normalise_imo and never exercise the validator it exists to test")
@@ -606,10 +628,18 @@ def test_decoy_to_true_positive_ratio_is_meaningful(world):
         f"precision measured on this corpus would be flattered")
 
 
-def test_only_c3_is_exempt_from_a_physics_rule(world):
+def test_only_two_scenarios_are_exempt_from_a_corpus_invariant(world):
+    """The exemption mechanism is narrow on purpose and must stay countable.
+
+    Each entry costs a validator its authority over one scenario, so the set is
+    enumerated here rather than merely bounded: adding a third takes an edit to
+    this test and a reader who has to justify it. C3 must break the implied-speed
+    envelope — an impossible jump is the scenario. F1 must break the IMO check
+    digit, for the same kind of reason (ADR-034).
+    """
     ex = world.truth.physics_exemptions()
-    assert set(ex) == {"C3"}, f"unexpected physics exemptions: {ex}"
-    assert ex["C3"] == "implied_speed_envelope"
+    assert ex == {"C3": "implied_speed_envelope", "F1": "identifiers"}, (
+        f"unexpected physics exemptions: {ex}")
 
 
 def test_naval_decoy_emits_no_ais_at_all(world):

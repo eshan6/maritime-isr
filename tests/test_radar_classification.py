@@ -271,9 +271,13 @@ def test_a_shadowing_vessel_is_named_as_the_follower():
 
 
 def test_a_transfer_alongside_and_stopped_is_recognised():
-    a = _Track(_leg(1_780_000_000, 60, lat=15.0, lon=66.0, sog=0.3, cog=10.0),
+    # Eighty five-minute steps is 6.7 hours. Sixty was five, which cleared the
+    # old 120-minute floor and does not clear the 360-minute one (ADR-034) —
+    # the fixture describes the behaviour, so it moves when the definition of
+    # "sustained" does.
+    a = _Track(_leg(1_780_000_000, 80, lat=15.0, lon=66.0, sog=0.3, cog=10.0),
                track_id="A")
-    b = _Track(_leg(1_780_000_000, 60, lat=15.0018, lon=66.0, sog=0.3,
+    b = _Track(_leg(1_780_000_000, 80, lat=15.0018, lon=66.0, sog=0.3,
                     cog=200.0), track_id="B")
     got = [i for i in ix.detect_interactions([a, b])
            if i.kind == "transfer_pattern"]

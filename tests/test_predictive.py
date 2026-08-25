@@ -562,6 +562,12 @@ def _lawnmower(track_id="SYN-TEST:0001", t0=1_780_000_000):
     in the merchant band — and it only passed because the threshold was wrong
     in the same direction. Twelve legs of 50 minutes is 1.2 legs/hour, which is
     what the behaviour actually looks like.
+
+    **And she runs her lines at seven knots, not four.** At four she was inside
+    the trawling band, and a lawnmower at trawling speed is a trawler — the
+    geometry of working a fishing ground and of running a survey grid is the
+    same, and only speed separates them (ADR-034). The fixture was describing a
+    fishing vessel and calling it a survey.
     """
     rows = []
     for leg in range(12):
@@ -569,7 +575,7 @@ def _lawnmower(track_id="SYN-TEST:0001", t0=1_780_000_000):
         rows += _leg(t0 + leg * 3_000, 6,
                      lat=14.0 + 0.02 * leg,
                      lon=(66.0 if east else 66.25),
-                     sog=4.0, cog=(90.0 if east else 270.0),
+                     sog=7.0, cog=(90.0 if east else 270.0),
                      step_s=600, dlon=(0.05 if east else -0.05))
     tr = _Track(rows, track_id=track_id)
     tr.has_identity = False
@@ -766,16 +772,22 @@ def classified_fleet():
         if not r.has("ais_position") or not r.has("gfw_vessel_identity"):
             pytest.skip("corpus lacks AIS positions or vessel identity")
         pos = pd.DataFrame(r.rows("SELECT * FROM ais_position"))
+        # Keyed on the *broadcast* identity: since ADR-034 the corpus also
+        # carries a registry attestation per hull, which has no MMSI and would
+        # otherwise collapse every lookup onto one empty key.
         ident = {str(x["mmsi"]): x for x in r.rows(
-            "SELECT mmsi, vessel_class FROM gfw_vessel_identity "
-            "WHERE mmsi IS NOT NULL")}
+            "SELECT mmsi, vessel_id, vessel_class FROM gfw_vessel_identity "
+            "WHERE mmsi IS NOT NULL AND mmsi <> '' "
+            "AND record_kind = 'self_reported'")}
     if pos.empty:
         pytest.skip("no AIS positions landed")
     tracks, _ = build_tracks(pos, source=AIS)
     out = []
     for t in tracks:
-        cls = (ident.get(str(t.mmsi)) or {}).get("vessel_class") or "unknown"
-        out.append((cls, act.classify_activity(t)))
+        row = ident.get(str(t.mmsi)) or {}
+        out.append((row.get("vessel_id") or "unknown",
+                    row.get("vessel_class") or "unknown",
+                    act.classify_activity(t)))
     return out
 
 
@@ -786,7 +798,7 @@ def test_fishing_vessels_are_recognised_as_fishing(classified_fleet):
     gate sat above the population it was meant to admit, so no trawler in the
     corpus could ever reach it.
     """
-    fish = [a for cls, a in classified_fleet if cls == "fishing"]
+    fish = [a for _, cls, a in classified_fleet if cls == "fishing"]
     if len(fish) < 10:
         pytest.skip("too few fishing vessels in this corpus to measure")
     hit = sum(1 for a in fish if a.activity == "fishing")
@@ -798,7 +810,8 @@ def test_fishing_vessels_are_recognised_as_fishing(classified_fleet):
 
 
 def test_the_fishing_class_is_not_claimed_on_merchants(classified_fleet):
-    fish_calls = [cls for cls, a in classified_fleet if a.activity == "fishing"]
+    fish_calls = [cls for _, cls, a in classified_fleet
+                  if a.activity == "fishing"]
     if len(fish_calls) < 5:
         pytest.skip("too few fishing calls to measure precision")
     right = sum(1 for c in fish_calls if c == "fishing")
@@ -815,8 +828,13 @@ def test_no_merchant_is_called_a_survey_pattern(classified_fleet):
     0.216 legs/hour, a bulker at 0.258, a general cargo at 0.174 — because
     `SURVEY_MIN_LEGS_PER_HOUR` was 0.1, below the merchant p90 of 0.281.
     """
-    bad = [cls for cls, a in classified_fleet
+    # F6 is cast as general cargo and is *actually* running a survey (ADR-034),
+    # so she is a merchant hull the rule is right about. Excluded by name rather
+    # than by loosening the class list, which would blind the guard to the whole
+    # general-cargo population it was written for.
+    bad = [cls for vid, cls, a in classified_fleet
            if a.activity == "survey_pattern"
+           and vid != "vessel:survey_runner"
            and cls in ("product_tanker", "bulker", "general_cargo", "Aframax",
                        "Suezmax", "VLCC", "reefer")]
     assert not bad, (
@@ -832,7 +850,7 @@ def collections_counter(items):
 def test_merchants_on_passage_are_recognised_as_transiting(classified_fleet):
     """The commonest thing in the picture must be got right, or nothing else
     on the list can be trusted."""
-    merch = [a for cls, a in classified_fleet
+    merch = [a for _, cls, a in classified_fleet
              if cls in ("product_tanker", "bulker", "general_cargo", "Aframax",
                         "Suezmax", "VLCC", "reefer")]
     if len(merch) < 20:

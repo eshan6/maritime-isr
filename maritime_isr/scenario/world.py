@@ -132,6 +132,13 @@ class ScenarioWorld:
     #: Set by scenarios that clipped something, so the report can say so.
     clipped: list[str] = field(default_factory=list)
 
+    #: entity_id -> {name, call_sign, vessel_class} as a **registry** holds it,
+    #: which is not always what the vessel broadcasts (ADR-034). Every hull gets
+    #: one; a handful disagree. Without a second attestation the registry
+    #: consistency check has nothing to compare against and can only ever answer
+    #: "cannot check". Built by `cast.build_registry_attestations`.
+    registry_attestations: dict = field(default_factory=dict)
+
     _next_serial: int = 0
     #: entity_id -> [(t_start, t_end, label)] — the occupancy calendar that
     #: keeps one hull from being in two places at once.

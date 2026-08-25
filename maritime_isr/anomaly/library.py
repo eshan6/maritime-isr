@@ -765,7 +765,16 @@ NOTABLE_INTERACTIONS = {
     "transfer_pattern": 0.80,
     "shadowing": 0.62,
     "converging_and_holding": 0.55,
-    "moving_in_company": 0.40,
+    # **Raised from 0.40 when the persistence floor was re-derived (ADR-034).**
+    # Company is the weakest of the four and the easiest to confuse with two
+    # ships sharing a lane, which is why it was set below the others and, at
+    # 0.40 x a typical 0.75 confidence, below the gate — it could not fire at
+    # all. That was the right call against a 120-minute floor. It is the wrong
+    # one against 360 minutes: the longest coincidental formation measured in
+    # the picture is 4.7 hours, so anything that now reaches this dict has
+    # already survived a filter that lane traffic does not. A formation held
+    # for a full watch in open water is worth an operator's eye.
+    "moving_in_company": 0.50,
 }
 
 

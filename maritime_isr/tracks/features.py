@@ -46,9 +46,50 @@ def _hav_m(lat1, lon1, lat2, lon2):
     return 2 * r * math.asin(math.sqrt(a))
 
 
+def _hav_m_vec(lat1, lon1, lat2, lon2):
+    """The same great-circle distance over numpy arrays."""
+    r = 6_371_000.0
+    p1, p2 = np.radians(lat1), np.radians(lat2)
+    dp, dl = np.radians(lat2 - lat1), np.radians(lon2 - lon1)
+    a = np.sin(dp / 2) ** 2 + np.cos(p1) * np.cos(p2) * np.sin(dl / 2) ** 2
+    return 2 * r * np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0)))
+
+
+#: How far apart two bracketing fixes may be **in space** and still be
+#: interpolated across, however long the gap between them in time.
+#:
+#: **This exists because the time-only rule silently deleted every stopped
+#: vessel from every resampled track.** AIS cadence is state-dependent by
+#: design: ITU-R M.1371 has a Class A set report every 10 seconds under way and
+#: every 3 minutes at anchor, and reception thinning multiplies both. In this
+#: corpus a moving hull lands a fix about every 4 minutes and a stopped one
+#: about every 65. The old gap allowance was built from the track's *median*
+#: report interval — a single number for a track whose cadence varies eighteen
+#: fold within itself — so a vessel that stopped mid-passage had the stopped
+#: part of her track dropped by the resampler, and with it every low-speed
+#: behaviour the product exists to notice: loitering, anchoring, and a
+#: ship-to-ship transfer between two hulls that were both transmitting.
+#:
+#: The finding that exposed it: F11 was written as a nine-hour transfer with
+#: both parties visible, and produced **seven** usable pair samples. The
+#: transfer branch of the interaction rule could not have fired on any
+#: AIS-visible transfer at any coverage this model produces (ADR-034).
+#:
+#: A distance test is the honest one, because interpolating across a gap is
+#: only a fabrication if the vessel could have gone somewhere. A hull at 0.4
+#: knots covers 740 m in an hour: the interpolation is not a guess, it is
+#: arithmetic. A hull at 10 knots covers 18 km, and that gap stays a gap.
+RESAMPLE_MAX_INTERP_M = 1000.0
+
+
 def resample_track(track, step_s: int = RESAMPLE_S) -> pd.DataFrame:
-    """Linear resample of smoothed points to a common grid (no extrapolation
-    across gaps > 2× step — a silent ship has no resampled presence)."""
+    """Linear resample of smoothed points to a common grid.
+
+    No extrapolation across a gap the vessel could have travelled through —
+    a silent ship that could have gone anywhere has no resampled presence. A
+    silent ship that demonstrably did *not* go anywhere still does; see
+    `RESAMPLE_MAX_INTERP_M`.
+    """
     pts = track.points[track.points.quality != "outlier"]
     if len(pts) < 2:
         return pd.DataFrame(columns=["t", "lat", "lon", "sog_kn"])
@@ -56,13 +97,17 @@ def resample_track(track, step_s: int = RESAMPLE_S) -> pd.DataFrame:
     grid = np.arange(math.ceil(t[0] / step_s) * step_s, t[-1] + 1, step_s)
     if len(grid) == 0:
         return pd.DataFrame(columns=["t", "lat", "lon", "sog_kn"])
-    lat = np.interp(grid, t, pts.lat.to_numpy())
-    lon = np.interp(grid, t, pts.lon.to_numpy())
+    plat, plon = pts.lat.to_numpy(), pts.lon.to_numpy()
+    lat = np.interp(grid, t, plat)
+    lon = np.interp(grid, t, plon)
     sog = np.interp(grid, t, pts.sog_kn.to_numpy())
     # kill grid points whose bracketing raw interval is a gap
     idx = np.searchsorted(t, grid, side="right") - 1
     idx = np.clip(idx, 0, len(t) - 2)
-    ok = (t[idx + 1] - t[idx]) <= 2 * max(step_s, track.median_report_s * 3)
+    within_time = (t[idx + 1] - t[idx]) <= 2 * max(step_s,
+                                                   track.median_report_s * 3)
+    moved_m = _hav_m_vec(plat[idx], plon[idx], plat[idx + 1], plon[idx + 1])
+    ok = within_time | (moved_m <= RESAMPLE_MAX_INTERP_M)
     return pd.DataFrame({"t": grid[ok], "lat": lat[ok], "lon": lon[ok],
                          "sog_kn": sog[ok]})
 
