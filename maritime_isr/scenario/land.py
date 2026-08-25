@@ -409,7 +409,16 @@ def land_world(world: ScenarioWorld) -> dict[str, int]:
                 if iv.valid_to is not None and iv.valid_to == nxt)
             row = dict(
                 vessel_id=v.entity_id,
-                record_kind="registry",
+                # **What she broadcast**, not what a registry holds (ADR-034).
+                # The real GFW connector lands both kinds and says why —
+                # "disagreement with the registry is a signal in its own right,
+                # so we keep both" — but the generator wrote every synthetic row
+                # as `registry`, so the corpus had one attestation per hull and
+                # the consistency check could only ever answer "cannot check".
+                # A scenario identity is a broadcast identity: it changes when
+                # the vessel changes it, which is the definition of the
+                # self-reported record.
+                record_kind="self_reported",
                 mmsi=str(snap.get("mmsi") or ""),
                 imo=str(snap.get("imo") or ""),
                 ship_name=snap.get("name"),
@@ -432,6 +441,43 @@ def land_world(world: ScenarioWorld) -> dict[str, int]:
             )
             identity_rows.append(_stamp(
                 row, source_ref=f"{v.entity_id}:identity:{i}", acquired_at=t))
+
+    # ---- the registry's own attestation (ADR-034) ----
+    #
+    # The second `record_kind` the real connector already lands, and the one the
+    # generator never wrote: who the **registry** has on file. Almost always the
+    # same as what she broadcasts; for four hulls, not.
+    #
+    # One interval per hull, spanning the whole window, because a registry entry
+    # is a record rather than a sighting — it does not change when the vessel
+    # changes what she transmits, and that immobility is exactly what makes it
+    # useful as a comparison. The IMO is the *registered* one, so the hull
+    # broadcasting a corrupted number disagrees with her own registry entry as
+    # well as failing the arithmetic.
+    for v in world.vessels.values():
+        att = (world.registry_attestations or {}).get(v.entity_id)
+        if not att:
+            continue
+        row = dict(
+            vessel_id=v.entity_id,
+            record_kind="registry",
+            mmsi=str(att.get("mmsi") or ""),
+            imo=str(att.get("imo") or ""),
+            ship_name=att.get("name"),
+            normalised_name=(att.get("name") or "").upper() or None,
+            call_sign=att.get("call_sign"),
+            flag=v.flag,
+            length_m=v.length_m, width_m=v.beam_m, draught_m=v.draught_m,
+            tonnage_gt=v.dwt,
+            vessel_class=att.get("vessel_class"),
+            gear_types=None,
+            registry_source="synthetic-scenario-registry",
+            valid_from=world.t0, valid_to=world.t1,
+            interval_superseded=False,
+        )
+        identity_rows.append(_stamp(
+            row, source_ref=f"{v.entity_id}:registry", acquired_at=world.t0))
+
     land(identity_rows, T_IDENTITY,
          ("vessel_id", "record_kind", "mmsi", "ship_name", "valid_from"),
          day_field="valid_from")

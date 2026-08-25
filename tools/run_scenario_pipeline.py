@@ -515,6 +515,68 @@ def connectivity(store: GraphStore) -> None:
               f"{with_3} with >=3")
 
 
+#: Identity records that describe what the vessel *said about herself*. GFW
+#: publishes these as `self_reported`; everything else in the table is somebody
+#: else attesting to the same hull.
+_BROADCAST_KINDS = ("self_reported",)
+
+
+def _current_identities(reader) -> list[dict]:
+    """One current row per hull, with the registry's attestation attached.
+
+    **The previous version of this query destroyed the evidence the identity
+    check needs.** It took the single most recent row per `vessel_id`, which
+    collapses a hull's broadcast identity and her registry entry into whichever
+    happened to sort first — so `check_registry_consistency` was handed one
+    attestation, had nothing to compare it against, and returned "cannot check"
+    for all 230 hulls. The real GFW connector has landed both record kinds from
+    the beginning, with a comment saying exactly why: *"disagreement with the
+    registry is a signal in its own right, so we keep both."* The query threw
+    the second one away.
+
+    So: the current row per (hull, record kind), then the broadcast row as the
+    subject with the registry row attached as `registry`. A hull with only one
+    kind still yields a row — she is simply not checkable for consistency, and
+    that stays an honest "cannot check" rather than becoming an error.
+    """
+    rows = reader.rows("""
+        SELECT * FROM (
+          SELECT *, row_number() OVER (
+            PARTITION BY vessel_id, record_kind
+            ORDER BY (valid_to IS NULL) DESC, valid_from DESC NULLS LAST
+          ) AS _rn FROM gfw_vessel_identity) WHERE _rn = 1
+    """)
+
+    by_vessel: dict[str, dict[str, dict]] = {}
+    for r in rows:
+        by_vessel.setdefault(r.get("vessel_id"), {})[r.get("record_kind")] = r
+
+    out: list[dict] = []
+    for vid, kinds in by_vessel.items():
+        if not vid:
+            continue
+        broadcast = next((kinds[k] for k in _BROADCAST_KINDS if k in kinds),
+                         None)
+        attestations = {k: v for k, v in kinds.items()
+                        if k not in _BROADCAST_KINDS}
+        if broadcast is None:
+            # Nothing self-reported: the registry record is all we hold, and a
+            # registry cannot contradict itself. Pass it through as the subject
+            # so the arithmetic checks still run on whatever identifiers it
+            # carries, with no comparison attached.
+            broadcast = next(iter(kinds.values()))
+            attestations = {}
+        row = dict(broadcast)
+        if attestations:
+            att = next(iter(attestations.values()))
+            row["registry"] = dict(
+                name=att.get("ship_name"), call_sign=att.get("call_sign"),
+                vessel_class=att.get("vessel_class"))
+            row["registry_record_kind"] = att.get("record_kind")
+        out.append(row)
+    return out
+
+
 def _area2_inputs():
     """Current identities and the per-area baseline index (ADR-032).
 
@@ -533,13 +595,7 @@ def _area2_inputs():
     index = None
     with open_reader() as reader:
         if reader.has("gfw_vessel_identity"):
-            identities = reader.rows("""
-                SELECT * FROM (
-                  SELECT *, row_number() OVER (
-                    PARTITION BY vessel_id
-                    ORDER BY (valid_to IS NULL) DESC, valid_from DESC NULLS LAST
-                  ) AS _rn FROM gfw_vessel_identity) WHERE _rn = 1
-            """)
+            identities = _current_identities(reader)
         if reader.has("ais_position"):
             pos = pd.DataFrame(reader.rows(
                 "SELECT vessel_id, mmsi, lat, lon, sog_kn, cog_deg, ts, "

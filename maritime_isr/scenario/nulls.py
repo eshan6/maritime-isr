@@ -57,11 +57,23 @@ REQUIRED: dict[tuple[str, str], set[str]] = {
         "vessel:spine", "vessel:identity_break", "vessel:zombie",
         "vessel:brazen", "vessel:converge_b", "vessel:clone_real",
         "vessel:clone_ghost", "vessel:voyage_flag",
+        # F1's whole scenario is a broadcast IMO that fails its check digit.
+        # A masked IMO deletes the thing being tested, and the check then
+        # answers "no IMO on record, cannot be checked" — which is what it
+        # answered for 164 of 222 hulls and why it had no positive case.
+        "vessel:bad_imo_hull",
     },
     # ADR-018's call-sign tier is policy set before it can fire; keeping a few
     # populated is what lets it fire at all.
     ("gfw_vessel_identity", "call_sign"): {
         "vessel:spine", "vessel:brazen", "vessel:identity_break",
+        # F2 broadcasts a call sign the registry does not hold, and F4 is the
+        # decoy that proves the comparison is not fired by punctuation. Both
+        # need the field on *both* attestations — a masked call sign on either
+        # side is a gap, and the check correctly refuses to read a gap as a
+        # disagreement. 55.3% of real rows are null here, so leaving these to
+        # the marginal was a coin flip on whether the scenario existed at all.
+        "vessel:wrong_call_sign", "vessel:punctuation_twin",
     },
 }
 

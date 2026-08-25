@@ -321,6 +321,75 @@ ZONE_PRINCIPALS: tuple[CastEntry, ...] = (
               "lawful", size=0.45),
 )
 
+#: The factor-coverage principals (ADR-034). Appended last, after the zone
+#: cast, for the third time and the same reason: a new group must not renumber
+#: an existing serial.
+#:
+#: **Why this group exists at all.** Areas 2 and 3 of the IDEX brief added three
+#: classes of factor — a contradicted identity, a notable activity, a
+#: relationship between two hulls — and every one of them fired zero times on
+#: the corpus. Each zero had a defensible cause, and together they meant the
+#: ranked list never gained the factor classes those areas were built to supply.
+#: The brief's own test is explicit: *"if adding an area does not change what
+#: appears on that list, the area was built in isolation."* The fix is here and
+#: not in the thresholds. A rule that only fires once it has been loosened has
+#: been fitted to the absence of evidence.
+#:
+#: Each true positive is paired with a decoy that shares its surface and is
+#: innocent, because a group of positives measures recall and says nothing about
+#: precision — and precision is the binding constraint (ADR-004).
+FACTOR_PRINCIPALS: tuple[CastEntry, ...] = (
+    # ---- identity: three contradictions and two things that only look like one
+    CastEntry("bad_imo_hull", "bulker", "true_anomaly",
+              "F1: broadcasts an IMO that fails its own check digit",
+              size=0.55),
+    CastEntry("wrong_call_sign", "product_tanker", "true_anomaly",
+              "F2: broadcasts a call sign the registry does not hold for her",
+              size=0.4),
+    CastEntry("registry_renamed", "general_cargo", "true_anomaly",
+              "F3: broadcasts a name that is not the registered one", size=0.3),
+    CastEntry("punctuation_twin", "general_cargo", "decoy",
+              "F4: registry spells her name with a prefix and a full stop — "
+              "the same hull, and the normaliser must say so", size=0.3),
+    CastEntry("class_quibble", "bulker", "decoy",
+              "F5: registry calls her a bulker, she broadcasts general cargo — "
+              "two registries disagreeing about one hull, not a lie", size=0.5),
+
+    # ---- activity: a real survey, a real erratic track, and the passage that
+    #      used to be mistaken for both
+    CastEntry("survey_runner", "general_cargo", "true_anomaly",
+              "F6: a genuine lawnmower survey pattern off Karnataka",
+              size=0.25),
+    CastEntry("erratic_runner", "product_tanker", "true_anomaly",
+              "F7: turning far more than passage requires, going nowhere",
+              size=0.35),
+    CastEntry("rotation_liner", "general_cargo", "decoy",
+              "F8: a there-and-back coastal rotation — long legs and "
+              "reciprocal turns, and emphatically not a survey", size=0.45),
+
+    # ---- interaction: the three relationships, both parties visible
+    CastEntry("company_leader", "bulker", "true_anomaly",
+              "F9: leads a two-ship formation across the Arabian Sea",
+              size=0.6),
+    CastEntry("company_escort", "general_cargo", "true_anomaly",
+              "F9: holds station 1.2 km off her quarter for eleven hours",
+              size=0.35),
+    CastEntry("shadow_target", "product_tanker", "true_anomaly",
+              "F10: the vessel being followed", size=0.5),
+    CastEntry("shadow_follower", "general_cargo", "true_anomaly",
+              "F10: sits dead astern of her for nine hours", size=0.3),
+    CastEntry("transfer_open_a", "product_tanker", "true_anomaly",
+              "F11: a ship-to-ship transfer with BOTH parties transmitting — "
+              "the case the corpus could not supply", size=0.55),
+    CastEntry("transfer_open_b", "Aframax", "true_anomaly",
+              "F11: the receiving hull, also transmitting", size=0.7),
+    CastEntry("lane_mate_a", "bulker", "decoy",
+              "F12: shares a coastal lane with another hull for hours — same "
+              "course, wandering gap. Traffic, not a formation", size=0.6),
+    CastEntry("lane_mate_b", "general_cargo", "decoy",
+              "F12: the other half of that ordinary lane traffic", size=0.4),
+)
+
 #: The fishing-fleet-aggregation decoy. Sized to the phenomenon, not to the
 #: headline cast count — see the module docstring.
 FISHING_FLEET_SIZE = 40
@@ -374,7 +443,8 @@ def build_vessels(world: ScenarioWorld) -> None:
     # ...and the radar cast after even that, so adding it left every serial in
     # the corpus exactly where it was. See RADAR_PRINCIPALS.
     # ...and the zone cast after even that, for the same reason again.
-    for entry in (*RADAR_PRINCIPALS, *ZONE_PRINCIPALS):
+    # ...and the factor cast after even that, for the same reason a third time.
+    for entry in (*RADAR_PRINCIPALS, *ZONE_PRINCIPALS, *FACTOR_PRINCIPALS):
         serial = world.take_serial()
         v = make_vessel(
             world.rng, world.profile, entry.vessel_class,
@@ -384,6 +454,100 @@ def build_vessels(world: ScenarioWorld) -> None:
             size=entry.size,
         )
         world.add_vessel(v)
+
+    # Order matters: the registry is written from the hulls as *registered*,
+    # and only then does F1 start broadcasting a corrupted number. Reversing
+    # these two would put the typo in the registry as well, and a typo both
+    # sides agree on is not a contradiction — it is a fact.
+    build_registry_attestations(world)
+    _break_one_imo(world)
+
+
+def _set_initial(world: ScenarioWorld, key: str, field_name: str,
+                 value) -> None:
+    """Rewrite a hull's *starting* identity in place, ledger included.
+
+    Not `identity.change()`, which is the wrong verb here: a change opens a new
+    interval and marks the old one superseded, which says the vessel was
+    renumbered mid-window. These hulls did not change anything — they have
+    broadcast this value all along. The SAGA name-collision decoy above rewrites
+    its intervals the same way and for the same reason.
+    """
+    v = world.vessel(entity_id(key))
+    setattr(v, field_name, value)
+    for iv in world.identity.intervals:
+        if iv.vessel_entity_id == v.entity_id and iv.field_name == field_name:
+            iv.value = value
+
+
+def _break_one_imo(world: ScenarioWorld) -> None:
+    """F1 broadcasts an IMO that fails its own check digit.
+
+    See `identifiers.break_check_digit` for why corrupting the hull's own
+    number is both realistic and safe.
+    """
+    from .identifiers import break_check_digit
+    v = world.vessel(entity_id("bad_imo_hull"))
+    # An int, like every other minted IMO: the corpus-wide collision guard
+    # sorts these together and a lone string breaks the sort.
+    _set_initial(world, "bad_imo_hull", "imo", break_check_digit(v.imo))
+
+
+#: What the registry says, for the hulls where it says something different from
+#: what the vessel broadcasts. Everything not named here gets an attestation
+#: that agrees — see `build_registry_attestations`.
+#:
+#: **The disagreements are graded on purpose.** A call sign is issued with the
+#: flag and is a strong signal; a name lags a sale and is a lead; a vessel class
+#: is a judgement two registries can honestly differ on. The three true
+#: positives sit on the first two and the decoys sit on the third and on
+#: punctuation, so the measurement separates "the check works" from "the check
+#: fires on anything that is not byte-identical".
+REGISTRY_DISAGREEMENTS: dict[str, dict] = {
+    "wrong_call_sign": {"call_sign": "9HA4271"},
+    "registry_renamed": {"name": "ANANTA PRIYA"},
+    "punctuation_twin": {"name": None},        # filled in below: "MV <name>."
+    "class_quibble": {"vessel_class": "general_cargo"},
+}
+
+
+def build_registry_attestations(world: ScenarioWorld) -> None:
+    """Give every hull a second, independent attestation of who she is.
+
+    A declared identity can only be *contradicted* if something else attests to
+    the same hull. The corpus had exactly one attestation per vessel, so
+    `check_registry_consistency` had nothing to compare against and returned
+    "cannot check" 230 times out of 230 — a detector with no denominator.
+
+    So every hull now carries a registry record as well as what she broadcasts.
+    Almost all of them agree, which is the point: the honest majority is the
+    denominator that makes a precision figure mean something. Four hulls
+    disagree, two of them innocently.
+
+    This lands in `gfw_vessel_identity` under a second `record_kind`, not in a
+    new table. GFW publishes identity from more than one attestation already,
+    and inventing a synthetic-only table would have built a code path real data
+    can never travel — the thing ADR-019 exists to prevent.
+    """
+    attest: dict[str, dict] = {}
+    for v in world.vessels.values():
+        attest[v.entity_id] = dict(
+            name=v.name, call_sign=v.call_sign, vessel_class=v.vessel_class,
+            mmsi=v.mmsi, imo=v.imo)
+
+    for key, changes in REGISTRY_DISAGREEMENTS.items():
+        eid = entity_id(key)
+        if eid not in attest:
+            continue
+        for f, value in changes.items():
+            if key == "punctuation_twin" and f == "name":
+                # The same name, spelled the way a registry spells it. Any
+                # normaliser worth the name collapses these to one string; a
+                # check that fires here would fire on a third of the fleet.
+                value = f"M.V. {attest[eid]['name']}."
+            attest[eid][f] = value
+
+    world.registry_attestations = attest
 
 
 def build_ownership(world: ScenarioWorld) -> None:

@@ -54,6 +54,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Optional, Sequence
 
+import h3
 import numpy as np
 
 from .. import h3util as tiling
@@ -77,42 +78,103 @@ INTERACTIONS: dict[str, str] = {
                         "pass cargo — the ship-to-ship signature",
 }
 
-#: The H3 resolution pair candidates are bucketed at. Res 6 cells are ~3 km
-#: across; with the surrounding ring the neighbourhood is roughly 9 km, which
-#: comfortably contains the widest interaction this module will claim. Same
-#: hash-join discipline the whole architecture turns on (CLAUDE.md §3) — no
-#: O(n²) distance sweep over 1,300 tracks.
+#: The H3 resolution pair candidates are bucketed at. Same hash-join discipline
+#: the whole architecture turns on (CLAUDE.md §3) — no O(n²) distance sweep over
+#: 1,300 tracks.
+#:
+#: **The ring size is computed, not assumed, and the first version assumed.** It
+#: bucketed at res 6, took the one-ring, and the comment said that was "roughly
+#: 9 km, which comfortably contains the widest interaction this module will
+#: claim". It is not. A res-6 hexagon has an edge of about 3.7 km, so two points
+#: 9.26 km apart can sit near opposite far corners of cells nearly three rings
+#: apart, and every such pair was dropped before it was ever measured. The
+#: failure is invisible from the outside: it produces *fewer* findings, never
+#: wrong ones, so the module reported "no interactions in this corpus" with
+#: total confidence. See `_ring_for`.
 PAIR_RES = tiling.R6
 
-#: Widest separation that can still be a relationship. Two ships five miles
-#: apart are in visual range of each other in good weather and can be working
-#: together; ten miles apart they are simply both at sea.
+#: Widest separation at which a pair is still a **candidate**. Two ships five
+#: miles apart are in visual range of each other in good weather; ten miles
+#: apart they are simply both at sea. This bounds the search, not the claim.
 MAX_SEPARATION_M = 9260.0                      # 5 nautical miles
+
+#: Widest separation at which **company or shadowing** will be claimed.
+#:
+#: **This is the gate that actually separates a formation from traffic, and
+#: persistence never was.** Measured over two independent corpus samples (the
+#: RNG stream shifts when the cast changes, so the background pairs are a fresh
+#: draw each time), mean separation of every pair the rule reported:
+#:
+#:     coincidental pairs, sample 1   6555  8227  7397  6409  8052
+#:     coincidental pairs, sample 2   5745  5337  6100  6651  7764  7814
+#:     authored relationships          589  1191  4245
+#:
+#: Eleven coincidental pairs across two samples, none closer than 5,337 m; the
+#: three authored relationships all inside 4,245 m. The populations do not
+#: overlap and the gap is wide.
+#:
+#: Duration does not separate them at all, which is why the first attempt to
+#: gate on it failed twice. In sample 1 the longest coincidental pair ran 4.7
+#: hours and a 6-hour floor looked decisive; in sample 2 a pair of fishing-fleet
+#: hulls steaming to the same ground held station for **11.7 hours**, longer
+#: than two of the three authored relationships. A fishing fleet transiting
+#: together is a formation by every geometric test and by no useful one, and no
+#: persistence floor will ever exclude it.
+#:
+#: Visual range is not station-keeping range. Vessels deliberately working
+#: together stay close enough to manoeuvre and talk — a mile or two. At four
+#: miles on the same heading they are on the same route.
+#:
+#: The floor rests on the coincidental population, which nobody authored. The
+#: authored positives establish only that 2.5 nm does not exclude a real
+#: relationship; the margin above the closest coincidence is 9%, which is
+#: thinner than this project would like and is stated rather than rounded away.
+COMPANY_MAX_SEPARATION_M = 4630.0              # 2.5 nautical miles
 
 #: Closest approach at which a pair is "alongside" rather than "in company".
 ALONGSIDE_M = 500.0
 
 #: How long a behaviour must persist before it is reported.
 #:
-#: **Set from a sweep, and the sweep found a cliff rather than a plateau.**
-#: Over the combined 1,517-track picture (209 AIS + 1,308 radar):
+#: **Re-derived after the candidate search was fixed, because the first sweep
+#: was run through a broken one.** The earlier value of 120 minutes came from a
+#: sweep that saw 8 pairs at 60 minutes and 0 at 120, and concluded the corpus
+#: contained no formations. Roughly half of all cross-cell pairs were being
+#: discarded before any test ran (see `PAIR_RES` and `consider`), and the corpus
+#: contained no *authored* formations either — so the sweep was measuring the
+#: bug and the gap at once, and neither was visible in the output.
 #:
-#:     min_minutes   interactions   of which real
-#:     60                       8   0 — all background fleet traffic
-#:     120                      0   —
-#:     180                      0   —
+#: Swept again on the fixed search, over a corpus that now contains three
+#: authored relationships (group F) and the same untouched background fleet:
 #:
-#: Every one of the eight at 60 minutes was a pair of `fleet_*` background
-#: vessels sharing a lane, and **none was a scenario transfer pair**. Two
-#: merchants on the same customary route hold a similar course and a roughly
-#: steady gap for an hour as a matter of routine; holding it for two is not
-#: routine. So the gate goes where the evidence puts it, and the honest
-#: consequence is stated rather than tuned away: **this detector produces zero
-#: findings on the current corpus**, because the corpus contains no sustained
-#: formation. That is a fact about the corpus, not a capability claim — the
-#: four behaviours are each driven end to end by a fixture in
-#: `tests/test_radar_classification.py`.
-MIN_MINUTES = 120.0
+#:     min_minutes   found   authored   background
+#:     60               11          3            8
+#:     120               8          3            5
+#:     240               6          3            3
+#:     300               3          3            0
+#:     360               3          3            0
+#:     480               3          3            0
+#:     600               2          2            0
+#:
+#: In that sample the longest coincidental pair ran 4.7 hours, and a six-hour
+#: floor looked decisive. **A second sample falsified that, and the correction
+#: matters more than the number.** Changing the cast shifts the generator's RNG
+#: stream, so the background pairs are a fresh draw; in the next corpus a pair
+#: of fishing-fleet hulls steaming to the same ground held course and station
+#: for **11.7 hours** — longer than two of the three authored relationships.
+#:
+#: A fishing fleet transiting together is a formation by every geometric test
+#: and by no useful one, and **no persistence floor will ever exclude it.**
+#: Duration is not the discriminator here and the first sweep only appeared to
+#: show that it was because it had one sample and a broken candidate search.
+#: What does separate the populations is how close they hold: see
+#: `COMPANY_MAX_SEPARATION_M`, which is the gate that does the work.
+#:
+#: Six hours is kept as a persistence floor because a relationship worth an
+#: operator's time does persist, and because it costs nothing now that the
+#: separation gate carries the discrimination. It is not doing the work and is
+#: no longer described as though it were.
+MIN_MINUTES = 360.0
 
 #: Courses this close count as the same course.
 SAME_COURSE_DEG = 20.0
@@ -263,6 +325,25 @@ def _runs(samples: list[tuple], gap_s: float) -> list[list[tuple]]:
     return out
 
 
+def _ring_for(max_separation_m: float, res: int = PAIR_RES) -> int:
+    """How many H3 rings must be searched to reach `max_separation_m`.
+
+    Two points at most D apart sit in cells whose centres are at most
+    ``D + 2·R`` apart, where R is the furthest a point can be from its own
+    cell's centre — the hexagon's circumradius, which for H3 is its edge
+    length. Adjacent cell centres are ``edge·√3`` apart, so the ring needed is
+    ``ceil((D + 2·edge) / (edge·√3))``.
+
+    Stated as arithmetic rather than as a constant because the constant was
+    wrong and looked right: a one-ring search at res 6 reaches about 6 km, and
+    this module claims 9.26 km. Every pair in the 6-9 km band was dropped
+    before it was measured, and nothing in the output said so.
+    """
+    edge_m = h3.average_hexagon_edge_length(res, unit="km") * 1000.0
+    return max(1, math.ceil((max_separation_m + 2.0 * edge_m)
+                            / (edge_m * math.sqrt(3.0))))
+
+
 def detect_interactions(tracks: Sequence, *,
                         max_separation_m: float = MAX_SEPARATION_M,
                         min_minutes: float = MIN_MINUTES,
@@ -277,6 +358,7 @@ def detect_interactions(tracks: Sequence, *,
     vessel in one anchorage — could still generate a very large candidate set,
     and silently taking minutes is worse than saying so.
     """
+    ring = _ring_for(max_separation_m)
     rs = {tr.track_id: resample_track(tr) for tr in tracks}
     by_id = {tr.track_id: tr for tr in tracks}
 
@@ -299,35 +381,58 @@ def detect_interactions(tracks: Sequence, *,
     # (a, b) -> [(t, sep_m, bearing_ab, sog_a, sog_b, cog_a, cog_b, lat, lon)]
     pairs: dict[tuple[str, str], list] = defaultdict(list)
     n_pairs = 0
+
+    def consider(t, a, b) -> None:
+        """One candidate pair-sample, keyed on the pair in a fixed order.
+
+        **Ordering the key rather than dropping one direction is the fix to the
+        second half of the same bug.** The first version skipped the sample
+        whenever `a`'s track id sorted after `b`'s — a guard meant to count each
+        unordered pair once. It works for two hulls in the *same* cell, where
+        both orderings are generated. Across cells only one ordering is ever
+        generated (the lower cell contributes `members`, the higher contributes
+        candidates), so the guard was not deduplicating: it was discarding,
+        on a coin flip between two unrelated orderings, roughly half of every
+        cross-cell pair in the picture.
+        """
+        nonlocal n_pairs
+        if a[0] == b[0]:
+            return
+        # Two hypotheses of the same target are not two vessels — the same
+        # guard `detect_encounters` needed (ADR-028), keyed on `track_key`
+        # because a radar track has no MMSI and `None == None` would discard
+        # every radar pair.
+        if by_id[a[0]].track_key == by_id[b[0]].track_key:
+            return
+        sep = _hav_m(a[1], a[2], b[1], b[2])
+        if sep > max_separation_m:
+            return
+        n_pairs += 1
+        if n_pairs > max_pairs:
+            raise RuntimeError(
+                f"interaction search exceeded {max_pairs:,} candidate "
+                f"pair-samples ({n_in_port:,} in-port samples were "
+                f"already excluded). The picture is denser than this "
+                f"module was sized for; narrow the window or raise "
+                f"max_pairs deliberately rather than by accident.")
+        if a[0] > b[0]:
+            a, b = b, a
+        pairs[(a[0], b[0])].append(
+            (a[0], b[0], t, sep, a[1], a[2], b[1], b[2], a[3], b[3]))
+
     for (t, cell), members in buckets.items():
-        cand = list(members)
-        for nc in tiling.neighbors(cell, 1):
-            if nc > cell:                  # each unordered cell pair once
-                cand += buckets.get((t, nc), [])
+        # Same cell: each unordered pair once, by index.
         for i in range(len(members)):
-            for j in range(len(cand)):
-                a, b = members[i], cand[j]
-                if a[0] >= b[0]:
-                    continue
-                # Two hypotheses of the same target are not two vessels — the
-                # same guard `detect_encounters` needed (ADR-028), keyed on
-                # `track_key` because a radar track has no MMSI and
-                # `None == None` would discard every radar pair.
-                if by_id[a[0]].track_key == by_id[b[0]].track_key:
-                    continue
-                sep = _hav_m(a[1], a[2], b[1], b[2])
-                if sep > max_separation_m:
-                    continue
-                n_pairs += 1
-                if n_pairs > max_pairs:
-                    raise RuntimeError(
-                        f"interaction search exceeded {max_pairs:,} candidate "
-                        f"pair-samples ({n_in_port:,} in-port samples were "
-                        f"already excluded). The picture is denser than this "
-                        f"module was sized for; narrow the window or raise "
-                        f"max_pairs deliberately rather than by accident.")
-                pairs[(a[0], b[0])].append(
-                    (a[0], b[0], t, sep, a[1], a[2], b[1], b[2], a[3], b[3]))
+            for j in range(i + 1, len(members)):
+                consider(t, members[i], members[j])
+        # Neighbouring cells: each unordered *cell* pair once, then every
+        # cross-cell member pair within it.
+        for nc in tiling.neighbors(cell, ring):
+            if nc <= cell:
+                continue
+            for a in members:
+                for b in buckets.get((t, nc), ()):
+                    consider(t, a, b)
 
     need = max(2, int(min_minutes * 60 / RESAMPLE_S))
     out: list[Interaction] = []
@@ -422,6 +527,12 @@ def _classify_run(track_a, track_b, run: list) -> Optional[Interaction]:
     if course_diff > SAME_COURSE_DEG or cv > STABLE_SEPARATION_CV:
         # Different courses, or a separation that wanders: this is traffic
         # passing, an overtake, or a crossing. Not a relationship.
+        return None
+    if mean_sep > COMPANY_MAX_SEPARATION_M:
+        # Same course, steady gap, and four miles apart: two ships on a route.
+        # This is the gate that separates a formation from traffic — see
+        # `COMPANY_MAX_SEPARATION_M`, and note that persistence does not: a
+        # fishing fleet steaming to the same ground held station for 11.7 hours.
         return None
 
     # 3. Shadowing — one consistently astern of the other. Measured by the

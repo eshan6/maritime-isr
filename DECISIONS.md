@@ -2558,3 +2558,168 @@ claiming something the corpus does not contain.
 * Every figure here is measured on the synthetic corpus, trained on tracks whose
   class the generator also chose. Real performance will be lower and must be
   re-measured on the deploy host (CLAUDE.md §4.6).
+
+---
+
+## ADR-034 — The factors that never fired, and the four defects that kept them quiet *(Accepted)*
+
+**Context.** Areas 2 and 3 of the IDEX Challenge 82 brief added three classes of
+factor to the Vessel of Interest object: a contradicted identity, a notable
+activity, and a relationship between two hulls. Each was built, gated, narrated
+and wired into the anomaly library. Each fired **zero times** on the corpus.
+
+Each zero had a stated cause, and every cause was defensible on its own. Taken
+together they meant the ranked list never gained the factor classes those areas
+existed to supply — and the brief sets exactly one test on that:
+
+> After each area lands, the ranked Vessel of Interest list should visibly gain
+> a new class of factor. If adding an area does not change what appears on that
+> list, the area was built in isolation and needs wiring in before moving on.
+
+Areas 2 and 3 failed it.
+
+**Decision.** Write the situations into the corpus, and fix what writing them
+exposes. **No threshold is loosened to make a rule fire.** A rule loosened until
+it fires has been fitted to the absence of evidence, and afterwards it is
+indistinguishable from a working one.
+
+Group F adds sixteen hulls: three identity contradictions with two decoys that
+share their surface, two notable activities with the false positive that used to
+be mistaken for one, three relationships between AIS-visible hulls with a lane
+decoy, and truth rows for all of it.
+
+**What building the positive cases found. Four defects, all silent, all of the
+same shape — a rule that could not fire and did not say so.**
+
+**1. A reversal is not an event between two fixes** (`tracks/activity.py`).
+The survey rule counted near-180-degree course changes fix to fix. A hull
+limited to a quarter-degree per second takes twelve minutes to come about and
+AIS in this corpus arrives every four, so a real reversal appears as three
+sixty-degree steps and the count comes out zero. F6 was written as a genuine
+ten-leg lawnmower and was classified `manoeuvring_erratically` with
+`reciprocal_turns=0`. **The survey branch could not have fired on any real
+survey vessel sampled at a realistic rate, which is every survey vessel.**
+Reciprocals are now counted between the mean headings of consecutive straight
+legs, which is what "she came about" means and is invariant to how often the
+vessel was heard.
+
+**2. Half of every cross-cell pair was discarded** (`tracks/interactions.py`).
+Two defects in one loop. The candidate search took a one-ring H3 neighbourhood
+at res 6 and a comment asserted that reached "roughly 9 km"; a res-6 edge is
+3.7 km, so pairs in the 6-9 km band — inside the module's own declared 5 nm
+reach — were dropped before any test ran. And the `a[0] >= b[0]` guard, correct
+for deduplicating two hulls in the same cell, was *discarding* rather than
+deduplicating across cells, because only one ordering is ever generated there.
+The ring is now computed from the geometry and the pair key is ordered rather
+than dropped. Both failures produce fewer findings and never wrong ones, which
+is why "no interactions in this corpus" was reported with total confidence.
+
+**3. The resampler deleted every stopped vessel** (`tracks/features.py`).
+AIS cadence is state-dependent by design: ITU-R M.1371 has a Class A set report
+every 10 seconds under way and every 3 minutes at anchor, and reception thinning
+multiplies both — a moving hull here lands a fix every ~4 minutes, a stopped one
+every ~65. The resampler's gap allowance was built from the track's *median*
+interval, one number for a track whose cadence varies eighteen fold within
+itself, so the stopped half of a track was dropped from every resample-based
+analysis. F11 was written as a nine-hour ship-to-ship transfer with both parties
+transmitting and produced **seven** usable pair samples. Everything the product
+cares about at low speed was going with it: loitering, anchoring, transfer. A
+gap is now interpolated across when the vessel demonstrably did not move —
+1,000 m of travel between bracketing fixes, whatever the elapsed time — because
+interpolating across a gap is only a fabrication if the vessel could have gone
+somewhere.
+
+**4. The pipeline query threw the second attestation away** (`tools/`).
+`check_registry_consistency` needs two records of one hull. The real GFW
+connector has landed both kinds from the beginning, with a comment saying why:
+*"disagreement with the registry is a signal in its own right, so we keep
+both."* The pipeline then selected one current row per `vessel_id`, collapsing
+them, and the check answered "cannot check" for all 230 hulls. It now pairs the
+self-reported row with the registry row. The generator was writing every
+synthetic identity as `record_kind="registry"` — a corpus in which no vessel had
+ever said anything about itself — and now writes what she broadcasts as
+`self_reported` and the registry's own attestation beside it.
+
+**And one gate that was re-derived twice, because the first re-derivation was
+also wrong.** With the pair search fixed, the 120-minute persistence floor had
+been measured through a broken candidate set and had to be swept again. That
+sweep put the longest coincidental formation at 4.7 hours and the floor moved to
+360 minutes, which looked decisive on one sample.
+
+A second sample falsified it, and the correction is worth more than the number.
+Changing the cast shifts the generator's RNG stream, so the background pairs are
+a fresh draw each time; in the next corpus a pair of fishing-fleet hulls steaming
+to the same ground held course and station for **11.7 hours** — longer than two
+of the three authored relationships. **A fishing fleet transiting together is a
+formation by every geometric test and by no useful one, and no persistence floor
+will ever exclude it.** The corpus already contains a forty-vessel aggregation
+decoy built to catch exactly this class of false positive, and the interaction
+rule walked straight into it.
+
+What separates the populations is how close they hold. Mean separation, over
+both samples:
+
+| | mean separation (m) |
+|---|---|
+| coincidental pairs, sample 1 | 6555, 8227, 7397, 6409, 8052 |
+| coincidental pairs, sample 2 | 5745, 5337, 6100, 6651, 7764, 7814 |
+| authored relationships | 589, 1191, 4245 |
+
+Eleven coincidental pairs across two independent draws, none closer than
+5,337 m; three authored relationships, all inside 4,245 m. So company and
+shadowing are claimed only inside **2.5 nautical miles** — visual range is not
+station-keeping range, and vessels deliberately working together stay close
+enough to manoeuvre and talk. The 9% margin above the closest measured
+coincidence is thin and is stated rather than rounded away. The 360-minute floor
+is kept, and is no longer described as though it were doing the work.
+
+**A survey pattern and a trawler are the same geometry.** Once reciprocals were
+counted correctly, six-hour windows of the background fishing fleet produced
+**36** survey claims and the queue went from 16 alerts to 53. Nothing in the
+shape separates a vessel mowing a survey lawn from a vessel working a ground —
+parallel legs, reciprocal turns, covering a box — and no tuning of the shape
+gates will. Speed does: a survey vessel runs her lines at six to eight knots, a
+trawler works at two to four with gear in the water. The survey branch now
+declines the trawling band outright. The cost is stated rather than hidden: **a
+genuine survey conducted at trawling speed is not findable by this rule** and
+will be reported as fishing.
+
+**Two headline numbers moved, and both were less solid than they looked.**
+
+*Dark-contact recall.* Reported at 86% (6 of 7 findable episodes) before this
+group existed; it reads **43% on seed 7 and 62% on seed 8**, with **precision at
+100% in every draw**. A single-variable A/B — the whole pipeline run twice on
+one corpus with `RESAMPLE_MAX_INTERP_M` forced to zero — produced *identical*
+cascade verdicts, so none of the detector changes here is responsible. Adding
+sixteen hulls to the cast shifts the generator's RNG stream, so every scenario's
+noise, every coverage draw and every radar plot is a fresh sample. **A recall
+figure with a denominator of seven episodes was never a capability measurement**,
+and swings of tens of points between draws are what it has always been capable
+of; the 86% was one draw quoted as though it were a property of the system. It
+is now reported with its seed and its denominator, and precision — the number
+ADR-004 actually constrains — is what holds steady.
+
+*Generation at seed 9 fails outright*, in `background.py`'s port-visit
+scheduling, with an event landing outside the corpus window. Confirmed
+pre-existing: it fails identically with group F removed. Recorded in STATE.md as
+an open item rather than fixed here.
+
+**Consequences.**
+
+* All three factor classes now reach the ranked list, and `tests/test_factor_coverage.py`
+  is the brief's own test made executable — it fails if any of them goes quiet again.
+* Every positive is paired with a decoy that shares its surface: punctuation in a
+  registry name, a vessel-class quibble, a coastal rotation, a lane overtake.
+  A group of positives measures recall and says nothing about precision.
+* F1 breaks a corpus invariant on purpose — a synthetic IMO that fails its own
+  checksum — and does it through the same narrow gate C3 uses for its impossible
+  speed: declared in its truth row, whitelisted by scenario id *and* rule name.
+  An undeclared broken IMO is still a generation failure.
+* `check_mmsi_flag` and `check_mmsi_form` remain **unmeasurable on synthetic
+  data and that is not fixed here.** Scenario MMSIs live in a reserved 999 block
+  precisely so no synthetic hull can ever wear a real vessel's identity, and
+  that reservation makes a flag contradiction unconstructible. The safety
+  property is worth more than the test coverage; the two checks are exercised by
+  unit fixtures and must be measured on the landed real GFW corpus.
+* Every figure here is measured on the **synthetic suite**. Real-feed numbers
+  will be lower and must be re-measured on the deploy host (CLAUDE.md §4.6).

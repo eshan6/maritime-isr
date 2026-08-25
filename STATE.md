@@ -8,7 +8,78 @@ session. `CLAUDE.md`, `ARCHITECTURE.md`, `DECISIONS.md` are stable contracts;
 > between status buckets, record what was verified vs assumed, log anything now
 > broken, and set "Next up." If you don't update it, the next session starts blind.
 
-**Last updated:** 2026-08-24 — **IDEX Challenge 82, Area 3 built: what the
+**Last updated:** 2026-08-25 — **the factors that never fired.** Areas 2 and 3
+added three classes of factor to the ranked list — a contradicted identity, a
+notable activity, a relationship between two hulls — and all three fired **zero
+times**. The brief sets one test on that: *"if adding an area does not change
+what appears on that list, the area was built in isolation."* Areas 2 and 3
+failed it.
+
+**The fix was in the corpus, not the thresholds** (ADR-034). Group F adds
+sixteen hulls: three identity contradictions with two decoys that share their
+surface, two notable activities with the false positive that used to be mistaken
+for one, three relationships between AIS-visible hulls with a lane decoy. The
+ranked list now carries **`vessel_interaction` x6, `identity_contradiction` x5,
+`notable_activity` x2** across 39 subjects.
+
+**Writing the positive cases found four defects, every one of them silent, every
+one making a rule quieter without saying so:**
+
+1. **A reversal is not an event between two fixes.** The survey rule counted
+   near-180° course changes fix to fix. A hull takes twelve minutes to come
+   about and AIS arrives every four, so a real reversal is three 60° steps and
+   the count is zero. **The survey branch could not have fired on any real
+   survey vessel sampled at a realistic rate**, which is every survey vessel.
+2. **Half of every cross-cell pair was discarded.** The interaction search took
+   a one-ring H3 neighbourhood at res 6 and a comment asserted that reached
+   "roughly 9 km" — a res-6 edge is 3.7 km. And its dedup guard was *dropping*
+   cross-cell pairs rather than deduplicating them. Both produce fewer findings
+   and never wrong ones, so "no interactions in this corpus" was reported with
+   total confidence.
+3. **The resampler deleted every stopped vessel.** AIS cadence is
+   state-dependent by design (10 s under way, 180 s at anchor); the gap
+   allowance used the track's *median*. A nine-hour ship-to-ship transfer with
+   both parties transmitting produced **seven** usable samples. Loitering,
+   anchoring and transfer were all going the same way.
+4. **The pipeline query threw away the second identity attestation.** The real
+   GFW connector lands `registry` and `self_reported` and says why —
+   *"disagreement with the registry is a signal in its own right"* — and the
+   query selected one row per vessel, collapsing them. The consistency check
+   answered "cannot check" 230 times out of 230.
+
+**And two numbers moved that were never as solid as they looked.**
+
+*The interaction persistence floor* was re-derived on one corpus draw (longest
+coincidence 4.7 h → gate at 6 h) and **falsified by the next**, where a pair of
+fishing-fleet hulls steaming to the same ground held station for 11.7 hours. A
+fishing fleet transiting together is a formation by every geometric test and by
+no useful one. What separates the populations is **how close they hold**: eleven
+coincidental pairs across two draws, none closer than 5,337 m; three authored
+relationships all inside 4,245 m. Company and shadowing are now claimed only
+inside 2.5 nm.
+
+*Dark-contact recall*, reported at 86% before this group existed, reads **43% on
+seed 7 and 62% on seed 8 — with precision 100% in every draw.** A
+single-variable A/B (the whole pipeline twice on one corpus, resampler change
+forced off) gave identical cascade verdicts, so no detector change here is
+responsible: adding sixteen hulls shifts the generator's RNG stream and every
+scenario's noise is a fresh sample. **A recall figure with a denominator of
+seven episodes was never a capability measurement.** Precision — the number
+ADR-004 constrains — is what holds.
+
+**Queue on the corpus:** 22 alerts across 9 detectors, 39 ranked subjects.
+`identity_contradiction` 5 (all true positives: F1's broken IMO check digit,
+F2's call sign, F3's name, plus `spine` and `identity_break` whose broadcast
+names genuinely no longer match their registry entries), `notable_activity` 3,
+`vessel_interaction` 6, `dark_vessel` 4. SYNTHETIC-SUITE numbers throughout
+(CLAUDE.md §4.6).
+
+**OPEN — generation at seed 9 fails outright**, in `background.py`'s port-visit
+scheduling, with an event landing outside the corpus window. Confirmed
+pre-existing: it fails identically with group F removed. Seeds 7 and 8 generate
+cleanly. Not fixed here.
+
+Prior entry: 2026-08-24 — **IDEX Challenge 82, Area 3 built: what the
 radar picture is *of*.** Three capabilities, and the honest result on each is
 different, which is the point of measuring rather than asserting.
 
@@ -257,6 +328,7 @@ on Eshan's machine.
 | — | **IDEX Area 1 — the MDA assistant** (`assistant/`, `/api/voi`, `maritime-isr voi`, Assistant tab) | 🟡 | **Not a spec unit** — ADR-031. The ranked Vessel of Interest object: factor catalog, a score that decomposes exactly to the factor, plain-language narration, next actions with computed feasibility and stated capability, and a question answerer that retrieves rather than generates. Sandbox-green, browser-verified; **never run on the laptop**. |
 | — | **IDEX Area 2 — predictive AIS analysis** (`anomaly/identity`, `tracks/activity`, `tracks/projection`, `baselines.py`) | 🟡 | **Not a spec unit** — ADR-032. Identity authenticity (IMO check digit, MMSI/flag, registry consistency), activity classification from motion alone, forward projection as an assertion, per-area baselines as a landed artifact. **The arithmetic identity checks cannot fire on scenario data by construction** and must be measured on the landed real GFW corpus. Track-departure detection is built and deliberately **not** a suspicion factor — measured at 87-98% of the fleet. |
 | — | **IDEX Area 3 — radar picture classification** (`tracks/vessel_type`, `tracks/interactions`, `fusion/contact_profile`) | 🟡 | **Not a spec unit** — ADR-033. Vessel type from motion alone: **65% fine / 90% coarse on held-out hulls**, with the coarse vocabulary derived from the confusion matrix so the model is never asked to separate `Aframax/bulker/product_tanker` or `Suezmax/VLCC`. Interaction detection (company, shadowing, converging-and-holding, transfer): **0 findings on the corpus at the 120-minute gate**, reported not tuned; `transfer_pattern` is **unvalidatable here** because the scenario's counterparties are dark by design. Contact profiles produced on all 8 dark contacts. Sandbox-green; **never run on the laptop**, and no real CSN feed exists. |
+| — | **IDEX factor coverage — group F** (`scenario/scenarios/group_f.py`, `tests/test_factor_coverage.py`) | 🟡 | **Not a spec unit** — ADR-034. Sixteen hulls writing the situations Areas 2 and 3 were built for and the corpus never contained, each paired with a decoy. All three factor classes now reach the ranked list (`vessel_interaction` x6, `identity_contradiction` x5, `notable_activity` x2). **No threshold was loosened to make a rule fire**; four silent defects were fixed instead. `check_mmsi_flag` and `check_mmsi_form` remain **unmeasurable on synthetic data by construction** — the reserved 999 MMSI block that stops a synthetic hull wearing a real identity also makes a flag contradiction unbuildable. Sandbox-green; **never run on the laptop**. |
 | — | Imaging opportunities over AIS gaps (`overpass`) | 🟡 | **Not a spec unit** — ADR-026, outside the 0.0–6.3 numbering. The first determination that is ours rather than GFW's. Needs no pixels; joins the 636 landed scene footprints against flagged gaps. Sandbox-green; **never run against the real corpus**. |
 
 **Ingest rework detail (units 0.1 / 0.3 / 0.4), 2026-07-29:**

@@ -129,18 +129,41 @@ SURVEY_MIN_LEGS = 4
 SURVEY_RECIPROCAL_TOL_DEG = 35.0
 SURVEY_MIN_LEG_MINUTES = 12.0
 
-#: What fraction of a track's *alterations* are near-reciprocal.
+#: What fraction of a track's course reversals are near-reciprocal, measured
+#: **leg to leg**.
 #:
-#: Measured against alterations rather than against every fix-to-fix step: a
-#: 150-fix lawnmower contains 5 turns and 144 steps of holding course, and
-#: dividing by the latter gave a reciprocal fraction of 0.03 — the rule could
-#: not fire at all.
+#: This was measured fix to fix twice, and was wrong both times for the same
+#: underlying reason: a reversal is not an event that happens between two
+#: consecutive fixes.
 #:
-#: Measured over the corpus by declared class: a working trawler's alterations
-#: are 10% reciprocal (p50 0.100, p90 0.139), because she turns every which way
-#: over a ground; a merchant's are 39%, because a rotation goes out and comes
-#: back. This gate alone does not separate a survey from a merchant — both sit
-#: near 0.5 — which is why `SURVEY_MIN_LEGS_PER_HOUR` exists.
+#: The first version divided reciprocals by every step, so a 150-fix lawnmower
+#: with 5 turns scored 0.03 and the rule could not fire at all. The second
+#: divided by *alterations* — steps whose course change exceeds
+#: `ALTERATION_MIN_DEG` — which fixed the arithmetic and left the real problem
+#: standing: **a ship cannot turn 180 degrees between two fixes.** A hull
+#: limited to a quarter-degree per second takes twelve minutes to come about,
+#: and AIS positions in this corpus arrive every four. The reversal is spread
+#: across three or four fixes of sixty degrees each, none of them within 35
+#: degrees of a reciprocal, and the count comes out **zero**.
+#:
+#: That was not a hypothesis. F6 was written as a genuine ten-leg lawnmower and
+#: the rule classified her `manoeuvring_erratically` with `reciprocal_turns=0`
+#: (ADR-034) — the survey branch could not have fired on any real survey vessel
+#: sampled at a realistic rate, which is every survey vessel.
+#:
+#: So the comparison is now between the mean headings of consecutive **straight
+#: legs**, which is what "she came about" actually means and is invariant to how
+#: often the vessel was heard. Re-measured over the fleet after the change, on
+#: the 193 tracks that contain more than one leg:
+#:
+#:     merchant leg-to-leg reciprocal fraction   n=150   p50 0.31   p90 0.57
+#:     fishing                                   n= 43   p50 0.31   p90 0.39
+#:     F6, a real lawnmower                                  1.00
+#:
+#: **This gate alone does not separate a survey from a rotation and never did** —
+#: the merchant p90 is above it. `SURVEY_MIN_LEGS_PER_HOUR` and
+#: `SURVEY_MAX_STRAIGHTNESS` are what do the separating, and this one has to not
+#: exclude. It stays at 0.5, which a genuine lawnmower clears outright.
 SURVEY_MIN_RECIPROCAL_FRACTION = 0.5
 
 #: And a survey goes nowhere: net displacement is small against distance run.
@@ -272,8 +295,11 @@ def activity_features(track, *, i0: int = 0, i1: Optional[int] = None) -> dict:
     # not against every step, because a long steady leg would otherwise drown
     # the signature it is part of.
     alterations = sum(1 for x in turns if x > ALTERATION_MIN_DEG)
-    reciprocals = sum(1 for x in turns
-                      if abs(x - 180.0) <= SURVEY_RECIPROCAL_TOL_DEG)
+    # Reciprocals are counted **leg to leg**, not fix to fix: a hull takes
+    # minutes to come about and AIS is heard every few, so a reversal is spread
+    # across several fixes of sixty degrees each and never looks like one
+    #180-degree step. See `SURVEY_MIN_RECIPROCAL_FRACTION`.
+    reciprocals, leg_alterations = _leg_reciprocals(track, i0, i1)
 
     in_waiting = bool(at_waiting_area(clat, clon,
                                       port_radius_km=PORT_RADIUS_KM,
@@ -289,8 +315,9 @@ def activity_features(track, *, i0: int = 0, i1: Optional[int] = None) -> dict:
         "turn_mean_deg": round(float(np.mean(turns)), 1) if turns else 0.0,
         "alterations": int(alterations),
         "reciprocal_turns": int(reciprocals),
-        "reciprocal_fraction": round(reciprocals / alterations, 3)
-                               if alterations else 0.0,
+        "leg_alterations": int(leg_alterations),
+        "reciprocal_fraction": round(reciprocals / leg_alterations, 3)
+                               if leg_alterations else 0.0,
         "straightness": round(float(straightness), 3),
         "spread_m": round(float(spread), 1),
         "lat": clat, "lon": clon,
@@ -369,6 +396,25 @@ def classify_activity(track, *, i0: int = 0, i1: Optional[int] = None
     #    must be low. A vessel that ran four parallel legs and then left for
     #    another port is classified on what she did in each window, which is
     #    what `classify_activity_segments` is for.
+    #
+    #    **And she must be above trawling speed, because otherwise she is a
+    #    trawler.** A vessel working a fishing ground and a vessel mowing a
+    #    survey lawn make the *same geometry*: parallel legs, reciprocal turns,
+    #    covering a box. Nothing in the shape separates them and no amount of
+    #    tuning the shape gates will, which the measurement showed plainly —
+    #    once the reciprocal count was fixed to work leg-to-leg, six-hour
+    #    windows of the background fishing fleet produced **36** survey claims,
+    #    every one of them a trawler on a ground (`bg_11`, `bg_12`, `fleet_00`
+    #    and others). The queue went from 16 alerts to 53.
+    #
+    #    What does separate them is speed: a survey vessel runs her lines at
+    #    six to eight knots, a trawler works at two to four with gear in the
+    #    water. So the survey branch declines the trawling band outright and
+    #    the fishing branch below claims them. The honest cost, stated rather
+    #    than hidden: **a genuine survey conducted at trawling speed is not
+    #    findable by this rule** and will be reported as fishing. Under ADR-004
+    #    that is the right way round — the alternative floods the queue with
+    #    every trawler on the coast.
     legs = _count_legs(track, i0, i1)
     span_h = max(f["span_minutes"] / 60.0, 1e-6)
     legs_per_hour = legs / span_h
@@ -378,7 +424,7 @@ def classify_activity(track, *, i0: int = 0, i1: Optional[int] = None
             and recip_fraction >= SURVEY_MIN_RECIPROCAL_FRACTION
             and legs_per_hour >= SURVEY_MIN_LEGS_PER_HOUR
             and straight < SURVEY_MAX_STRAIGHTNESS
-            and sog >= FISHING_MIN_KN):
+            and sog > FISHING_MAX_KN):
         return out("survey_pattern", base * 0.8,
                    f"{legs} straight legs over {span_h:.0f} hours — a turn "
                    f"every {span_h / legs:.1f} hours — of which "
@@ -449,29 +495,62 @@ def classify_activity(track, *, i0: int = 0, i1: Optional[int] = None
 
 
 def _count_legs(track, i0: int, i1: Optional[int]) -> int:
-    """How many sustained straight legs this slice contains.
+    """How many sustained straight legs this slice contains."""
+    return len(_legs(track, i0, i1))
+
+
+def _legs(track, i0: int, i1: Optional[int]) -> list[float]:
+    """The mean heading of each sustained straight leg, in order.
 
     A leg ends where the course changes by more than the steady threshold
     allows. Only legs of at least `SURVEY_MIN_LEG_MINUTES` count, because the
     signature being looked for is *long* legs — a vessel making a series of
-    short straight hops between turns is manoeuvring, not surveying.
+    short straight hops between turns is manoeuvring, not surveying. The turn
+    itself falls in the gap between two legs and belongs to neither, which is
+    the whole reason this returns leg headings: comparing them is the only way
+    to see a reversal that took twelve minutes to execute.
+
+    Headings are averaged as unit vectors, so a leg running just west of north
+    does not average 359 and 001 into 180.
     """
     pts = track.points[track.points.quality != "outlier"]
     i1 = len(pts) if i1 is None else i1
     sl = pts.iloc[i0:i1]
     if len(sl) < 3:
-        return 0
+        return []
     t = epoch_s(sl["ts"])
     cog = sl["cog_deg"].to_numpy(dtype=float)
-    legs, start = 0, 0
+
+    def heading(a: int, b: int) -> float:
+        rad = np.radians(cog[a:b + 1])
+        return float(np.degrees(np.arctan2(np.sin(rad).mean(),
+                                           np.cos(rad).mean())) % 360.0)
+
+    out: list[float] = []
+    start = 0
     for i in range(len(sl) - 1):
-        if _turn_deg(cog[i], cog[i + 1]) > 45.0:
+        if _turn_deg(cog[i], cog[i + 1]) > ALTERATION_MIN_DEG:
             if (t[i] - t[start]) / 60.0 >= SURVEY_MIN_LEG_MINUTES:
-                legs += 1
+                out.append(heading(start, i))
             start = i + 1
     if (t[-1] - t[start]) / 60.0 >= SURVEY_MIN_LEG_MINUTES:
-        legs += 1
-    return legs
+        out.append(heading(start, len(sl) - 1))
+    return out
+
+
+def _leg_reciprocals(track, i0: int, i1: Optional[int]) -> tuple[int, int]:
+    """(reciprocal reversals, leg-to-leg alterations) over this slice.
+
+    The denominator is the number of *transitions between legs*, so a lawnmower
+    that reverses on every pass scores 1.0 and a rotation that goes out and
+    comes back once over six legs scores a fraction of it.
+    """
+    legs = _legs(track, i0, i1)
+    if len(legs) < 2:
+        return 0, 0
+    recip = sum(1 for a, b in zip(legs, legs[1:])
+                if abs(_turn_deg(a, b) - 180.0) <= SURVEY_RECIPROCAL_TOL_DEG)
+    return recip, len(legs) - 1
 
 
 def classify_activity_segments(track, *, window_hours: float = 6.0

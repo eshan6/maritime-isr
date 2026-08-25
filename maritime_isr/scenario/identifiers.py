@@ -196,6 +196,47 @@ def mint_imo(serial: int) -> int:
     return imo
 
 
+def break_check_digit(imo) -> int:
+    """The same reserved-band IMO with its seventh digit deliberately **wrong**.
+
+    The IMO check digit is the one identity test that is pure arithmetic: it
+    either passes or it fails, with no judgement and no false positives. A
+    corpus in which every IMO is checksum-valid therefore exercises
+    `check_imo`'s *passing* branch 230 times and its failing branch never — the
+    detector is built, wired and unmeasurable, which is exactly the state the
+    ranked list exposed (see ADR-034).
+
+    **This is safe for the same reason the reserved band is safe, and then
+    some.** The number stays inside 1000000-1999999, which is outside the
+    Lloyd's assignment series, so no correctly-registered hull wears one. On top
+    of that it fails its own check digit, so it is not a well-formed IMO at all
+    — a number that could not have been *issued* to anybody. It is still passed
+    through `assert_no_collisions` with every other identifier, because GFW
+    publishes whatever a transmitter broadcast and a real hull may well have
+    broadcast garbage in this band.
+
+    A vessel broadcasting a malformed IMO is not a contrived fixture. It is one
+    of the commonest things in real AIS static data: a typed field, entered by
+    hand on a bridge, with no validation between the keyboard and the air.
+    Taking the hull's *own* number and corrupting one digit is what a mistyped
+    field looks like; a number from somewhere else would be a different scenario
+    (that one is B4, the scrapped hull's IMO).
+    """
+    good = int(str(imo).strip())
+    if not (IMO_MIN <= good <= IMO_MAX):
+        raise ValueError(f"{good} is not a reserved-band scenario IMO")
+    prefix, correct = divmod(good, 10)
+    # Any digit but the right one. +5 keeps it far from the correct value, so a
+    # transposition or an off-by-one in the checker cannot accidentally pass it.
+    wrong = (correct + 5) % 10
+    bad = prefix * 10 + wrong
+    if imo_checksum_ok(str(bad)):                             # pragma: no cover
+        raise AssertionError(f"{bad} was supposed to fail its check digit")
+    if not (IMO_MIN <= bad <= IMO_MAX):                       # pragma: no cover
+        raise AssertionError(f"minted IMO {bad} escaped the reserved band")
+    return bad
+
+
 def mint_mmsi(serial: int) -> int:
     """An MMSI inside the reserved 999 block, from a 0-based serial."""
     mmsi = _nth_unblocked(MMSI_MIN, serial, _BLOCKED_MMSIS)

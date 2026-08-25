@@ -959,3 +959,104 @@ positive-case transfer tests this corpus cannot supply), and the pipeline prints
 `interactions : 0 (none)` with the alert tally unchanged at 16.
 *Failure:* an accuracy floor assertion firing means the classifier regressed —
 read the printed confusion matrix before touching a threshold.
+
+---
+
+## IDEX Challenge 82 — group F: the factors that never fired (ADR-034)
+
+Areas 2 and 3 added three classes of factor to the ranked Vessel of Interest —
+a contradicted identity, a notable activity, a relationship between two hulls.
+All three were built, gated, narrated and wired in. All three fired **zero
+times**. Each zero had a defensible cause and together they meant the list never
+gained what those areas existed to supply, which is the one test the brief sets:
+
+> After each area lands, the ranked Vessel of Interest list should visibly gain
+> a new class of factor. If adding an area does not change what appears on that
+> list, the area was built in isolation.
+
+**The fix is in the corpus and not in the thresholds.** A rule loosened until it
+fires has been fitted to the absence of evidence, and afterwards it is
+indistinguishable from a working one. Group F writes sixteen hulls: an IMO that
+fails its own check digit, a call sign the registry does not hold, a name that
+is not the registered one, a genuine ten-leg lawnmower, fourteen hours of
+aperiodic manoeuvring, two hulls in company, one shadowing another, and a
+ship-to-ship transfer with **both** parties transmitting — the case every other
+transfer in this corpus cannot supply, because their counterparties are dark by
+design. Each is paired with a decoy that shares its surface: a registry that
+spells her name "M.V. X.", a vessel-class quibble, a coastal rotation, a lane
+overtake.
+
+**Four defects, found by writing the positive cases. Every one silent, every one
+making a rule quieter without saying so.**
+
+1. **A reversal is not an event between two fixes.** The survey rule counted
+   near-180° course changes fix to fix. A hull limited to a quarter-degree per
+   second takes twelve minutes to come about and AIS here arrives every four, so
+   a real reversal is three sixty-degree steps and the count is zero. The
+   lawnmower was classified `manoeuvring_erratically` with `reciprocal_turns=0`.
+   Reciprocals are now counted between the mean headings of consecutive straight
+   legs, which is what "she came about" means and does not depend on how often
+   she was heard.
+
+2. **Half of every cross-cell pair was discarded.** The interaction search used a
+   one-ring H3 neighbourhood at res 6 under a comment asserting that reached
+   "roughly 9 km"; a res-6 edge is 3.7 km. And the `a[0] >= b[0]` guard, correct
+   for two hulls in one cell, was *dropping* cross-cell pairs rather than
+   deduplicating them, because only one ordering is ever generated there. The
+   ring is computed from the geometry now and the pair key is ordered.
+
+3. **The resampler deleted every stopped vessel.** ITU-R M.1371 has a Class A set
+   report every 10 s under way and every 3 min at anchor; the gap allowance was
+   built from the track's *median* interval. A nine-hour transfer with both
+   parties transmitting produced seven usable samples. A gap is now interpolated
+   across when the vessel demonstrably did not move — 1,000 m between bracketing
+   fixes, whatever the elapsed time.
+
+4. **The pipeline query threw away the second attestation.** The real GFW
+   connector lands `registry` and `self_reported` and says why: *"disagreement
+   with the registry is a signal in its own right, so we keep both."* The query
+   took one current row per vessel and collapsed them, so the consistency check
+   answered "cannot check" 230 times out of 230.
+
+**Two numbers moved, and both were less solid than they looked.**
+
+The interaction persistence floor was re-derived on one corpus draw and
+**falsified by the next**: a pair of fishing-fleet hulls steaming to the same
+ground held station for 11.7 hours, longer than two of the three authored
+relationships. Duration does not separate the populations and never did.
+Separation does — eleven coincidental pairs across two draws, none closer than
+5,337 m; three authored relationships all inside 4,245 m — so company and
+shadowing are claimed only inside 2.5 nm.
+
+Dark-contact recall, previously reported at 86%, reads **43% on seed 7 and 62%
+on seed 8, with precision 100% in every draw**. A single-variable A/B — the whole
+pipeline run twice on one corpus with the resampler change forced off — gave
+identical cascade verdicts, so no detector change here is responsible. Adding
+sixteen hulls shifts the generator's RNG stream and every scenario's noise is a
+fresh sample. A recall figure with a denominator of seven episodes was never a
+capability measurement, and is no longer quoted as one.
+
+**And a false-positive flood, caught by the corpus's own decoy.** Once
+reciprocals were counted correctly, six-hour windows of the background fishing
+fleet produced 36 survey claims and the queue went from 16 alerts to 53. A
+trawler working a ground and a survey vessel mowing a lawn make the *same*
+geometry; only speed separates them. The survey branch now declines the trawling
+band, and the cost is stated: a genuine survey conducted at trawling speed is not
+findable by this rule.
+
+All figures are **synthetic-suite** figures. No real feed has been seen.
+
+Verify:
+
+```
+python -m maritime_isr.cli scenario generate --seed 7
+rm -f data/graph.sqlite && python tools/run_scenario_pipeline.py
+python -m pytest tests/test_factor_coverage.py -q
+python -m maritime_isr.cli voi list --top 10
+```
+
+*Success:* the pipeline prints `interactions : 3` with one of each kind, and
+`identity_contradiction 5 / notable_activity 3 / vessel_interaction 6`; the
+ranked list carries all three factor kinds.
+*Failure:* an empty `interactions` line means the candidate search regressed —
+read `_ring_for` before touching a threshold.

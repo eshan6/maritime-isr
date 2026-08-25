@@ -13,7 +13,7 @@ choreography, then decoys and misses.
 from __future__ import annotations
 
 from . import background, commercial_traffic, decoys, group_a, group_b
-from . import group_c, group_d, group_e, group_r, group_z
+from . import group_c, group_d, group_e, group_f, group_r, group_z
 from . import misses
 
 #: Execution order. Background first, then the spine's early identity events,
@@ -34,6 +34,10 @@ ALL = (
     # are new and unshared, so placement is unconstrained, and appending keeps
     # the existing temporal choreography byte-identical.
     *group_z.SCENARIOS,
+    # The factor group runs after the zone group for the third instance of
+    # the same reason: every hull in it is new and unshared, so appending
+    # leaves the existing temporal choreography byte-identical.
+    *group_f.SCENARIOS,
     *decoys.SCENARIOS,
     *misses.SCENARIOS,
 )

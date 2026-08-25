@@ -161,7 +161,7 @@ def validate_world(world) -> ValidationReport:
     _check_speeds(world, rep, ent_scen, exempt)
     _check_turn_rates(world, rep, ent_scen)
     _check_intervals(world, rep, ent_scen)
-    _check_identifiers(world, rep)
+    _check_identifiers(world, rep, exempt)
     _check_identity(world, rep)
     _check_geometry(world, rep)
     _check_temporal(world, rep)
@@ -362,15 +362,33 @@ def _check_intervals(world, rep, ent_scen) -> None:
     rep.count(RULE_INTERVAL, n)
 
 
-def _check_identifiers(world, rep) -> None:
+def _check_identifiers(world, rep, exempt) -> None:
     imos, mmsis, refs = world.all_identifiers()
     rep.count(RULE_IDENTIFIERS, len(imos) + len(mmsis) + len(refs))
+
+    # **A broken check digit is normally a generator bug and once was one.** The
+    # band reservation guarantees synthetic IMOs are unreachable by a real hull;
+    # the *checksum* guarantee is different and exists so the corpus exercises
+    # `normalise_imo`'s validation rather than skipping it. F1 has to break it —
+    # that is the scenario, and a corpus where every IMO passes leaves the
+    # arithmetic identity check with no positive case at all (ADR-034).
+    #
+    # It goes through the same narrow gate C3's impossible speed does: declared
+    # in the scenario's own truth row, whitelisted by scenario id *and* by rule
+    # name, so a hull can only break the one rule its scenario says it breaks.
+    # An undeclared broken IMO is still a failure.
+    broken_by_design = {
+        str(world.vessel(eid).imo)
+        for eid in world.vessels
+        if exempt(eid, RULE_IDENTIFIERS) and world.vessel(eid).imo}
 
     for imo in imos:
         if not is_synthetic_imo(imo):
             rep.add(RULE_IDENTIFIERS, str(imo),
                     "IMO outside the reserved 1000000-1999999 band")
         elif not imo_checksum_ok(str(imo)):
+            if str(imo) in broken_by_design:
+                continue
             rep.add(RULE_IDENTIFIERS, str(imo),
                     "synthetic IMO fails its own check digit — it would be "
                     "rejected by normalise_imo and never exercise the "
