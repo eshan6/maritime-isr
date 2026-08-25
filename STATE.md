@@ -8,9 +8,88 @@ session. `CLAUDE.md`, `ARCHITECTURE.md`, `DECISIONS.md` are stable contracts;
 > between status buckets, record what was verified vs assumed, log anything now
 > broken, and set "Next up." If you don't update it, the next session starts blind.
 
-**Last updated:** 2026-08-25 (second session) — **every open item closed, and
-the biggest one was a capability the brief called "the strongest and simplest
-suspicion factor available".**
+**Last updated:** 2026-08-25 (third session) — **Area 4 built: the arrival
+notification inbox, and eleven defects that all presented as silence.**
+
+**0. Area 4 — pre-arrival notifications (ADR-036).** The brief's Area 4 is the
+only part of this system whose input is a *mailbox* rather than a feed: PDFs,
+scanned faxes with no text layer, Word forms that are sometimes tables,
+spreadsheets whose form starts three rows down, and the structured portal feed
+the requirement asks the system to stay compatible with. All five now land as
+one record shape, every value carrying the passage it was read from and a
+locator an analyst can put a finger on (`page 1 (scanned)`, `PANS!A5`,
+`table 2 row 3`), at a confidence that is *earned* — 1.0 for a spreadsheet
+cell, 0.97 for a PDF text layer, whatever tesseract reports for OCR.
+
+On the synthetic suite: **295 documents, 292 resolved to a hull, 0 unreadable,
+3,406 fields extracted.** Three paperwork rules over that, three-valued as in
+ADR-035.
+
+**The counting is what found the bugs.** The unit suite was green and the stage
+reported 3,107 fields read at 10.6 of 11 per document — and the alert queue held
+24 `notification_unmatched` against 1 authored, 10 `arrival_without_notification`
+against 1, and 8 `paperwork_contradiction` against 2. Nine defects came out, in
+three waves, and **not one of them raised an error**:
+
+* **The filing time came from the file's mtime.** Every rule measures a
+  declaration against the track *as at filing*, so with a timestamp a month past
+  the corpus the two strongest checks looked before a window that had not
+  happened and returned "not checkable" for all 292 documents. Two of three
+  checks were dead corpus-wide and nothing said so. The date is now written into
+  the document and read like any other field.
+* **The resolver read one identity table.** A form declaring IMO 1001661
+  matched nothing, dropped to the name rung, met a transposed name, and was
+  reported as naming an unidentifiable ship — while the hull had been
+  broadcasting that exact IMO in AIS message 5 all month. A gap in one table,
+  reported as a gap in somebody's paperwork.
+* **The background corpus contradicted itself at random**, drawing "Ballast —
+  no cargo" against an independently drawn draught.
+* **Arrivals in the first 72 hours were judged** against a filing window
+  predating the record, and unnamed offshore stops were charged with owing
+  paperwork nobody owed.
+* **Both rules joined a declaration to the wrong event** — the arrival window
+  matched the next call by *time* rather than the call at the *declared port*
+  (30 alerts, every one "berthed 31-65 hours early", a distribution with no
+  honest reading); the last port compared against a gazetteer pin, then against
+  the latest prior call rather than *any* prior call.
+* **The two halves of one gap both fired**, putting a second alert on P6's
+  decoy.
+* **Three decoys declared last ports their own voyages contradicted**, and the
+  authored scenarios timed their filings off a nominal `week()` value while the
+  port-call builder berthed them up to two days elsewhere — producing
+  *pre*-arrival notifications filed after the arrival.
+* **The corpus filed forms declaring a last port the vessel had not yet
+  reached**, because the 24-96 h lead was drawn without reference to her
+  previous call.
+* **The OCR confusion table folded `|` to `I` but left `L` alone**, so
+  "Vesse| Name" and "Vessel Name" squashed differently and the most common label
+  in the corpus failed to match on exactly the format the fold exists for.
+* **Adding one hull to the cast re-rolled the whole background fleet.** The cast
+  tuples are ordered so an addition never renumbers an existing hull — but
+  minting still draws from `world.rng`, and every scenario drawing after
+  `build_vessels` then got different numbers. The vessel-type model's coarse
+  accuracy fell from above its 75% floor to 65%, not because the new hull taught
+  it anything but because its training data had changed underneath it. Late
+  cast additions now mint from a derived stream (`cast.LATE_ADDITIONS`), and
+  accuracy is back above the floor.
+* **The synthetic/connector provenance clash.** `arrival_notification` is the
+  first table landed by a real connector rather than by the scenario writer, and
+  the corpus invariant demanded every synthetic row carry
+  `source_id='synthetic-scenario'` — which would have forced the connector to
+  lie about which source read the row. It now carries
+  `synthetic-scenario:pans-inbox`, the prefix convention `graph.store` already
+  used for exactly this, and the validator matches on the prefix.
+
+Result on the synthetic suite: `paperwork_contradiction` 8 → 33 → **2-3**,
+`notification_unmatched` 24 → **3**, `arrival_without_notification` 10 → **1**.
+No threshold was moved to get there; every fix is to a join, a corpus
+inconsistency, or a value read from the wrong place.
+
+---
+
+**Previous session** — **every open item closed, and the biggest one was a
+capability the brief called "the strongest and simplest suspicion factor
+available".**
 
 **1. Declared destination and ETA — built (ADR-035).** This was the clearest
 thing the brief asked for that the system did not have, and the reason was

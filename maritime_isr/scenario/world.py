@@ -132,6 +132,18 @@ class ScenarioWorld:
     #: Set by scenarios that clipped something, so the report can say so.
     clipped: list[str] = field(default_factory=list)
 
+    #: Arrival notifications, as specs (ADR-036). Written to documents by
+    #: `scenario.pans.write_notifications`; the extractor reads the documents,
+    #: never these, so the corpus exercises the real path.
+    pans_specs: list = field(default_factory=list)
+    #: Hulls a scenario has deliberately filed no notification for (P3).
+    pans_suppressed: tuple = ()
+    #: key -> the moment `p0_paperwork_hulls` actually berthed her. The authored
+    #: notifications time themselves off this rather than off the nominal
+    #: `week()` value, because the passage takes as long as it takes and a
+    #: *pre*-arrival notification filed after the arrival is not one.
+    pans_arrivals: dict = field(default_factory=dict)
+
     #: AIS message 5 rows: what each vessel *said* about the voyage she was on.
     #: Landed into `ais_voyage`, the same table `ingest.aisstream` writes from
     #: the live feed (ADR-035). Written by `common.declare_voyage`.

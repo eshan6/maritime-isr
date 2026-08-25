@@ -530,7 +530,9 @@ def run_anomaly_library(store, *, tracks, encounters, spoof_events,
                         associations, verdicts, source_ref: str,
                         identities: list[dict] | None = None,
                         baselines=None, interactions=None,
-                        declarations: list[dict] | None = None) -> dict:
+                        declarations: list[dict] | None = None,
+                        notifications: list[dict] | None = None,
+                        port_calls: list[dict] | None = None) -> dict:
     """Run every detector. Order matters only for #5, which correlates with the
     alerts the earlier detectors produced.
 
@@ -566,7 +568,42 @@ def run_anomaly_library(store, *, tracks, encounters, spoof_events,
     # destination has not contradicted one.
     fired["voyage_contradiction"] = detect_voyage_contradiction(
         store, declarations or [], tracks, source_ref=source_ref)
+    # Area 4 (ADR-036). Optional like the rest: an inbox nobody has read
+    # produces no paperwork findings and no error, because a vessel nobody
+    # filed for is only a finding once you know what *was* filed.
+    notifications = notifications or []
+    port_calls = port_calls or []
+    fired["paperwork_contradiction"] = detect_paperwork_contradiction(
+        store, notifications, tracks, source_ref=source_ref,
+        port_calls=port_calls, declarations=declarations)
+    fired["notification_unmatched"] = detect_unmatched_notification(
+        store, notifications, source_ref=source_ref)
+    fired["arrival_without_notification"] = (
+        detect_arrival_without_notification(
+            store, notifications, port_calls, source_ref=source_ref,
+            observed_from=_record_starts_at(tracks))
+        if notifications else [])
     return fired
+
+
+def _record_starts_at(tracks):
+    """The earliest moment we hold any track at all, or None.
+
+    Derived from the tracks rather than passed in, because it is a fact about
+    the data in hand and a caller-supplied window could disagree with it. Used
+    by the arrival rule to know which arrivals it is entitled to judge.
+    """
+    from ..tracks.kalman import epoch_s
+
+    earliest = None
+    for tr in tracks or []:
+        pts = getattr(tr, "points", None)
+        if pts is None or len(pts) == 0:
+            continue
+        first = float(epoch_s(pts["ts"])[0])
+        if earliest is None or first < earliest:
+            earliest = first
+    return pd.Timestamp(earliest, unit="s", tz="UTC") if earliest else None
 
 
 # ---------------- 7. declared identity does not hold together (Area 2) ------
@@ -967,4 +1004,295 @@ def detect_voyage_contradiction(store, declarations: list[dict], tracks: list,
                          n_contradictions=len(bad),
                          lat=row.get("lat"), lon=row.get("lon"),
                          statements=[f.statement for f in bad]))
+    return out
+
+
+# ------- 11. the paperwork against the physics (Area 4, ADR-036) -----------
+
+#: Days of track before a filing that the last-port claim is compared against.
+PAPERWORK_LOOKBACK_DAYS = 10.0
+
+
+def detect_paperwork_contradiction(store, notifications: list[dict],
+                                   tracks: list, *, source_ref: str,
+                                   port_calls: list[dict] | None = None,
+                                   declarations: list[dict] | None = None
+                                   ) -> list[str]:
+    """A notification whose declarations her own track contradicts.
+
+    Area 4: *"compare what the notification declares against what the track
+    shows ... Contradictions between the paperwork and the physics become
+    factors on the Vessel of Interest."*
+
+    The checks live in `anomaly.paperwork` and are pure functions over declared
+    fields; this joins each notification to the hull it resolved to, gathers the
+    track and the arrival it should be measured against, and turns a
+    contradiction into a scored alert.
+
+    **Every piece of evidence carries the passage the value was read from.**
+    That is the requirement's own bar for Area 4 — a field that cannot be traced
+    back to its source text is not usable as evidence — and an alert is exactly
+    where it has to hold. A watchkeeper opening this finding sees the line off
+    the fax, not a column name.
+    """
+    from ..ingest.pans.land import declared_fields
+    from ..tracks.kalman import epoch_s
+    from .paperwork import check_paperwork, match_arrival, window_before
+
+    fixes: dict[str, list] = {}
+    for tr in tracks:
+        mmsi = getattr(tr, "mmsi", None)
+        if mmsi is None:
+            continue
+        pts = tr.points[tr.points.quality != "outlier"]
+        if len(pts) == 0:
+            continue
+        ts = epoch_s(pts["ts"])
+        fixes.setdefault(str(mmsi), []).extend(
+            zip(ts.tolist(), pts["lat"].tolist(), pts["lon"].tolist()))
+    for v in fixes.values():
+        v.sort()
+
+    # vessel -> the arrivals the corpus recorded, and her broadcast draught.
+    # Each arrival carries its port name and position: the name so a
+    # notification can be matched to the call it is actually about rather than
+    # to the next stop in time, the position so a declared last port can be
+    # compared against where she really berthed.
+    arrivals: dict[str, list] = {}
+    for pc in (port_calls or []):
+        vid = pc.get("vessel_id")
+        if vid and pc.get("start_time") is not None:
+            arrivals.setdefault(vid, []).append(
+                (pd.Timestamp(pc["start_time"]), pc.get("port_name"),
+                 pc.get("lat"), pc.get("lon")))
+    for v in arrivals.values():
+        v.sort(key=lambda a: a[0])
+    draughts: dict[str, float] = {}
+    for d in (declarations or []):
+        vid, dr = d.get("vessel_id"), d.get("draught_m")
+        if vid and dr not in (None, ""):
+            draughts[vid] = float(dr)
+
+    out: list[str] = []
+    for row in notifications:
+        vid = row.get("vessel_id")
+        if not vid:
+            continue                      # unmatched: a different detector
+        node = vessel_node_id(vid)
+        if store.node(node) is None:
+            continue
+        declared = declared_fields(row)
+        filed = pd.Timestamp(row.get("received_at"))
+        if filed.tzinfo is None:
+            filed = filed.tz_localize("UTC")
+
+        mmsi = _mmsi_of(store, node) or ""
+        track = window_before(fixes.get(str(mmsi), []), filed,
+                              days=PAPERWORK_LOOKBACK_DAYS)
+        calls = arrivals.get(vid, [])
+        observed = match_arrival(declared, [(t, name) for t, name, _, _ in calls],
+                                 filed)
+        before = [(c[2], c[3]) for c in calls if c[0] < filed
+                  and c[2] is not None and c[3] is not None]
+        findings = check_paperwork(
+            declared=declared, fixes=track, filed_at=filed,
+            observed_arrival=observed, prior_calls=before,
+            draught_m=draughts.get(vid))
+        bad = [f for f in findings if f.is_contradiction]
+        if not bad:
+            continue
+
+        top = max(bad, key=lambda f: f.confidence)
+        score = min(0.97, top.confidence + 0.05 * (len(bad) - 1))
+        ev = [dict(edge="paperwork-contradiction", src=node,
+                   dst=f"notification:{row.get('notification_id')}",
+                   confidence=round(f.confidence, 3),
+                   source="paperwork_rules", source_ref=source_ref,
+                   props=dict(check=f.check, statement=f.statement,
+                              passage=f.passage, locator=f.locator,
+                              document=row.get("document_name"),
+                              document_format=row.get("document_format"),
+                              **f.detail))
+              for f in bad]
+        _emit(out, store, "paperwork_contradiction", node, filed.timestamp(),
+              score, ev,
+              props=dict(checks=[f.check for f in bad],
+                         n_contradictions=len(bad),
+                         document=row.get("document_name"),
+                         document_format=row.get("document_format"),
+                         notification_id=row.get("notification_id"),
+                         statements=[f.statement for f in bad],
+                         passages=[f.passage for f in bad if f.passage],
+                         locators=[f.locator for f in bad if f.locator]))
+    return out
+
+
+def _mmsi_of(store, node: str):
+    """The MMSI the graph currently holds for a vessel node, or None."""
+    n = store.node(node)
+    if not n:
+        return None
+    props = n.get("props") or {}
+    return props.get("mmsi") or (node.split(":")[-1] if node else None)
+
+
+def detect_unmatched_notification(store, notifications: list[dict], *,
+                                  source_ref: str) -> list[str]:
+    """A form for a hull nothing in the picture holds.
+
+    *"Treat non-resolution as a finding rather than a failure — a notification
+    that cannot be matched to any track ... is exactly the kind of gap the Coast
+    Guard wants surfaced."*
+
+    **The subject is the notification, not a vessel**, because there is no
+    vessel — that is the finding. Minting a stub hull to hang the alert on would
+    put a ship in the graph that nothing has ever seen, which is the shadow-stub
+    failure ADR-022 exists to prevent, arriving through a door marked
+    "helpfulness".
+
+    A document nobody could *read* is deliberately not this alert. An unreadable
+    attachment is an infrastructure problem — a missing library, a corrupt file
+    — and reporting it as an unidentified vessel would put an IT ticket on a
+    watchkeeper's queue.
+    """
+    out: list[str] = []
+    for row in notifications:
+        if row.get("vessel_id"):
+            continue
+        if row.get("unread_reason"):
+            continue                      # could not read it: not a hull gap
+        if not row.get("fields_read"):
+            continue                      # nothing extracted: same reason
+        nid = row.get("notification_id")
+        subject = f"notification:{nid}"
+        store.upsert_node(subject, "notification",
+                          props=dict(document=row.get("document_name"),
+                                     document_format=row.get("document_format"),
+                                     vessel_name=row.get("vessel_name"),
+                                     imo=row.get("imo")),
+                          is_synthetic=bool(row.get("is_synthetic")))
+        why = row.get("resolved_by")
+        detail = ("two hulls answer to that name, so picking either would be a "
+                  "coin flip dressed as an identification"
+                  if why == "name_ambiguous" else
+                  "no IMO, call sign or name in the form matches a hull this "
+                  "system holds")
+        ts = pd.Timestamp(row.get("received_at"))
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        ev = [dict(edge="unmatched-notification", src=subject,
+                   dst="registry:vessel-identity", confidence=0.6,
+                   source="pans_resolver", source_ref=source_ref,
+                   props=dict(document=row.get("document_name"),
+                              declared_name=row.get("vessel_name"),
+                              declared_imo=row.get("imo"),
+                              reason=detail))]
+        _emit(out, store, "notification_unmatched", subject, ts.timestamp(),
+              0.6, ev,
+              props=dict(document=row.get("document_name"),
+                         document_format=row.get("document_format"),
+                         declared_name=row.get("vessel_name"),
+                         declared_imo=row.get("imo"),
+                         arrival_port=row.get("arrival_port"),
+                         reason=detail))
+    return out
+
+
+def _port_name_of(text):
+    """A declared or recorded port name, resolved through the one gazetteer.
+
+    Shared with the paperwork rules deliberately: a form saying "NHAVA SHEVA"
+    and a port call recorded as "JNPT" are the same place, and two rules that
+    resolved them differently would disagree about whether anybody filed.
+    """
+    from .voyage import resolve_destination
+    return resolve_destination(text)
+
+
+#: The regulation's filing window: a notification is due 24-96 hours before
+#: arrival. Used here only as the *outer* edge — an arrival whose form would
+#: have been filed before our records begin cannot be judged.
+NOTIFICATION_LEAD_HOURS = 96.0
+
+
+def detect_arrival_without_notification(store, notifications: list[dict],
+                                        port_calls: list[dict], *,
+                                        source_ref: str,
+                                        observed_from=None) -> list[str]:
+    """A vessel berths and nobody filed for her — the same gap, other side.
+
+    Paired with `detect_unmatched_notification` deliberately. The requirement
+    names both in one breath, and they are the two halves of one question: does
+    every arrival have a form, and does every form have an arrival.
+
+    **Only arrivals we can attribute count.** A port call on a hull the
+    notification set could never have named — one with no identity at all —
+    would be reported as unnotified every time, which is a fact about our
+    identity coverage rather than about anybody's paperwork.
+
+    Two further classes of arrival are **not checkable**, and both were found
+    reporting as findings before they were excluded:
+
+    *An arrival in the first days of the record.* A form for a vessel berthing
+    on day two was due on day minus two, before anything we hold. "Nobody filed
+    for her" is a claim about a window we cannot see, and every corpus and every
+    live feed has this edge at its start. Six of the first ten alerts this rule
+    ever produced were vessels that berthed in the opening seventy-two hours.
+
+    *A stop with no named port.* Pre-arrival notification is a duty owed on
+    arrival at a *port*. An offshore anchorage or a drift the port-call detector
+    recorded without a name is not one, and reporting it demands paperwork
+    nobody owed — which is how a storage tanker sitting at a floating terminal
+    becomes an alert about her paperwork.
+    """
+    filed: set = {row.get("vessel_id") for row in notifications
+                  if row.get("vessel_id")}
+    # **A form nobody could match to a hull is still a form somebody filed.**
+    # The two halves of this gap — a notification matching no vessel, and a
+    # vessel matching no notification — are one question, and an arrival that an
+    # *unresolved* notification already names is that question answered once.
+    # Reporting it twice put a second alert on P6's decoy, whose entire point is
+    # that the finding is "we cannot identify this form" and never a suspicion
+    # about the hull.
+    declared_arrivals: set = set()
+    for row in notifications:
+        if row.get("vessel_id") or not row.get("fields_read"):
+            continue
+        port = _port_name_of(row.get("arrival_port"))
+        if port:
+            declared_arrivals.add(port)
+    horizon = None
+    if observed_from is not None:
+        horizon = pd.Timestamp(observed_from)
+        if horizon.tzinfo is None:
+            horizon = horizon.tz_localize("UTC")
+        horizon = horizon + pd.Timedelta(hours=NOTIFICATION_LEAD_HOURS)
+    seen: set = set()
+    out: list[str] = []
+    for pc in sorted(port_calls, key=lambda p: str(p.get("start_time"))):
+        vid = pc.get("vessel_id")
+        if not vid or vid in filed or vid in seen:
+            continue
+        port = pc.get("port_name")
+        if not port:
+            continue                      # not an arrival at a port: no duty
+        if _port_name_of(port) in declared_arrivals:
+            continue                      # an unresolved form already names it
+        node = vessel_node_id(vid)
+        if store.node(node) is None:
+            continue
+        ts = pd.Timestamp(pc.get("start_time"))
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        if horizon is not None and ts < horizon:
+            continue                      # her filing window predates the record
+        seen.add(vid)
+        ev = [dict(edge="arrival-without-notification", src=node,
+                   dst=f"port:{str(port).lower()}", confidence=0.55,
+                   source="pans_resolver", source_ref=source_ref,
+                   props=dict(port=port, arrived=ts.isoformat()))]
+        _emit(out, store, "arrival_without_notification", node, ts.timestamp(),
+              0.55, ev,
+              props=dict(port=port, arrived=ts.isoformat(),
+                         lat=pc.get("lat"), lon=pc.get("lon")))
     return out

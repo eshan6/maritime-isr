@@ -42,6 +42,9 @@ CONFORMED_TABLES = (
     # corpus that contained three. A table absent from this list is a table the
     # serving layer cannot see, whatever is on disk.
     "ais_voyage",
+    # Arrival notifications, extracted from the documents in the inbox
+    # (ADR-036). The documents themselves are not a table — they are inputs.
+    "arrival_notification",
     "gfw_vessel_identity",
     "gfw_encounters",
     "gfw_loitering",

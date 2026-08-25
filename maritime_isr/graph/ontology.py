@@ -42,6 +42,14 @@ NODE_TYPES_V1 = [
     # the operator's polygon its own type would make that false in the one
     # place it is easiest to check.
     "zone",
+    # An arrival notification (ADR-036). A node type of its own for the same
+    # reason `contact` is one: it is a *document*, not a ship, and the finding
+    # that matters most about it is precisely that it names a hull nothing has
+    # seen. Attaching that alert to an invented vessel node would put a ship in
+    # the graph that no sensor has ever observed — the shadow-stub failure
+    # ADR-022 exists to prevent — and would then let a neighbourhood query
+    # return a piece of paper as if it were a vessel.
+    "notification",
 ]
 
 # name -> dict(src=[...], dst=[...], half_life_days=float|None, kind=state|event)

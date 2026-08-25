@@ -2829,3 +2829,202 @@ to lie. Zero false positives across 3,091 declarations from 131 hulls.
   correct and has never consumed a live message, because there is no always-on
   host. Its parser is exercised by fixtures.
 * Every figure here is measured on the **synthetic suite** (CLAUDE.md §4.6).
+
+---
+
+## ADR-036 — Pre-arrival notifications: unstructured in, evidence out *(Accepted)*
+
+**Context.** Area 4 of the IDEX Challenge 82 brief names a problem the rest of
+the system does not have:
+
+> Pre-Arrival Notification of Ships data reaches the Coast Guard as PDF, Word
+> and spreadsheet attachments by email. It contains vital information but cannot
+> be stored in a structured database or fused with AIS because of its format.
+
+Everything upstream of this area consumes feeds that are already records. This
+one consumes a mailbox. The brief is explicit that a clean document set proves
+nothing, because *the entire difficulty here is that the input is
+unstructured* — so the corpus generates the mess as well as the truth: text
+PDFs, scanned faxes with no text layer, Word forms that are sometimes tables,
+spreadsheets whose form starts three rows down, and the structured portal feed
+the requirement asks the system to stay compatible with.
+
+**Decisions.**
+
+1. **One record shape for every format, including the electronic one.** The
+   portal feed is *another reader producing the same passages*, not a second
+   pipeline. That is what makes "the electronic feed drops in without rework" a
+   thing demonstrated by shared code rather than asserted in a design note: one
+   extractor serves the fax and the portal, so a change to date parsing cannot
+   fix one and break the other.
+
+2. **Per-field provenance, and a locator an analyst can put a finger on.**
+   Every value carries the passage it was read from, where in the document that
+   was ("page 1 (scanned)", "PANS!A5", "table 2 row 3"), the method, and a
+   confidence *earned* by that method — 1.0 for a spreadsheet cell, 0.97 for a
+   PDF text layer, whatever tesseract reports (floored and capped) for OCR. A
+   character offset satisfies a schema and helps nobody.
+
+3. **Non-resolution is a finding, not a failure**, in both directions: a form
+   naming a hull nothing holds, and a hull berthing with no form. There is no
+   fuzzy name matching — normalisation recovers what is lossless (prefixes,
+   punctuation, a dropped space) and a transposition stays unresolved, because
+   edit distance would resolve "GRANITE TRUIMPH" and would equally resolve
+   "GRANITE TRIUMPH II", a different ship.
+
+4. **Three-valued rules.** `contradiction` / `ok` / `not_checkable`, as in
+   ADR-035. A fifth of real forms omit a field and a fax loses two more to OCR;
+   folding "the form did not say" into "the form was fine" reports a clean inbox
+   nobody read.
+
+5. **On declared cargo, the general case is not built.** A bulker declaring
+   cement and riding high could be in ballast, part-laden, or lying, and motion
+   alone does not separate those. What *is* checked is the one case that is
+   arithmetic rather than inference: a hull declaring "no cargo" while
+   broadcasting a laden draught. Approximating the rest would fire on honest
+   ballast voyages, which is the alert-fatigue failure ADR-004 exists to
+   prevent.
+
+**Eleven defects, all of which presented as silence.** The unit suite was green
+and the extraction stage reported 3,107 fields read from 292 documents at 10.6
+of 11 per document. The alert counts were what exposed the area: 24
+`notification_unmatched` against 1 authored, 10 `arrival_without_notification`
+against 1, and 8 `paperwork_contradiction` against 2.
+
+* **The filing time came from the filesystem.** `received_at` was the
+  attachment's mtime — when the generator wrote the file, and in the real case
+  when somebody scanned or forwarded it. Every paperwork rule measures a
+  declaration against the track *as at the filing time*, so with a timestamp a
+  month after the corpus window, `check_last_port` looked before a window that
+  had not happened and `check_arrival_window` found no arrival after filing.
+  Both returned `not_checkable` for all 292 documents. **Two of the three checks
+  were dead corpus-wide and nothing said so** — the eight contradictions that
+  did fire were all the third check. The filing date is now written into the
+  document and *read like every other field*, with the mtime kept as a labelled
+  fallback (`received_at_source`) because a value inferred from the filesystem
+  and one read off the page are not the same evidence.
+
+* **The resolver read one identity table.** `gfw_vessel_identity` carries an IMO
+  for 135 of 502 hulls, while `ais_voyage` carries one for every hull that
+  broadcast a message 5. A notification declaring IMO 1001661 for SOUTHERN
+  TRADER matched nothing, dropped to the name rung, met a transposed name, and
+  was reported as a form naming a ship we cannot identify — when the hull had
+  been broadcasting that exact IMO all month. A gap in one table was being
+  reported as a gap in somebody's paperwork. The registry is now the union of
+  every identity source, merged most-trusted-first and fill-only.
+
+* **The background corpus contradicted itself by accident.** Cargo was drawn
+  uniformly from eleven values, one of which is "Ballast — no cargo", against a
+  draught drawn independently — so roughly one form in thirty declared no cargo
+  on a hull broadcasting a laden draught. The rule reported the contradiction it
+  was handed, correctly, eight times, about vessels nobody wrote and no analyst
+  could be told anything true about. The background now declares only what its
+  draught supports, and the contradiction is authored as **P8** so that it can
+  be counted.
+
+* **Arrivals were judged against a window predating the record.** A vessel
+  berthing on day two of the corpus was due to file on day minus two. Six of
+  the ten `arrival_without_notification` alerts were hulls that berthed in the
+  opening seventy-two hours, and this edge exists on every live feed's first
+  days too. An arrival whose filing window falls before the record begins is now
+  `not_checkable`, as is a stop the port-call detector recorded with no port
+  name — pre-arrival notification is a duty owed on arrival at a *port*, and
+  demanding paperwork for an unnamed offshore anchorage turned storage tankers
+  into paperwork alerts.
+
+Fixing the filing time brought the two strongest checks back to life, and they
+promptly produced **33** contradictions where 3 were authored. Both were the
+same mistake in mirror image: **the rules joined a declaration to the wrong
+event.**
+
+* **The arrival window matched by time, not by port.** `observed_arrival` was
+  the first port call at or after filing. But a notification is filed 24-96
+  hours ahead and a coastal vessel frequently makes another call inside that
+  window, so the rule compared one voyage's estimate against a different
+  voyage's berthing. It produced 30 contradictions, every single one of the form
+  "berthed 31-65 hours *early*" — a distribution with no honest reading. A
+  notification is now matched to the first recorded call **at the port the form
+  names**; a port she never reaches yields no arrival to measure against, which
+  is `not_checkable`, because a diverted voyage is not a false declaration about
+  its ETA.
+
+* **The last port compared against a gazetteer pin, then against the latest
+  call.** The gazetteer holds one coordinate for a port area tens of kilometres
+  across while the port-call detector records a berthing wherever she actually
+  stopped — up to 150 km away in this corpus — so a hull was accused of lying
+  about Karachi when her recorded call *was* Karachi, 144 km from the pin.
+  Comparing against her most recent prior call instead was the same error again:
+  a vessel that sailed from Mundra and then made an unnamed offshore stop has
+  still sailed from Mundra. The question is whether **any** call before filing
+  is at the port she names; the nearest-approach test remains as the fallback
+  for a hull with no recorded calls at all.
+
+* **The two halves of one gap both fired.** A form that resolves to no hull is
+  reported as `notification_unmatched`; the arrival it names was then *also*
+  reported as `arrival_without_notification`. That put a second alert on P6 —
+  the decoy whose entire point is that the finding is "we cannot identify this
+  form" and never a suspicion about the hull. A form nobody could match is still
+  a form somebody filed, so an arrival an unresolved notification already names
+  is no longer counted again.
+
+* **Three decoys declared last ports their own voyages contradicted.** P5, P6
+  and P7 were written with plausible-sounding origins — Mormugao, Sikka, Kandla
+  — that sit 113, 170 and 440 km from where the corpus actually sails them. A
+  decoy exists to prove the rule stays quiet on an honest form, so a decoy that
+  fires is worse than no decoy at all. P2's declared Kochi was 500 km from her
+  track too, which meant the authored arrival-window scenario was firing on the
+  last-port check and naming the wrong finding.
+
+A further defect fell out of the tests rather than the corpus: the OCR confusion
+table folded `|` to `I` but left `L` alone, so "Vesse| Name" squashed to
+VESSEINAME while "Vessel Name" squashed to VESSELNAME. `I`, `l`, `1` and `|` are
+one shape to a scanner and the fold has to reach a single representative, or it
+fails on the most common label in the corpus on exactly the format it exists
+for. Folding `L` is aggressive, so `tests/test_pans.py` asserts no two fields'
+label sets collide under the table — attaching a value to the wrong field is
+worse than failing to read it.
+
+Two more surfaced only when the full suite ran, and both are about the corpus
+rather than the rules:
+
+* **Adding one hull to the cast re-rolled the whole background fleet.** The cast
+  tuples are ordered so that an addition never renumbers an existing hull, and
+  the comments in `cast.py` say so. But minting still *draws* from `world.rng`,
+  and every scenario drawing after `build_vessels` then gets different numbers.
+  One extra Suezmax moved the vessel-type model's coarse accuracy from above its
+  75% floor to 65% — not because the hull taught the model anything, but because
+  its training data had been re-rolled behind it. Late cast additions now mint
+  from a derived stream (`cast.LATE_ADDITIONS`), which is what the existing
+  ordering discipline was already reaching for.
+
+* **A synthetic document read by a real connector has to say both things.**
+  `arrival_notification` is the first table landed by a connector rather than by
+  the scenario writer, and the two facts collide: `pans-inbox` is honestly which
+  connector produced the row — the whole design is that the connector really
+  runs — while the corpus invariant is that no synthetic row may be mistaken for
+  real. Forcing `source_id='synthetic-scenario'` would have made the connector
+  lie about its own source. The row now carries
+  `synthetic-scenario:pans-inbox`, the prefix convention `graph.store` already
+  used for exactly this case, and the validator matches on the prefix rather
+  than on equality.
+
+**Consequences.**
+
+* `arrival_notification` is a new conformed table, in `ALL_TABLES` and in
+  `api.reader.CONFORMED_TABLES` (ADR-035's lesson: a table missing from that
+  tuple makes `has()` answer False over a corpus that contains rows).
+* `pans_inbox/` sits beside `conformed/`, not inside it: the documents are
+  *inputs* with the standing of an unread attachment, not landed records.
+* The generator holds `LADEN_DRAUGHT_M` and `BALLAST_PHRASES` independently of
+  `anomaly.paperwork` rather than importing them. A corpus built from a rule's
+  own thresholds cannot falsify that rule. Drift between the two is caught by a
+  test, which is what makes independence safe rather than merely separate.
+* OCR needs a binary pip cannot install. `reader_availability()` is printed
+  before every run, because a pipeline that silently reads four formats of five
+  reports a smaller inbox than arrived, and the missing fifth looks like nobody
+  submitted rather than like nobody could read.
+* No module under `ingest/pans/` or `anomaly/paperwork.py` reads
+  `scenario_truth` (ADR-019); a test asserts it.
+* Every figure here is measured on the **synthetic suite** (CLAUDE.md §4.6).
+  Real-feed precision will be lower and must be re-measured on the deploy host,
+  which does not exist yet.

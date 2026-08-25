@@ -643,10 +643,17 @@ def _check_h3_and_envelope(world, rep) -> None:
                 rep.add(RULE_ENVELOPE, table,
                         f"row missing envelope fields {missing}")
                 break
-            if r["source_id"] != SYNTHETIC_SOURCE_ID:
+            # A prefix rather than equality, matching `graph.store`'s rule.
+            # A table landed by a real connector over synthetic documents
+            # (`arrival_notification`, ADR-036) has to name the connector that
+            # read it *and* declare itself synthetic; `synthetic-scenario:
+            # pans-inbox` says both. Requiring bare equality would have forced
+            # the connector to lie about which source produced the row.
+            if not str(r["source_id"]).startswith(SYNTHETIC_SOURCE_ID):
                 rep.add(RULE_ENVELOPE, table,
                         f"is_synthetic row carries source_id "
-                        f"{r['source_id']!r}, not {SYNTHETIC_SOURCE_ID!r}")
+                        f"{r['source_id']!r}, which does not begin with "
+                        f"{SYNTHETIC_SOURCE_ID!r}")
                 break
         # H3 on positioned rows
         positioned = [r for r in syn

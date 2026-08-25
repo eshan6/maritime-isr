@@ -577,6 +577,73 @@ def _current_identities(reader) -> list[dict]:
     return out
 
 
+def _read_pans_inbox() -> list[dict]:
+    """Read the arrival-notification inbox and land what came out (ADR-036).
+
+    **This is the connector run, inside the pipeline, over documents on disk.**
+    Not a shortcut past it: the extractor opens the same PDFs, spreadsheets and
+    faxes an operator would receive, and lands whatever it manages to read. A
+    stage that took the generator's own field values would prove the rules work
+    and nothing at all about the half of Area 4 that is the hard half.
+    """
+    from maritime_isr.config import DATA_ROOT
+    from maritime_isr.ingest.pans.land import (FIELD_NAMES, TABLE, land_inbox,
+                                               read_inbox)
+    from maritime_isr.ingest.pans.readers import reader_availability
+    from maritime_isr.ingest.pans.resolve import merge_identity_sources
+    from maritime_isr.scenario.pans import PANS_DIRNAME
+
+    inbox = DATA_ROOT / PANS_DIRNAME
+    if not inbox.exists():
+        print("  no pans_inbox/ — Area 4 has nothing to read")
+        return []
+
+    avail = reader_availability()
+    missing = {k: v for k, v in avail.items() if v != "ok"}
+    print(f"  readers        : {len(avail) - len(missing)}/{len(avail)} "
+          f"available" + (f" — MISSING {sorted(missing)}" if missing else ""))
+
+    # The registry the resolver sees is everything the system holds about a
+    # hull, not one table's opinion of her: `gfw_vessel_identity` first, then
+    # the static identity she broadcast herself in AIS message 5. See
+    # `resolve.merge_identity_sources` for why reading only the first turns a
+    # gap in our coverage into an accusation about somebody's paperwork.
+    registry = merge_identity_sources(
+        list(read_table("gfw_vessel_identity")),
+        [dict(vessel_id=r.get("vessel_id"), imo=r.get("imo"))
+         for r in read_table("ais_voyage")],
+    )
+    rows = read_inbox(inbox, registry, is_synthetic=True)
+    land_inbox(inbox, registry, is_synthetic=True)
+
+    by_fmt = Counter(r["document_format"] for r in rows)
+    resolved = sum(1 for r in rows if r.get("vessel_id"))
+    unread = sum(1 for r in rows if r.get("unread_reason"))
+    fields = sum(r.get("fields_read") or 0 for r in rows)
+    print(f"  notifications  : {len(rows):,} document(s) {dict(by_fmt)}")
+    print(f"                   {resolved:,} resolved to a hull, "
+          f"{len(rows) - resolved - unread:,} unmatched, {unread:,} unreadable")
+    print(f"                   {fields:,} field(s) extracted "
+          f"({fields / max(len(rows), 1):.1f} per document of "
+          f"{len(FIELD_NAMES)})")
+    by_how = Counter(r.get("resolved_by") for r in rows if r.get("vessel_id"))
+    if by_how:
+        print(f"                   resolved by {dict(by_how)}")
+    print(f"  landed into {TABLE}")
+    return rows
+
+
+def _port_call_rows() -> list[dict]:
+    """The arrivals the corpus recorded, for the paperwork rules to check."""
+    out = []
+    for r in read_table("gfw_port_visits"):
+        out.append(dict(vessel_id=r.get("vessel_id"),
+                        start_time=r.get("start_time"),
+                        port_name=r.get("port_name"),
+                        lat=r.get("lat"), lon=r.get("lon")))
+    return out
+
+
 def _area2_inputs():
     """Current identities and the per-area baseline index (ADR-032).
 
@@ -685,6 +752,8 @@ def run_anomalies(store: GraphStore, tracks_out: dict,
     # and inspectable rather than living for the duration of one call.
     identities, baselines = _area2_inputs()
     declarations = _voyage_declarations()
+    notifications = _read_pans_inbox()
+    port_calls = _port_call_rows()
 
     # ---- Area 3 inputs (ADR-033) -----------------------------------------
     # The pair search is the expensive half of interaction detection, so it is
@@ -702,6 +771,8 @@ def run_anomalies(store: GraphStore, tracks_out: dict,
         source_ref="scenario-combined",
         identities=identities,
         declarations=declarations,
+        notifications=notifications,
+        port_calls=port_calls,
         baselines=baselines,
         interactions=interactions)
     print(f"  ran in {time.time() - t0:.0f}s")

@@ -231,6 +231,33 @@ FACTOR_KINDS: dict[str, FactorSpec] = dict([
        actions=("call_vhf", "check_arrival_notification",
                 "compare_own_history", "escalate"),
        repeats=REPEAT_RESTATEMENT),
+    # ---- paperwork: Area 4, and the family stops being empty --------------
+    _s("paperwork_contradiction", family="paperwork",
+       area="Area 4 (PANS / arrival notifications)",
+       weight=0.75,
+       label="Paperwork contradicts her track",
+       blurb="what her arrival notification declares is disproved by her own "
+             "AIS — a last port she was never near, or an arrival time she "
+             "missed by days rather than hours",
+       actions=("check_arrival_notification", "call_vhf",
+                "compare_own_history", "escalate"),
+       repeats=REPEAT_RESTATEMENT),
+    _s("notification_unmatched", family="paperwork",
+       area="Area 4 (PANS / arrival notifications)",
+       weight=0.55,
+       label="Notification names a ship we cannot find",
+       blurb="a well-formed arrival notification whose declared identity "
+             "matches no hull this system holds",
+       actions=("check_registry", "check_arrival_notification", "monitor"),
+       repeats=REPEAT_RESTATEMENT),
+    _s("arrival_without_notification", family="paperwork",
+       area="Area 4 (PANS / arrival notifications)",
+       weight=0.5,
+       label="Arrived with no notification filed",
+       blurb="she berthed and no arrival notification was ever received for "
+             "her — the same gap as an unmatched form, from the other side",
+       actions=("check_arrival_notification", "call_vhf", "monitor"),
+       repeats=REPEAT_OCCURRENCES),
     _s("ais_spoofing", family="identity", area="roadmap 2.2 / 5.2",
        weight=0.85,
        label="Identity contradiction on the air",

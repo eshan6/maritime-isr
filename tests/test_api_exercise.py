@@ -263,11 +263,18 @@ def test_alerts_carry_evidence_chains(client, H, alerts_or_skip):
         # **Not every alert is about a vessel, and that is deliberate.** A
         # dark-vessel alert names the *contact* — a SAR detection, or a coastal
         # radar track (ADR-028) — because nothing is known about which hull it
-        # is. Naming a vessel there would be inventing one, and the whole point
-        # of the finding is that it cannot be named. What must hold for every
-        # alert is that its subject is a kind of thing the graph models and that
-        # it renders an evidence chain.
-        assert al["subject"].startswith(("vessel:", "detection:", "contact:")), (
+        # is. An unmatched arrival notification names the *notification*
+        # (ADR-036), for the same reason from the other direction: the finding
+        # is that this form matches no hull we hold, and minting a stub vessel
+        # to hang it on would put a ship in the graph that nothing has ever
+        # seen — the shadow-stub failure ADR-022 exists to prevent, arriving
+        # through a door marked "helpfulness". Naming a vessel in either case
+        # would be inventing one, and the whole point of the finding is that it
+        # cannot be named. What must hold for every alert is that its subject is
+        # a kind of thing the graph models and that it renders an evidence
+        # chain.
+        assert al["subject"].startswith(
+            ("vessel:", "detection:", "contact:", "notification:")), (
             f"alert subject {al['subject']!r} is not a modelled node kind")
         assert al["evidence"], "every alert renders an evidence chain"
         assert "is_synthetic" in al
