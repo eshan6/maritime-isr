@@ -126,6 +126,11 @@ def test_the_ocr_fold_never_merges_two_different_labels():
     Each entry claims two characters are one letter to a scanner. A fold that
     merged two labels would attach a value to the *wrong* field, which is worse
     than failing to read it — so no squashed form may name more than one field.
+
+    This now covers the extractor-only synonyms too, because that is where a
+    widening lands: every label added to `EXTRA_SYNONYMS` is a new chance for
+    two fields to collide under the fold, and the check has to grow with the
+    table it is checking.
     """
     from maritime_isr.ingest.pans.extract import FIELD_PATTERNS
 
@@ -179,6 +184,396 @@ def test_extraction_takes_no_format_argument():
 
     params = inspect.signature(extract_notification).parameters
     assert list(params) == ["passages"]
+
+
+# ==========================================================================
+# 2b. the wild corpus — forms from agencies the generator has never seen
+#
+# Everything above this line is measured on documents the generator wrote, and
+# the generator writes against the *same* `LABEL_SYNONYMS` table the extractor
+# reads. That makes any accuracy figure from the corpus circular: a synonym
+# added to the shared table is one the generator immediately starts producing,
+# so the reader is never tested on a label it was not told about.
+#
+# `tests/pans_wild.py` is the other half. Labels, notations and structural
+# traps the generator cannot see, scored the same way every time, so a widening
+# can be shown to have widened something. **On the synthetic suite** — a harder
+# synthetic than the corpus, but still not one real agency's mail.
+# ==========================================================================
+
+def _wild_score():
+    from maritime_isr.ingest.pans.extract import extract_notification
+    from maritime_isr.ingest.pans.readers import Passage
+
+    from tests.pans_wild import score_documents
+
+    return score_documents(extract_notification, Passage)
+
+
+def test_the_wild_fixtures_are_actually_wild():
+    """The harness is only worth anything while the generator cannot see it.
+
+    If these labels drift into `scenario.pans.LABEL_SYNONYMS`, the corpus starts
+    writing them and the score goes back to measuring the extractor against its
+    own vocabulary. So the fixture set is checked for the property that makes it
+    a test: most of what it says is not in the table the generator holds.
+    """
+    from maritime_isr.ingest.pans.extract import _clean_label, squash
+    from maritime_isr.scenario.pans import LABEL_SYNONYMS
+
+    from tests.pans_wild import WILD_DOCUMENTS
+
+    known = {squash(s) for syns in LABEL_SYNONYMS.values() for s in syns}
+    labels = set()
+    for doc in WILD_DOCUMENTS:
+        for line in doc.passages:
+            head = line.split(":")[0]
+            s = squash(_clean_label(head))
+            if s:
+                labels.add(s)
+    unknown = labels - known
+    assert len(unknown) >= 30, (
+        f"only {len(unknown)} label(s) here are unknown to the generator; the "
+        f"harness has stopped being a test of anything it was not told")
+
+
+def test_extraction_reads_forms_written_by_agencies_it_has_never_seen():
+    """The number this asserts is the point of the whole widening.
+
+    Measured 55/110 before it (50.0%, two misattributions) and 109/110 after,
+    **on the synthetic suite**. The floor is set below the measured figure so a
+    small honest regression is visible as a number rather than as a red test on
+    an unrelated change — but a *misattribution* has no floor at all: see the
+    next test.
+    """
+    r = _wild_score()
+    assert r["expected"] >= 100
+    assert r["accuracy"] >= 0.95, (
+        f"{r['correct']}/{r['expected']} — " + "; ".join(r["failures"]))
+
+
+def test_no_widening_ever_puts_a_value_on_the_wrong_field():
+    """Zero, and it stays zero.
+
+    A field that cannot be read costs a "not checkable" downstream, which is an
+    honest answer an analyst can act on. A field read *wrong* costs a
+    contradiction nobody wrote — the paperwork rules will compare that value
+    against a track and report a vessel for it. Every label added to the
+    extractor's vocabulary is a chance to create one, so the wild set asserts
+    the count rather than the rate.
+    """
+    r = _wild_score()
+    assert r["misattributed"] == 0, "; ".join(r["misattributions"])
+
+
+def test_a_label_naming_a_field_we_do_not_model_is_refused():
+    """Recognised in order to be refused.
+
+    Every label here contains a word that names a field we *do* extract, and
+    without the refusal list each one is a confident wrong answer: a berthing
+    draught read as a last port, an office address read as an agent, a ship
+    type read as a ship name. The refusal costs a value; the alternative costs
+    an alert.
+    """
+    from maritime_isr.ingest.pans.extract import _label_of
+
+    for label in ("Next Port", "Port of Registry", "Port of Loading",
+                  "Vessel Type", "Draught on Arrival", "Agent Address",
+                  "Owner's Address", "Date of Departure from Last Port",
+                  "Master's Name", "Gross Tonnage", "Cargo Quantity",
+                  "Number of Passengers", "Expected Time of Departure",
+                  "Crew Nationality"):
+        assert _label_of(label) is None, label
+
+    # And a substring of a word is not a label: PORT lives inside TRANSPORT.
+    assert _label_of("Transport Document No.") is None
+
+
+def test_the_refusal_list_and_the_field_list_never_name_the_same_label():
+    """The two tables are checked against each other for the same reason the
+    fold is checked against itself: a label in both would resolve by whichever
+    lookup ran first, and which one that is would be an implementation
+    detail deciding whether a value lands on a field or nowhere."""
+    from maritime_isr.ingest.pans.extract import _EXACT, _REFUSED
+
+    assert not (set(_EXACT) & _REFUSED)
+
+
+def test_dates_in_notations_the_generator_never_writes():
+    """Eighteen notations, none of them produced by `scenario.pans.eta_text`.
+
+    Read 3 of 18 before this widening and 18 of 18 after, **on the synthetic
+    suite**. Day-first throughout, including the two at the end that are only
+    unambiguous if you already know the convention.
+    """
+    from datetime import timezone
+
+    from maritime_isr.ingest.pans.extract import parse_eta
+
+    from tests.pans_wild import WILD_DATES
+
+    for text, want in WILD_DATES:
+        got = parse_eta(text)
+        assert got is not None, text
+        assert got.astimezone(timezone.utc).isoformat() == want, text
+
+
+def test_an_explicit_absence_is_a_third_answer_and_not_a_value():
+    """"The agent wrote NIL" and "the box was never filled in" differ.
+
+    Both leave the rules with nothing to compare, so both end in "not
+    checkable" — but only one of them is a thing the form *said*, and an
+    operator triaging an inbox needs to see which. So an absence lands as a
+    passage with a null value, and never as the string "NIL".
+
+    Reading it as a value would be worse than losing it: "Cargo: NIL" turned
+    into a cargo declaration meets `check_declared_ballast`, which would then
+    report a contradiction against any laden draught on the strength of an
+    agent's shorthand for an empty box.
+    """
+    from maritime_isr.ingest.pans.extract import (ABSENT_METHOD,
+                                                  extract_notification)
+    from maritime_isr.ingest.pans.readers import Passage
+
+    from tests.pans_wild import WILD_ABSENCES
+
+    for token in WILD_ABSENCES:
+        fields = extract_notification(
+            [Passage(f"Cargo: {token}", "page 1", 0.97, "pdf_text")])
+        f = fields["cargo"]
+        assert f.value is None, token
+        assert f.raw == token and f.passage.endswith(token)
+        assert f.method.endswith(ABSENT_METHOD)
+        # The passage was read perfectly; it is the *answer* that is empty.
+        assert f.confidence == 0.97
+
+    # A real ballast declaration is untouched — the rule downstream reads this
+    # phrase, and an absence table that swallowed it would silence a check.
+    fields = extract_notification(
+        [Passage("Cargo: Ballast — no cargo", "page 1", 0.97, "pdf_text")])
+    assert fields["cargo"].value == "Ballast — no cargo"
+
+
+def test_a_declared_absence_is_not_counted_as_a_field_read(tmp_path,
+                                                           monkeypatch):
+    """`fields_read` gates two alerts, so it has to mean values.
+
+    A document that is a column of dashes has been read and says nothing. If
+    its absences counted, it would present as a form full of answers that
+    resolve to no hull — which is the `notification_unmatched` alert, raised
+    about a document nobody could learn anything from.
+    """
+    from maritime_isr.ingest.pans import land as land_mod
+    from maritime_isr.ingest.pans.readers import Passage
+
+    passages = [Passage("Vessel Name: SEA LEOPARD", "page 1", 1.0, "xlsx_cell"),
+                Passage("Crew: NIL", "page 1", 1.0, "xlsx_cell"),
+                Passage("Cargo: --", "page 1", 1.0, "xlsx_cell")]
+    path = tmp_path / "PANS-X.xlsx"
+    path.write_bytes(b"")
+    monkeypatch.setattr(land_mod, "read_document", lambda p: passages)
+    row = land_mod._row_for(path, [], is_synthetic=True)
+
+    assert row["fields_read"] == 1
+    assert row["fields_declared_absent"] == 2
+    assert row["crew_count"] is None
+    # The passage still lands, because "the agent wrote NIL" is evidence.
+    assert row["crew_count_passage"] == "Crew: NIL"
+    assert row["crew_count_method"].endswith("declared_absent")
+
+
+def test_first_reading_wins_but_an_absence_is_upgraded_by_a_real_answer():
+    """First-wins is still right, with one exception that is not a hedge.
+
+    Forms repeat labels, and the later mention is usually the worse one —
+    "ATLANTIC PIONEER (Berth 4)" in a sign-off block is not a better vessel
+    name than the header's. But a *dash* in a header block is not a reading at
+    all, and letting it permanently blank a field the form answers further down
+    would be first-wins producing an answer worse than either line alone.
+    """
+    from maritime_isr.ingest.pans.extract import extract_notification
+    from maritime_isr.ingest.pans.readers import Passage
+
+    def read(*lines):
+        return extract_notification(
+            [Passage(t, "page 1", 0.97, "pdf_text") for t in lines])
+
+    fields = read("Vessel: ATLANTIC PIONEER",
+                  "Vessel: ATLANTIC PIONEER (Berth 4)")
+    assert fields["vessel_name"].value == "ATLANTIC PIONEER"
+
+    fields = read("Call Sign: --", "Radio Call Sign: VTAB4")
+    assert fields["call_sign"].value == "VTAB4"
+
+    # …and a real value is never downgraded to an absence by a later dash.
+    fields = read("Call Sign: VTAB4", "Call Sign: --")
+    assert fields["call_sign"].value == "VTAB4"
+
+
+def test_a_two_column_row_is_two_fields_and_not_one_long_value():
+    """The failure this prevents is silent, which is why it is worth code.
+
+    Split at the first separator, "Vessel Name: NORTH STAR   Call Sign: 3EAB7"
+    yields a vessel name of "NORTH STAR Call Sign: 3EAB7" — a value that
+    matches no hull, on a field that looks like it was read fine.
+    """
+    from maritime_isr.ingest.pans.extract import extract_notification
+    from maritime_isr.ingest.pans.readers import Passage
+
+    fields = extract_notification([Passage(
+        "Ship's Name: NORTH STAR        Radio Callsign: 3EAB7",
+        "page 1", 0.97, "pdf_text")])
+    assert fields["vessel_name"].value == "NORTH STAR"
+    assert fields["call_sign"].value == "3EAB7"
+
+    # The right-hand pair is often a field we do not model. It still has to be
+    # found, or the left-hand value swallows it.
+    fields = extract_notification([Passage(
+        "Flag State: PANAMA          Gross Tonnage: 48,120",
+        "page 1", 0.97, "pdf_text")])
+    assert fields["flag"].value == "PANAMA"
+    assert set(fields) == {"flag"}
+
+    # A colon inside a value is not a column boundary, because the words in
+    # front of it do not name a field.
+    fields = extract_notification([Passage(
+        "Cargo Description: Crude oil: 80,000 MT", "page 1", 0.97, "pdf_text")])
+    assert fields["cargo"].value == "Crude oil: 80,000 MT"
+
+
+def test_an_empty_box_is_not_filled_from_the_label_that_follows_it():
+    """A Word table with a blank cell reads as "Crew: Owner", and taking that
+    literally puts a company name in the crew count and loses the owner."""
+    from maritime_isr.ingest.pans.extract import extract_notification
+    from maritime_isr.ingest.pans.readers import Passage
+
+    fields = extract_notification([
+        Passage("Crew: Owner: BLUEWATER SHIPPING LTD", "t 1 r 1", 1.0,
+                "docx_table"),
+        Passage("Crew: Owner", "t 1 r 2", 1.0, "docx_table")])
+    assert fields["owner"].value == "BLUEWATER SHIPPING LTD"
+    assert "crew_count" not in fields
+
+
+def test_a_label_broken_across_an_ocr_line_break_is_rejoined():
+    """A scanner wraps "Last Port of Call" and the halves resolve to nothing.
+
+    The rejoin is deliberately narrow: only when the line's own label fails,
+    and only when the joined text matches a label *exactly*. A containment
+    match on a joined heading would read a title block as a field, which is the
+    misattribution this file spends most of its length avoiding.
+    """
+    from maritime_isr.ingest.pans.extract import extract_notification
+    from maritime_isr.ingest.pans.readers import Passage
+
+    fields = extract_notification([
+        Passage("Last Port of", "page 1 (scanned)", 0.58, "ocr"),
+        Passage("Call: Karachi", "page 1 (scanned)", 0.58, "ocr")])
+    assert fields["last_port"].value == "Karachi"
+
+    fields = extract_notification([
+        Passage("VESSEL PARTICULARS", "page 1", 0.97, "pdf_text"),
+        Passage("Type: Bulk Carrier", "page 1", 0.97, "pdf_text")])
+    assert fields == {}
+
+
+def test_a_column_layout_that_lost_its_colons_is_still_read():
+    """A PDF text layer frequently drops the punctuation a form was printed
+    with. The head is accepted only on an exact label match: with no separator
+    there is nothing else telling a label from the first two words of a
+    sentence."""
+    from maritime_isr.ingest.pans.extract import extract_notification
+    from maritime_isr.ingest.pans.readers import Passage
+
+    fields = extract_notification([
+        Passage("Vessel Name        GULF SENTINEL", "page 1", 0.97, "pdf_text"),
+        Passage("ETA                06 Jul 2026 0930", "page 1", 0.97,
+                "pdf_text"),
+        Passage("PRE-ARRIVAL NOTIFICATION    OF SHIPS", "page 1", 0.97,
+                "pdf_text")])
+    assert fields["vessel_name"].value == "GULF SENTINEL"
+    assert fields["eta"].value.startswith("2026-07-06T09:30")
+    assert set(fields) == {"vessel_name", "eta"}
+
+
+def test_imo_prefers_the_anchored_then_the_check_digit_valid_reading():
+    """Three readings, in the order of what they are worth.
+
+    A form carries official numbers and telephone numbers seven digits wide, so
+    the anchor to the literal token IMO comes first. The check digit — the same
+    arithmetic `sanctions_match.imo_checksum_ok` applies, reused rather than
+    rewritten — only ever *chooses between* candidates. It never rejects the
+    only one there is, because a hull whose paperwork carries a broken check
+    digit is a finding elsewhere in this system and not a value to discard.
+    """
+    from maritime_isr.ingest.pans.extract import parse_imo
+
+    assert parse_imo("IMO No. 1000007") == "1000007"
+    assert parse_imo("IMO1000007") == "1000007"
+    # Two candidates, one anchored.
+    assert parse_imo("Official No. 1234560 / IMO 9074729") == "9074729"
+    # Two candidates, neither anchored: the check digit decides.
+    assert parse_imo("1234560 9074729") == "9074729"
+    # One candidate with a broken check digit is still the answer — the
+    # checksum chooses, it does not reject.
+    assert parse_imo("1234560") == "1234560"
+    # What a scanner does to a number, put back — and only accepted because the
+    # check digit validates, which is the independent evidence the repair
+    # needs.
+    assert parse_imo("1OOOOO7") == "1000007"
+    assert parse_imo("no number here") is None
+
+
+def test_call_sign_normalisation_is_lossless_and_refuses_the_rest():
+    """The resolver matches call signs by exact equality, deliberately — a
+    fuzzy identifier match puts a notification on the wrong hull. So the
+    lossless part of the cleanup belongs here, where it can be seen."""
+    from maritime_isr.ingest.pans.extract import parse_call_sign
+
+    assert parse_call_sign("A B C 1") == "ABC1"
+    assert parse_call_sign("9V-AB-2") == "9VAB2"
+    assert parse_call_sign("VTAB4 (VHF 16)") == "VTAB4"
+    assert parse_call_sign("9HA4271") == "9HA4271"
+    # Not a call sign: kept as raw text by the caller rather than cleaned into
+    # something that looks like one.
+    assert parse_call_sign("see attached crew list") is None
+    assert parse_call_sign("1234567890") is None
+
+
+def test_crew_count_is_bounded_and_reads_a_number_written_out():
+    from maritime_isr.ingest.pans.extract import parse_crew
+
+    assert parse_crew("22") == "22"
+    assert parse_crew("22 persons") == "22"
+    assert parse_crew("22 (incl. master)") == "22"
+    assert parse_crew("Twenty Two") == "22"
+    assert parse_crew("eighteen") == "18"
+    # Three digits, and the bound is doing work: an unbounded grab reads the
+    # first digits of a tonnage or a phone number as a plausible crew.
+    assert parse_crew("48120") is None
+    assert parse_crew("see crew list attached") is None
+
+
+def test_confidence_stays_earned_after_every_widening():
+    """A widening that read more fields by trusting them more would be a
+    regression dressed as an improvement. A spreadsheet cell is 1.0, an OCR'd
+    smudge is what tesseract said, and a value the parser could not read is
+    halved whatever it arrived on."""
+    from maritime_isr.ingest.pans.extract import extract_notification
+    from maritime_isr.ingest.pans.readers import Passage
+
+    sheet = extract_notification(
+        [Passage("Vessel Name: SEA LEOPARD", "PANS!A5", 1.0, "xlsx_cell")])
+    fax = extract_notification(
+        [Passage("Vesse| Name: SEA LEOPARD", "page 1 (scanned)", 0.58, "ocr")])
+    assert sheet["vessel_name"].confidence == 1.0
+    assert fax["vessel_name"].confidence == 0.58
+    assert fax["vessel_name"].method == "ocr"
+
+    unreadable = extract_notification(
+        [Passage("ETA: sometime Tuesday", "page 1 (scanned)", 0.58, "ocr")])
+    assert unreadable["eta"].confidence == 0.29
+    assert unreadable["eta"].method == "ocr_unparsed"
 
 
 # ==========================================================================
