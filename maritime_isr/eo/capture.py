@@ -234,6 +234,13 @@ def run_captures(plan: CuePlan, *, source: CaptureSource,
     out: list[EOCapture] = []
     for task in sorted(plan.taskings, key=lambda t: (t.slot_index, t.camera_id)):
         obs = source.capture(task)
+        if obs is None:
+            # The source declined: no image exists. Distinct from a frame that
+            # was empty, and it must not land a row — a capture record asserts
+            # that a camera looked, and inventing one for a target the source
+            # could not model would put an observation in the corpus that never
+            # happened (ADR-021's absence-versus-breakage rule).
+            continue
         cid = _capture_id(task)
         vw = (task.why or {}).get("view") or {}
         cap = EOCapture(

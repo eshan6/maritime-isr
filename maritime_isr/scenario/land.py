@@ -63,6 +63,15 @@ T_VOYAGE = "ais_voyage"
 #: disk would be re-extracted into a corpus that no longer contains its vessel.
 T_NOTIFICATION = "arrival_notification"
 T_OWNERSHIP = "scenario_ownership"
+#: What each hull physically looks like, and what is behind each radar track
+#: number — the camera simulator's world model (ADR-037). Written here so
+#: `scenario clear` removes it; deliberately absent from
+#: `api.reader.CONFORMED_TABLES`, because only the world generator may read it.
+T_EO_APPEARANCE = "scenario_eo_appearance"
+#: Electro-optical captures. Landed by `eo.capture` during the pipeline, like
+#: the radar correlation products below, and listed for the same reason: a clear
+#: that silently missed a table would leave orphan synthetic rows behind.
+T_EO_CAPTURE = "eo_capture"
 
 EVENT_TABLES = {
     "encounters": T_ENCOUNTERS,
@@ -90,6 +99,7 @@ ALL_TABLES = (T_IDENTITY, *EVENT_TABLES.values(), T_POSITIONS, T_DETECTIONS,
               # layer is not scenario data, and clearing it would delete the
               # operator's own drawn areas every time the corpus is rebuilt.
               T_ZONE_TRANSITION,
+              T_EO_APPEARANCE, T_EO_CAPTURE,
               TRUTH_TABLE, RADAR_TRUTH_TABLE)
 
 
@@ -699,6 +709,18 @@ def land_world(world: ScenarioWorld) -> dict[str, int]:
         written[T_RADAR] = sum(w.values())
     else:
         written.setdefault(T_RADAR, 0)
+
+    # ---- what a camera would see (ADR-037) ----
+    #
+    # **After the radar picture, because it keys on the radar's own track
+    # numbers.** A camera at a station is slewed to a bearing the radar is
+    # already holding, so the two share a key space; generating this before the
+    # radar picture existed would have produced hull rows and no track rows, and
+    # the loop would have been able to photograph identified vessels and nothing
+    # unidentified — which is exactly backwards from where the value is.
+    from .eo import build_appearance_rows, land_appearances
+    appearance_rows = build_appearance_rows(world)
+    written[T_EO_APPEARANCE] = sum(land_appearances(appearance_rows).values())
 
     # ---- ground truth, quarantined ----
     truth_rows = []
