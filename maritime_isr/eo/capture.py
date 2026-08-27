@@ -181,6 +181,12 @@ class EOCapture:
             "imaged_type": v.imaged_type if v else None,
             "type_confidence": (round(float(v.confidence), 4) if v else None),
             "fine_type": v.fine_type if v else None,
+            # What the label rules out, as the model that produced it means it.
+            # Landed rather than re-derived downstream: a Parquet column cannot
+            # hold a set, and a rule that recomputed it against a different
+            # model's vocabulary is the defect `families_of_imaged` documents.
+            "imaged_families": (",".join(sorted(v.imaged_families))
+                                if v and v.imaged_families else None),
             "not_classifiable": v.not_classifiable if v else None,
             "identity_subject": v.identity_subject if v else None,
             "identity_confidence": (round(float(v.identity_confidence), 4)

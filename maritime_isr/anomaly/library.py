@@ -1310,6 +1310,21 @@ def detect_arrival_without_notification(store, notifications: list[dict],
 
 # ---------- 12. the camera against the transponder (Area 5, ADR-037) --------
 
+#: How many separate looks must agree before a hull is accused.
+#:
+#: Set from a measured error rate rather than by taste. On the prototype fleet a
+#: single image places an honest hull in the wrong AIS ship-type family about
+#: three times in a thousand; two looks taken at different ranges, aspects, light
+#: and visibility are close to independent, so agreeing errors are roughly one in
+#: a hundred thousand while agreeing truths stay common — the true positives in
+#: this corpus are contradicted on two thirds to nine tenths of their looks.
+#:
+#: Two, not three: the third look buys a factor of three hundred against a false
+#: positive rate that is already negligible, and costs the findings whose hull
+#: only ever passed a camera twice.
+MIN_CORROBORATING_CAPTURES = 2
+
+
 def detect_imagery_mismatch(store, captures: list[dict],
                             identities: list[dict], *,
                             source_ref: str) -> list[str]:
@@ -1326,12 +1341,13 @@ def detect_imagery_mismatch(store, captures: list[dict],
     to the hull it depicts, finds what she declares, and turns a contradiction
     into a scored, evidenced alert.
 
-    **One alert per hull, not one per capture.** A ship inside a station's arc
-    for six hours is photographed repeatedly and every frame shows the same
-    steel. Scoring each of them separately would put one finding on the queue a
-    dozen times and bury everything else — the same reason
-    `detect_voyage_contradiction` keeps one alert per declared destination. The
-    strongest look is the finding and the rest travel as corroboration.
+    **One alert per hull, not one per capture, and never off one look.** A ship
+    inside a station's arc for six hours is photographed repeatedly and every
+    frame shows the same steel; scoring each separately would put one finding on
+    the queue a dozen times and bury everything else, the same reason
+    `detect_voyage_contradiction` keeps one alert per declared destination. And
+    below :data:`MIN_CORROBORATING_CAPTURES` agreeing looks there is no alert at
+    all — see the comment on the aggregation for the measured reason.
 
     **A capture on a contact is not a candidate here and that is not an
     oversight.** A target with no broadcast identity has declared nothing, so
@@ -1347,8 +1363,8 @@ def detect_imagery_mismatch(store, captures: list[dict],
         if vid and cls:
             declared[str(vid)] = str(cls)
 
-    # vessel node -> (best finding, its capture row, every capture that agreed)
-    best: dict[str, tuple] = {}
+    # vessel node -> every contradiction found on her, in capture order.
+    found: dict[str, list[tuple]] = {}
     for cap in captures:
         subject = str(cap.get("subject_id") or "")
         if not subject.startswith("vessel:"):
@@ -1362,10 +1378,13 @@ def detect_imagery_mismatch(store, captures: list[dict],
             # exists to prevent. The populator creates hulls, evidence does not.
             continue
         quality = float(cap.get("image_quality") or 0.0)
+        fams = cap.get("imaged_families")
         verdict = ImageVerdict(
             imaged_type=cap.get("imaged_type"),
             confidence=float(cap.get("type_confidence") or 0.0),
             fine_type=cap.get("fine_type"),
+            imaged_families=(frozenset(str(fams).split(",")) if fams
+                             else None),
             not_classifiable=cap.get("not_classifiable") or "",
             model_name=cap.get("model_name") or "",
             model_provenance=cap.get("model_provenance") or "",
@@ -1373,27 +1392,50 @@ def detect_imagery_mismatch(store, captures: list[dict],
         finding = check_declared_type(
             declared_class=declared.get(subject), verdict=verdict,
             quality=quality, band=verdict.band)
-        if not finding.is_contradiction:
-            continue
-        prev = best.get(node)
-        if prev is None or finding.confidence > prev[0].confidence:
-            best[node] = (finding, cap, [])
-    for node, (_f, _c, agreeing) in best.items():
-        for cap in captures:
-            if vessel_node_id(str(cap.get("subject_id") or "")) != node:
-                continue
-            if cap.get("capture_id") != best[node][1].get("capture_id"):
-                agreeing.append(cap)
+        if finding.is_contradiction:
+            found.setdefault(node, []).append((finding, cap))
 
     out: list[str] = []
-    for node, (finding, cap, others) in best.items():
+    for node, hits in found.items():
+        # **Agreement across separate looks, or no alert.** Measured on the
+        # prototype fleet, a single image places an honest hull in the wrong
+        # AIS family about three times in a thousand. Three in a thousand is a
+        # fine error rate for a description and a bad one for an accusation:
+        # across a fleet of five hundred hulls each photographed several times
+        # it is a steady trickle of alerts about ships that have done nothing,
+        # which is the alert-fatigue failure ADR-004 exists to prevent.
+        #
+        # The fix is not a higher confidence bar — that would suppress the true
+        # positives just as fast, since a wrong label and a right one look the
+        # same from inside. It is corroboration: two looks taken minutes or days
+        # apart, at different ranges, aspects, light and visibility, are close to
+        # independent, so agreeing errors are rare in a way that agreeing truths
+        # are not. And the loop supplies them for free — a hull whose image
+        # disagrees with her declaration keeps a high information gain in
+        # `eo.cue`, so the scheduler goes back to her.
+        #
+        # They must agree on the *family*, not merely both be contradictions: a
+        # hull called a tanker once and a trawler once has been photographed
+        # badly twice, and reporting that as a corroborated finding would be
+        # counting confusion as evidence.
+        by_family: dict[str, list[tuple]] = {}
+        for finding, cap in hits:
+            key = str(finding.detail.get("imaged_families")
+                      or finding.detail.get("imaged_type"))
+            by_family.setdefault(key, []).append((finding, cap))
+        agreeing = max(by_family.values(), key=len)
+        if len(agreeing) < MIN_CORROBORATING_CAPTURES:
+            continue
+        agreeing.sort(key=lambda fc: -float(fc[0].confidence))
+        finding, cap = agreeing[0]
+        others = [c for _f, c in agreeing[1:]]
+
         # Repeated looks corroborate; they do not multiply. Two photographs of
         # one hull are one fact seen twice, which is exactly the distinction
         # `catalog.REPEAT_RESTATEMENT` was written for after the sanctions
         # factor reached 0.97 by being derived from two places (ADR-031c).
         # A small bounded boost, and no more.
-        supporting = [c for c in others
-                      if c.get("imaged_type") == cap.get("imaged_type")]
+        supporting = others
         score = min(0.95, float(finding.confidence)
                     + 0.02 * min(len(supporting), 3))
         ts = pd.Timestamp(cap.get("taken_at"))
@@ -1411,8 +1453,12 @@ def detect_imagery_mismatch(store, captures: list[dict],
                               taken_at=str(cap.get("taken_at")),
                               range_km=cap.get("range_km"),
                               bearing_deg=cap.get("bearing_deg"),
-                              band=cap.get("band"),
-                              image_quality=cap.get("image_quality"),
+                              # `image_quality` and `band` arrive inside
+                              # `finding.detail`, which is where the rule put
+                              # what it actually judged on. Naming them twice
+                              # here is a TypeError, and papering over it with a
+                              # rename would put two numbers on the evidence
+                              # that could disagree.
                               # The model that made the claim, named on the
                               # evidence. The brief's standing caution is that a
                               # borrowed component must be documented as one

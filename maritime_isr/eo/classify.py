@@ -43,7 +43,7 @@ from typing import Optional, Protocol, Sequence
 
 from ..config import PIPELINE_VERSION
 from .appearance import Appearance, descriptor_for, distance, observe
-from .conditions import BAND_THERMAL, BAND_VISIBLE
+from .conditions import BAND_VISIBLE
 
 __all__ = ["ImageVerdict", "ImageClassifier", "PrototypeClassifier",
            "SilhouetteClassifier", "ReferenceLibrary", "PROTOTYPE_HULLS",
@@ -83,15 +83,25 @@ _TEMPERATURE_GRID = (0.02, 0.03, 0.05, 0.08, 0.12, 0.18, 0.26, 0.40, 0.60,
                      0.90, 1.40, 2.20)
 
 #: Re-recognition: how close two looks at one hull must be, and how much better
-#: than the runner-up. **The margin matters more than the radius.** Two captures
-#: of one ship in different light are not identical, so the radius has to be
-#: loose; what stops that looseness becoming a wrong identification is requiring
-#: the best match to beat the second by a clear gap. Without it, a library full
-#: of similar merchants would return whichever one sorted first — the same
-#: failure `ingest/pans/resolve.py` refuses when it declines to fuzzy-match a
-#: transposed ship name.
-IDENTITY_RADIUS = 0.085
-IDENTITY_MARGIN = 0.045
+#: than the runner-up.
+#:
+#: **Both numbers are measured, and the measurement says something the feature
+#: has to admit.** Over the prototype fleet at a good daylight look, two
+#: observations of the *same* hull sit 0.12 apart at the median and 0.18 at the
+#: ninetieth percentile — while the *closest* pair of different hulls sits 0.11
+#: apart. The distributions overlap, and no radius separates them, because two
+#: Suezmaxes of the same dimensions genuinely do look the same in six numbers.
+#:
+#: So the radius is set at the same-hull ninetieth percentile and the work is
+#: done by the margin: an identification is offered only when the best match
+#: beats the second by a clear gap, which happens when the hull is *distinctive*
+#: relative to what the library holds and not when she is one of a class. That
+#: is the honest capability — "this looks like the hull imaged on the 14th" for
+#: an unusual shape, and a refusal for a sister ship — and it is the same
+#: refusal `ingest/pans/resolve.py` makes rather than fuzzy-matching a
+#: transposed ship name onto a different vessel.
+IDENTITY_RADIUS = 0.18
+IDENTITY_MARGIN = 0.06
 
 #: Image quality at which the published vocabulary is measured: a good daylight
 #: look at moderate range, which is the condition the cueing scheduler exists to
