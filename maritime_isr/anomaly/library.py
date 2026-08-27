@@ -532,7 +532,8 @@ def run_anomaly_library(store, *, tracks, encounters, spoof_events,
                         baselines=None, interactions=None,
                         declarations: list[dict] | None = None,
                         notifications: list[dict] | None = None,
-                        port_calls: list[dict] | None = None) -> dict:
+                        port_calls: list[dict] | None = None,
+                        captures: list[dict] | None = None) -> dict:
     """Run every detector. Order matters only for #5, which correlates with the
     alerts the earlier detectors produced.
 
