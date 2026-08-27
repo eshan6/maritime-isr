@@ -64,11 +64,23 @@ MIN_CLASSIFY_QUALITY = 0.35
 #: Below this the classifier says `unclassified` rather than naming a type.
 MIN_IMAGE_CONFIDENCE = 0.50
 
-#: How sharply distance turns into probability. Small values make the nearest
-#: prototype dominate; large ones flatten everything toward a tie. 0.08 puts a
-#: clear separation at ~0.9 and a genuine ambiguity near 0.5, which is where
-#: `MIN_IMAGE_CONFIDENCE` then does its work.
-SOFTMAX_TEMPERATURE = 0.08
+#: Candidate softmax temperatures, searched during calibration.
+#:
+#: **The temperature is fitted, not chosen, and the first version chose it.**
+#: A hand-set 0.08 produced a model that picked the right fine class 96% of the
+#: time and reported an average confidence of 0.35 — so 84% of perfectly good
+#: images were refused as "below the bar" by a number that had nothing to do
+#: with how often the model was right. A confidence that does not track accuracy
+#: is not a confidence, it is a decoration, and this whole project rests on an
+#: operator being able to calibrate their trust against it (CLAUDE.md §4.3).
+#:
+#: :func:`measure_separability` therefore fits the temperature so that the mean
+#: reported confidence matches the measured hit rate **under this capture's own
+#: conditions** — ordinary temperature scaling, the standard remedy. A poor
+#: image then produces low confidence because the model is genuinely less
+#: often right on poor images, not because a multiplier was applied to it.
+_TEMPERATURE_GRID = (0.02, 0.03, 0.05, 0.08, 0.12, 0.18, 0.26, 0.40, 0.60,
+                     0.90, 1.40, 2.20)
 
 #: Re-recognition: how close two looks at one hull must be, and how much better
 #: than the runner-up. **The margin matters more than the radius.** Two captures
@@ -116,6 +128,69 @@ def _prototypes() -> dict[str, Appearance]:
 PROTOTYPES: dict[str, Appearance] = _prototypes()
 
 
+def _softmax(dists: dict[str, float], temperature: float) -> dict[str, float]:
+    if not dists:
+        return {}
+    lo = min(dists.values())
+    raw = {k: math.exp(-(d - lo) / max(temperature, 1e-6))
+           for k, d in dists.items()}
+    total = sum(raw.values()) or 1.0
+    return {k: v / total for k, v in raw.items()}
+
+
+#: The level at which a declared vessel type can be held to account.
+#:
+#: **Not a vocabulary this project invented.** ITU-R M.1371 allocates the AIS
+#: ship-and-cargo-type field in decades — 30 fishing, 60-69 passenger, 70-79
+#: cargo, 80-89 tanker, 35 military — so a hull broadcasting a cargo code while
+#: photographing as a tanker is contradicting the standard's own grouping, not
+#: an opinion of ours. Grouping any finer would fire on the ordinary
+#: disagreement between two people classifying one hull (ADR-034's
+#: `class_quibble`); grouping any coarser would make everything a merchant and
+#: the rule could never fire.
+#:
+#: A class absent from this table has **no family**, which is a refusal rather
+#: than a default. `dhow` is deliberately absent: a dhow carries cargo, fishes,
+#: and ferries passengers, and forcing her into one of those would manufacture
+#: contradictions out of a hull type the standard does not cleanly cover.
+AIS_TYPE_FAMILY: dict[str, str] = {
+    "VLCC": "tanker", "Suezmax": "tanker", "Aframax": "tanker",
+    "product_tanker": "tanker",
+    "bulker": "cargo", "general_cargo": "cargo", "container": "cargo",
+    "reefer": "cargo",
+    "fishing": "fishing",
+    "naval": "military",
+}
+
+#: Coarse imagery labels that **span** families, and therefore support no
+#: comparison at all. "merchant" is what an image resolves to when the deck is
+#: not readable — at night, or at the far end of the useful range — and it
+#: covers both tanker and cargo. Reporting a contradiction from it would be
+#: asserting the very feature the image failed to carry.
+_SPANNING_LABELS = frozenset({"merchant", "vessel"})
+
+#: Coarse group labels the classifier's merge produces, and the family each
+#: belongs to. Anything not here falls through to :data:`AIS_TYPE_FAMILY`,
+#: because an un-merged label *is* a fine class name.
+_GROUP_FAMILY: dict[str, str] = {
+    "tanker": "tanker", "dry_cargo": "cargo", "small_craft": "fishing",
+}
+
+
+def family_of_declared(vessel_class: Optional[str]) -> Optional[str]:
+    """The AIS ship-type family a declared class belongs to, or None."""
+    if not vessel_class:
+        return None
+    return AIS_TYPE_FAMILY.get(str(vessel_class))
+
+
+def family_of_imaged(label: Optional[str]) -> Optional[str]:
+    """The family an imagery label implies, or None if it implies none."""
+    if not label or label in _SPANNING_LABELS:
+        return None
+    return _GROUP_FAMILY.get(str(label)) or AIS_TYPE_FAMILY.get(str(label))
+
+
 def _coarse_name(group: set[str]) -> str:
     """A readable name for a merged group.
 
@@ -140,8 +215,9 @@ def _coarse_name(group: set[str]) -> str:
 
 
 def measure_separability(*, quality: float = VOCABULARY_REFERENCE_QUALITY,
-                         band: str = BAND_VISIBLE, samples: int = 80,
-                         seed: int = 11, aspect_deg: float = 75.0) -> dict:
+                         band: str = BAND_VISIBLE, samples: int = 240,
+                         seed: int = 11, aspect_deg: float = 75.0,
+                         restrict=None) -> dict:
     """Which prototypes this model can tell apart under these conditions.
 
     Generates ``samples`` noisy observations of every prototype at the stated
@@ -156,15 +232,20 @@ def measure_separability(*, quality: float = VOCABULARY_REFERENCE_QUALITY,
     from ..tracks.vessel_type import confusable_groups, confusion_matrix
 
     rng = random.Random(seed)
+    keep = restrict or (lambda a: a)
+    refs = {k: keep(p) for k, p in PROTOTYPES.items()}
     y_true: list[str] = []
     y_pred: list[str] = []
+    dist_rows: list[dict[str, float]] = []
     for name, proto in PROTOTYPES.items():
         for _ in range(samples):
-            seen = observe(proto, aspect_deg=aspect_deg, quality=quality,
-                           band=band, rng=rng)
-            best = min(PROTOTYPES, key=lambda k: distance(seen, PROTOTYPES[k]))
+            seen = keep(observe(proto, aspect_deg=aspect_deg, quality=quality,
+                                band=band, rng=rng))
+            dists = {k: distance(seen, p) for k, p in refs.items()}
+            best = min(dists, key=lambda k: dists[k])
             y_true.append(name)
             y_pred.append(best)
+            dist_rows.append(dists)
 
     cm = confusion_matrix(y_true, y_pred)
     groups = confusable_groups(cm)
@@ -176,24 +257,83 @@ def measure_separability(*, quality: float = VOCABULARY_REFERENCE_QUALITY,
     for name in PROTOTYPES:
         coarse_of.setdefault(name, name)
     vocabulary = sorted(set(coarse_of.values()))
+
+    temperature, calibration = _calibrate(dist_rows, y_true, coarse_of)
     return {"confusion": cm, "groups": [sorted(g) for g in groups],
             "vocabulary": vocabulary, "coarse_of": coarse_of,
+            "temperature": temperature, "calibration": calibration,
             "conditions": {"quality": quality, "band": band,
                            "aspect_deg": aspect_deg, "samples": samples}}
+
+
+def _coarse_probs(dists: dict[str, float], coarse_of: dict[str, str],
+                  temperature: float) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for fine, p in _softmax(dists, temperature).items():
+        label = coarse_of.get(fine, fine)
+        out[label] = out.get(label, 0.0) + p
+    return out
+
+
+def _calibrate(dist_rows: list[dict[str, float]], y_true: list[str],
+               coarse_of: dict[str, str]) -> tuple[float, dict]:
+    """Fit the softmax temperature so mean confidence equals measured accuracy.
+
+    Textbook temperature scaling. The model's *decision* is unaffected — the
+    ranking of prototypes by distance does not depend on the temperature — so
+    this changes only what the model says about how sure it is, which is
+    precisely the thing that was wrong.
+
+    Returns the fitted temperature and the calibration report, so the number is
+    inspectable rather than a constant somebody has to trust.
+    """
+    if not dist_rows:
+        return 0.10, {"accuracy": None, "mean_confidence": None, "n": 0}
+    truth_coarse = [coarse_of.get(y, y) for y in y_true]
+    hits = 0
+    for dists, true_label in zip(dist_rows, truth_coarse):
+        best = min(dists, key=lambda k: dists[k])
+        hits += int(coarse_of.get(best, best) == true_label)
+    accuracy = hits / len(dist_rows)
+
+    best_t, best_gap, best_mean = _TEMPERATURE_GRID[0], None, 0.0
+    for t in _TEMPERATURE_GRID:
+        total = 0.0
+        for dists in dist_rows:
+            probs = _coarse_probs(dists, coarse_of, t)
+            total += max(probs.values())
+        mean_conf = total / len(dist_rows)
+        gap = abs(mean_conf - accuracy)
+        if best_gap is None or gap < best_gap:
+            best_t, best_gap, best_mean = t, gap, mean_conf
+    return best_t, {"accuracy": round(accuracy, 4),
+                    "mean_confidence": round(best_mean, 4),
+                    "temperature": best_t, "n": len(dist_rows)}
 
 
 #: Cache keyed on (quality bucket, band). The measurement is deterministic, so
 #: caching it changes nothing but the cost; bucketing to a tenth bounds the
 #: cache at twenty entries and keeps the vocabulary from wobbling between two
 #: captures whose quality differed in the third decimal place.
-_SEPARABILITY_CACHE: dict[tuple[int, str], dict] = {}
+_SEPARABILITY_CACHE: dict[tuple[str, int, str], dict] = {}
 
 
-def separability_at(quality: float, band: str) -> dict:
-    key = (max(0, min(10, int(round(float(quality) * 10)))), band)
+def separability_at(quality: float, band: str, *, model: str = "full",
+                    restrict=None) -> dict:
+    """The vocabulary and the calibrated temperature for a model and a look.
+
+    Keyed on the model as well as the conditions, because a weaker model must
+    report weaker confidence: :class:`SilhouetteClassifier` sees fewer features,
+    is right less often, and its calibration has to be measured on the features
+    it actually uses. Sharing one calibration across implementations would let a
+    restricted model inherit a fuller one's certainty, which is exactly the
+    overclaim the interface exists to make impossible.
+    """
+    key = (model, max(0, min(10, int(round(float(quality) * 10)))), band)
     hit = _SEPARABILITY_CACHE.get(key)
     if hit is None:
-        hit = measure_separability(quality=key[0] / 10.0, band=band)
+        hit = measure_separability(quality=key[1] / 10.0, band=band,
+                                   restrict=restrict)
         _SEPARABILITY_CACHE[key] = hit
     return hit
 
@@ -205,6 +345,14 @@ def coarse_at(vessel_class: Optional[str], *, quality: float,
     Returns None for a class this model has no prototype for — which is a
     genuine "cannot compare", not a mismatch, and the rule that consumes it
     treats it that way.
+
+    **Always the full model's vocabulary, even when another model produced the
+    verdict**, and that is safe rather than sloppy. The only use of this
+    function in `anomaly.imagery` is the short-circuit "the image agrees with
+    what she declares"; the guard that decides a *contradiction* is the AIS
+    ship-type family comparison, which needs no vocabulary. A label from a
+    coarser model simply fails to match here and falls through to the family
+    test, which reaches the right answer by the longer route.
     """
     if not vessel_class:
         return None
@@ -377,16 +525,6 @@ class ImageClassifier(Protocol):
         ...
 
 
-def _softmax(dists: dict[str, float], temperature: float) -> dict[str, float]:
-    if not dists:
-        return {}
-    lo = min(dists.values())
-    raw = {k: math.exp(-(d - lo) / max(temperature, 1e-6))
-           for k, d in dists.items()}
-    total = sum(raw.values()) or 1.0
-    return {k: v / total for k, v in raw.items()}
-
-
 class _NearestPrototype:
     """Shared machinery: distances to prototypes, coarse merge, identity."""
 
@@ -402,6 +540,10 @@ class _NearestPrototype:
     def _restrict(self, a: Appearance) -> Appearance:
         return a
 
+    def _separability(self, quality: float, band: str) -> dict:
+        return separability_at(quality, band, model=self.name,
+                               restrict=self._restrict)
+
     def classify(self, seen: Appearance, *, quality: float, band: str,
                  library: ReferenceLibrary,
                  known_subject: Optional[str] = None) -> ImageVerdict:
@@ -416,20 +558,20 @@ class _NearestPrototype:
         restricted = self._restrict(seen)
         dists = {k: distance(restricted, self._restrict(p))
                  for k, p in PROTOTYPES.items()}
-        fine_probs = _softmax(dists, SOFTMAX_TEMPERATURE)
-        coarse_of = separability_at(quality, band)["coarse_of"]
-
-        coarse: dict[str, float] = {}
-        for fine, p in fine_probs.items():
-            label = coarse_of.get(fine, fine)
-            coarse[label] = coarse.get(label, 0.0) + p
+        sep = self._separability(quality, band)
+        coarse_of = sep["coarse_of"]
+        coarse = _coarse_probs(dists, coarse_of, sep["temperature"])
         top = max(coarse, key=lambda k: coarse[k])
         fine_top = min(dists, key=lambda k: dists[k])
 
-        # Confidence is the coarse probability, held down by the quality of the
-        # image it came from. A perfectly separated prototype match off a
-        # marginal picture is still a marginal claim.
-        conf = coarse[top] * (0.55 + 0.45 * float(quality))
+        # **The confidence is the calibrated coarse probability and nothing is
+        # applied on top of it.** An earlier version multiplied by a factor in
+        # the image quality, which double-counts: the calibration samples are
+        # generated *at this quality*, so a poor image already produces a low
+        # number because the model is genuinely less often right on poor
+        # images. Scaling it again would break the property that makes the
+        # number worth anything — that it tracks the hit rate.
+        conf = coarse[top]
         v.probabilities = coarse
         v.fine_type = fine_top
         if conf < MIN_IMAGE_CONFIDENCE:

@@ -10,30 +10,43 @@ A pure function over a declared class and an image verdict, three-valued like
 ``ok`` / ``not_checkable``. "We could not tell" is an answer, and folding it into
 "fine" would report a fleet checked by a camera that never resolved anything.
 
-Four ways this rule refuses, and each one is a false positive that would
+Five ways this rule refuses, and each one is a false positive that would
 otherwise happen
 -----------------------------------------------------------------------------
-**1. The image was not good enough.** A hull at 19 km through monsoon haze
-produces a picture, not evidence. The classifier's own quality floor
-(:data:`eo.classify.MIN_CLASSIFY_QUALITY`) does most of this work and the rule
-declines again above it, because a marginal claim is the wrong thing to accuse
-somebody with.
-
-**2. The two classes are not separable in this image.** This is the important
-one. A hull declaring `bulker` that images as dry cargo has not contradicted
-anything — a bulker *is* dry cargo. So the comparison happens in the coarse
-vocabulary the classifier could actually resolve **under this capture's own
-conditions**, which is narrower at night than in daylight (a thermal silhouette
-does not show a deck, and the deck is what separates a tanker from a bulker).
-Comparing a declared class against a label the image could not have supported is
-how a demo produces impressive numbers and an operator loses a morning.
-
-**3. The declared class is one the model has no prototype for.** No comparison
-exists; saying so is not the same as saying the declaration is fine.
-
-**4. She declared nothing.** A hull broadcasting no static type has not lied
+**1. She declared nothing.** A hull broadcasting no static type has not lied
 about it. Most radar contacts are in this state, which is exactly why the
 imagery on *them* is evidence rather than a contradiction.
+
+**2. The image was not good enough.** A hull at 19 km through monsoon haze
+produces a picture, not evidence. The classifier's own quality floor
+(:data:`eo.classify.MIN_CLASSIFY_QUALITY`) does most of this work and the rule
+declines again above it, because naming a type for an operator's information and
+accusing a named ship of misdeclaring herself are different standards of proof.
+
+**3. The image could not have supported the distinction.** The comparison
+happens in the coarse vocabulary the classifier could actually resolve **under
+this capture's own conditions**, which is narrower at night than in daylight: a
+thermal silhouette does not show a deck, and the deck is the only thing that
+separates a tanker from a bulker. Comparing a declared class against a label the
+image could not have carried is how a demo produces impressive numbers and an
+operator loses a morning.
+
+**4. The difference is one two honest sources make.** This is the important one,
+and it is not the same as (3). A hull declaring ``general_cargo`` that images
+unmistakably as a bulker has contradicted nothing — both are cargo, the image
+*can* tell them apart, and ADR-034 already established the principle for the
+registry check: *"two registries disagreeing about one hull, not a lie"*. So the
+final comparison is at the level of the **AIS ship-type family** — fishing,
+cargo, tanker, passenger, military — which is not a vocabulary this project
+invented but the grouping the standard itself uses (ITU-R M.1371 allocates 30 to
+fishing, 70-79 to cargo, 80-89 to tanker). Within a family, no contradiction;
+across families, a hull is claiming to be a different kind of ship from the one
+in the photograph.
+
+**5. The declared class, or the imaged one, has no family.** A label this model
+holds no reference for, or a coarse label that *spans* families — "merchant"
+covers both tanker and cargo — supports no comparison. Saying so is not the same
+as saying the declaration is fine.
 
 **What is deliberately not a rule here.** A capture whose frame was empty —
 the camera slewed onto a bearing and there was nothing there — is not turned
@@ -47,8 +60,18 @@ from __future__ import annotations
 
 from typing import Optional
 
+# The AIS ship-type families live in `eo.classify` rather than here, and the
+# dependency runs that way round for a reason: the *classifier* needs them too.
+# A model that cannot reliably place a hull in a family must not publish a
+# family-level label, so the vocabulary merge is measured against these groups —
+# see `eo.classify.FAMILY_SEPARATION_THRESHOLD`. Re-exported so a reader of this
+# rule can find the taxonomy it is applying.
+from ..eo.classify import (AIS_TYPE_FAMILY, family_of_declared,
+                           family_of_imaged)
+
 __all__ = ["ImageryFinding", "check_declared_type", "CONTRADICTION", "OK",
-           "NOT_CHECKABLE", "MIN_MISMATCH_QUALITY", "MIN_MISMATCH_CONFIDENCE"]
+           "NOT_CHECKABLE", "MIN_MISMATCH_QUALITY", "MIN_MISMATCH_CONFIDENCE",
+           "AIS_TYPE_FAMILY", "family_of_declared", "family_of_imaged"]
 
 CONTRADICTION = "contradiction"
 OK = "ok"
@@ -143,23 +166,49 @@ def check_declared_type(*, declared_class: Optional[str], verdict,
             f"identity. The type claim stands as information; it is not "
             f"grounds for an alert.", detail)
 
+    imaged = verdict.imaged_type
     declared_group = coarse_at(declared_class, quality=quality, band=band)
     detail["declared_group"] = declared_group
-    if declared_group is None:
-        return ImageryFinding(
-            check, NOT_CHECKABLE, 0.0,
-            f"She declares {declared_class!r}, which this model holds no "
-            f"reference for, so no comparison is possible.", detail)
 
-    imaged = verdict.imaged_type
-    if declared_group == imaged:
+    # (3) The image resolved her declared class and the image agrees with it.
+    if declared_group is not None and declared_group == imaged:
         return ImageryFinding(
             check, OK, min(0.9, float(verdict.confidence)),
             f"She declares {_pretty(declared_class)} and images as "
             f"{_pretty(imaged)}, which is what {_pretty(declared_class)} looks "
-            f"like in this band. The declaration and the picture agree.",
+            f"like in the {band} band. The declaration and the picture agree.",
             detail)
 
+    # (5) Families, which is the level a declaration is answerable at.
+    d_family = family_of_declared(declared_class)
+    i_family = family_of_imaged(imaged)
+    detail["declared_family"] = d_family
+    detail["imaged_family"] = i_family
+    if d_family is None:
+        return ImageryFinding(
+            check, NOT_CHECKABLE, 0.0,
+            f"She declares {_pretty(declared_class)}, which this system holds "
+            f"no reference shape for, so the image supports no comparison.",
+            detail)
+    if i_family is None:
+        return ImageryFinding(
+            check, NOT_CHECKABLE, 0.0,
+            f"The image supports only “{_pretty(imaged)}”, which spans more "
+            f"than one AIS ship-type family, so it cannot contradict a "
+            f"declared {_pretty(declared_class)}. In the {band} band at "
+            f"quality {float(quality):.2f} this model cannot see the deck, and "
+            f"the deck is what would separate them.", detail)
+
+    # (4) Different classes, same family: an ordinary disagreement, not a lie.
+    if d_family == i_family:
+        return ImageryFinding(
+            check, OK, min(0.9, float(verdict.confidence)),
+            f"She declares {_pretty(declared_class)} and images as "
+            f"{_pretty(imaged)}. Both are {d_family} under the AIS ship-type "
+            f"standard, and two sources classifying one hull differently "
+            f"inside a family is routine.", detail)
+
+    # (2) Strong enough to accuse?
     if float(verdict.confidence) < MIN_MISMATCH_CONFIDENCE:
         return ImageryFinding(
             check, NOT_CHECKABLE, 0.0,
@@ -175,9 +224,9 @@ def check_declared_type(*, declared_class: Optional[str], verdict,
     conf = min(0.95, float(verdict.confidence) * (0.6 + 0.4 * float(quality)))
     return ImageryFinding(
         check, CONTRADICTION, conf,
-        f"She broadcasts that she is a {_pretty(declared_class)}. The camera "
-        f"images her as a {_pretty(imaged)} at confidence "
-        f"{float(verdict.confidence):.2f} in the {band} band, and the two are "
-        f"distinguishable in an image of this quality. A hull does not change "
-        f"shape between messages.",
+        f"She broadcasts that she is a {_pretty(declared_class)}, which is a "
+        f"{d_family} under the AIS ship-type standard. The camera images her "
+        f"as a {_pretty(imaged)} — a {i_family} — at confidence "
+        f"{float(verdict.confidence):.2f} in the {band} band. A hull does not "
+        f"change shape between messages.",
         detail)

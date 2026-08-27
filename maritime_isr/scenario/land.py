@@ -438,8 +438,16 @@ def land_world(world: ScenarioWorld) -> dict[str, int]:
                 width_m=v.beam_m,
                 draught_m=v.draught_m,
                 tonnage_gt=v.dwt,
-                vessel_class=v.vessel_class,
                 gear_types=None,
+                # **What she broadcasts about her type, which is not always
+                # what she is** (ADR-037). Almost every hull declares her own
+                # class and the override dict is empty for her; the Area 5
+                # scenarios are the exception, and they are the reason a camera
+                # is worth pointing at anything. The physical class stays on the
+                # vessel object, where the appearance simulator and the motion
+                # generator read it.
+                vessel_class=(world.declared_class_overrides.get(v.entity_id)
+                              or v.vessel_class),
                 registry_source="synthetic-scenario",
                 valid_from=t,
                 valid_to=nxt,

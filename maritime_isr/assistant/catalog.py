@@ -258,6 +258,27 @@ FACTOR_KINDS: dict[str, FactorSpec] = dict([
              "her — the same gap as an unmatched form, from the other side",
        actions=("check_arrival_notification", "call_vhf", "monitor"),
        repeats=REPEAT_OCCURRENCES),
+    # ---- imagery: Area 5, and the family stops being empty ---------------
+    #
+    # **One kind, not three, and the two that were considered and rejected are
+    # worth recording.** A camera that *recognises* a hull it has photographed
+    # before is a strong capability and is not a suspicion — an identification
+    # raises the value of whatever finding already exists about her and asserts
+    # nothing on its own, so it travels as evidence on the capture rather than
+    # as a factor with a weight (the posture ADR-026 took for imaging
+    # opportunity and ADR-032 for forward projection). A camera that slews onto
+    # a track and finds empty water is the other one; it is a real answer about
+    # a radar track and it is not promoted, because the simulated camera never
+    # misses a target that is present and a real one does (ADR-037).
+    _s("imagery_type_mismatch", family="imagery", area="Area 5 (EO loop)",
+       weight=0.70,
+       label="The camera disagrees with her transponder",
+       blurb="an image taken from a coastal camera shows a different kind of "
+             "ship from the one she broadcasts she is — and a hull does not "
+             "change shape between messages",
+       actions=("cue_eo_camera", "call_vhf", "check_registry",
+                "compare_own_history", "escalate"),
+       repeats=REPEAT_RESTATEMENT),
     _s("ais_spoofing", family="identity", area="roadmap 2.2 / 5.2",
        weight=0.85,
        label="Identity contradiction on the air",

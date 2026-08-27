@@ -584,6 +584,15 @@ def run_anomaly_library(store, *, tracks, encounters, spoof_events,
             store, notifications, port_calls, source_ref=source_ref,
             observed_from=_record_starts_at(tracks))
         if notifications else [])
+    # Area 5 (ADR-037). Optional like the rest, and for a reason worth stating:
+    # in the pipeline the captures do not exist yet when this runs. Cueing a
+    # camera is driven by the alerts this pass produces, so the EO loop runs
+    # *after* it and calls `detect_imagery_mismatch` itself. The parameter is
+    # here so a caller that already holds captures — a second pass, or a
+    # deployment where they arrive continuously — gets the detector in the same
+    # place as the other twelve rather than in a special case of its own.
+    fired["imagery_type_mismatch"] = detect_imagery_mismatch(
+        store, captures or [], identities or [], source_ref=source_ref)
     return fired
 
 
@@ -1296,4 +1305,136 @@ def detect_arrival_without_notification(store, notifications: list[dict],
               0.55, ev,
               props=dict(port=port, arrived=ts.isoformat(),
                          lat=pc.get("lat"), lon=pc.get("lon")))
+    return out
+
+
+# ---------- 12. the camera against the transponder (Area 5, ADR-037) --------
+
+def detect_imagery_mismatch(store, captures: list[dict],
+                            identities: list[dict], *,
+                            source_ref: str) -> list[str]:
+    """A hull the camera says is not what she broadcasts.
+
+    Area 5: *"Mismatch alerting, which is the payoff. The camera says one thing,
+    the transponder says another. A vessel declaring itself a fishing vessel
+    that images as a tanker is a strong, legible, immediately actionable
+    finding."*
+
+    `captures` are landed `eo_capture` rows and `identities` are the same
+    current-identity rows the identity detector takes. The comparison itself
+    lives in `anomaly.imagery` and is a pure function; this joins each capture
+    to the hull it depicts, finds what she declares, and turns a contradiction
+    into a scored, evidenced alert.
+
+    **One alert per hull, not one per capture.** A ship inside a station's arc
+    for six hours is photographed repeatedly and every frame shows the same
+    steel. Scoring each of them separately would put one finding on the queue a
+    dozen times and bury everything else — the same reason
+    `detect_voyage_contradiction` keeps one alert per declared destination. The
+    strongest look is the finding and the rest travel as corroboration.
+
+    **A capture on a contact is not a candidate here and that is not an
+    oversight.** A target with no broadcast identity has declared nothing, so
+    there is nothing for a photograph to contradict. Her image is evidence and
+    reaches the operator through the capture record; it is not an accusation.
+    """
+    from ..eo.classify import ImageVerdict
+    from .imagery import check_declared_type
+
+    declared: dict[str, str] = {}
+    for row in identities:
+        vid, cls = row.get("vessel_id"), row.get("vessel_class")
+        if vid and cls:
+            declared[str(vid)] = str(cls)
+
+    # vessel node -> (best finding, its capture row, every capture that agreed)
+    best: dict[str, tuple] = {}
+    for cap in captures:
+        subject = str(cap.get("subject_id") or "")
+        if not subject.startswith("vessel:"):
+            continue
+        if not cap.get("target_present"):
+            continue
+        node = vessel_node_id(subject)
+        if store.node(node) is None:
+            # Same rule as every other detector here: an alert on a node the
+            # graph was never told about is the shadow-stub failure ADR-022
+            # exists to prevent. The populator creates hulls, evidence does not.
+            continue
+        quality = float(cap.get("image_quality") or 0.0)
+        verdict = ImageVerdict(
+            imaged_type=cap.get("imaged_type"),
+            confidence=float(cap.get("type_confidence") or 0.0),
+            fine_type=cap.get("fine_type"),
+            not_classifiable=cap.get("not_classifiable") or "",
+            model_name=cap.get("model_name") or "",
+            model_provenance=cap.get("model_provenance") or "",
+            quality=quality, band=cap.get("band") or "visible")
+        finding = check_declared_type(
+            declared_class=declared.get(subject), verdict=verdict,
+            quality=quality, band=verdict.band)
+        if not finding.is_contradiction:
+            continue
+        prev = best.get(node)
+        if prev is None or finding.confidence > prev[0].confidence:
+            best[node] = (finding, cap, [])
+    for node, (_f, _c, agreeing) in best.items():
+        for cap in captures:
+            if vessel_node_id(str(cap.get("subject_id") or "")) != node:
+                continue
+            if cap.get("capture_id") != best[node][1].get("capture_id"):
+                agreeing.append(cap)
+
+    out: list[str] = []
+    for node, (finding, cap, others) in best.items():
+        # Repeated looks corroborate; they do not multiply. Two photographs of
+        # one hull are one fact seen twice, which is exactly the distinction
+        # `catalog.REPEAT_RESTATEMENT` was written for after the sanctions
+        # factor reached 0.97 by being derived from two places (ADR-031c).
+        # A small bounded boost, and no more.
+        supporting = [c for c in others
+                      if c.get("imaged_type") == cap.get("imaged_type")]
+        score = min(0.95, float(finding.confidence)
+                    + 0.02 * min(len(supporting), 3))
+        ts = pd.Timestamp(cap.get("taken_at"))
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        ev = [dict(edge="imagery-contradiction", src=node,
+                   dst=f"eo_capture:{cap.get('capture_id')}",
+                   confidence=round(float(finding.confidence), 3),
+                   source="imagery_rules", source_ref=source_ref,
+                   props=dict(check=finding.check,
+                              statement=finding.statement,
+                              capture_id=cap.get("capture_id"),
+                              camera_id=cap.get("camera_id"),
+                              station=cap.get("station"),
+                              taken_at=str(cap.get("taken_at")),
+                              range_km=cap.get("range_km"),
+                              bearing_deg=cap.get("bearing_deg"),
+                              band=cap.get("band"),
+                              image_quality=cap.get("image_quality"),
+                              # The model that made the claim, named on the
+                              # evidence. The brief's standing caution is that a
+                              # borrowed component must be documented as one
+                              # wherever it appears, not once in a design note.
+                              model_name=cap.get("model_name"),
+                              model_provenance=cap.get("model_provenance"),
+                              capture_mode=cap.get("capture_mode"),
+                              statement_line=cap.get("statement"),
+                              **finding.detail))]
+        _emit(out, store, "imagery_type_mismatch", node, ts.timestamp(),
+              score, ev,
+              props=dict(declared_class=finding.detail.get("declared_class"),
+                         imaged_type=finding.detail.get("imaged_type"),
+                         declared_group=finding.detail.get("declared_group"),
+                         capture_id=cap.get("capture_id"),
+                         station=cap.get("station"),
+                         camera_id=cap.get("camera_id"),
+                         band=cap.get("band"),
+                         image_quality=cap.get("image_quality"),
+                         corroborating_captures=len(supporting),
+                         capture_mode=cap.get("capture_mode"),
+                         model_name=cap.get("model_name"),
+                         lat=cap.get("lat"), lon=cap.get("lon"),
+                         statement=finding.statement))
     return out

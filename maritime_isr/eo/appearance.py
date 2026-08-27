@@ -206,6 +206,38 @@ def distance(a: Appearance, b: Appearance) -> float:
     return math.sqrt(acc / total_w)
 
 
+#: Measurement error on each feature, as ``(irreducible, per unit of poor
+#: quality)``. Read as ``sigma = floor + slope x (1 - quality)``.
+#:
+#: **The floors are the important half and the first version did not have
+#: them.** Setting the error to fall to almost nothing in a perfect image says
+#: that a photograph measures "how cluttered is her deck" to three decimal
+#: places, and it does not: these are soft perceptual quantities that a human
+#: analyst and a vision model both estimate to a broad band however good the
+#: picture is. With near-zero floors every prototype separated from every other
+#: and :func:`eo.classify.measure_separability` reported a model that could tell
+#: a Suezmax from an Aframax — a vocabulary of eleven classes, which is exactly
+#: the "long list of classes it guesses at" the brief warns against, arrived at
+#: by flattering the sensor rather than by measuring it.
+#:
+#: Length is the tightest because it is a *geometric* measurement against a
+#: known range and a known aspect; mast count is the loosest because counting
+#: thin vertical structures against a bright sky is the classic hard case.
+FEATURE_NOISE: dict[str, tuple[float, float]] = {
+    "length_rel":        (0.04, 0.16),
+    "slenderness_rel":   (0.06, 0.20),
+    "superstructure":    (0.05, 0.18),
+    "freeboard_rel":     (0.12, 0.30),
+    "clutter":           (0.10, 0.28),
+    "masts":             (0.30, 0.90),
+}
+
+
+def _sigma(name: str, quality: float) -> float:
+    floor, slope = FEATURE_NOISE[name]
+    return floor + slope * max(0.0, 1.0 - float(quality))
+
+
 def observe(truth: Appearance, *, aspect_deg: Optional[float], quality: float,
             band: str, rng) -> Appearance:
     """What the camera actually measured, given the conditions of this look.
@@ -224,7 +256,6 @@ def observe(truth: Appearance, *, aspect_deg: Optional[float], quality: float,
     """
     from .conditions import BAND_THERMAL
 
-    sigma = max(0.0, 1.0 - float(quality))
     sin_aspect = (1.0 if aspect_deg is None
                   else abs(math.sin(math.radians(aspect_deg))))
     reliable = sin_aspect >= MIN_ASPECT_FOR_LENGTH
@@ -232,22 +263,22 @@ def observe(truth: Appearance, *, aspect_deg: Optional[float], quality: float,
     # Measure the apparent length, then correct for aspect. Both steps carry
     # their own error, which is why a bow-on look degrades so fast.
     apparent = truth.length_m * max(sin_aspect, 0.12)
-    apparent *= 1.0 + rng.gauss(0.0, 0.10 * sigma + 0.03)
+    apparent *= 1.0 + rng.gauss(0.0, _sigma("length_rel", quality))
     measured_length = apparent / max(sin_aspect, MIN_ASPECT_FOR_LENGTH)
 
     deck_readable = band != BAND_THERMAL
     return Appearance(
         length_m=max(measured_length, 1.0),
-        length_beam_ratio=max(
-            1.5, truth.length_beam_ratio * (1.0 + rng.gauss(0.0, 0.12 * sigma
-                                                            + 0.03))),
+        length_beam_ratio=max(1.5, truth.length_beam_ratio * (
+            1.0 + rng.gauss(0.0, _sigma("slenderness_rel", quality)))),
         superstructure_position=min(1.0, max(0.0,
-            truth.superstructure_position + rng.gauss(0.0, 0.12 * sigma + 0.02))),
-        freeboard_ratio=max(
-            0.01, truth.freeboard_ratio * (1.0 + rng.gauss(0.0, 0.20 * sigma
-                                                           + 0.05))),
+            truth.superstructure_position
+            + rng.gauss(0.0, _sigma("superstructure", quality)))),
+        freeboard_ratio=max(0.01, truth.freeboard_ratio * (
+            1.0 + rng.gauss(0.0, _sigma("freeboard_rel", quality)))),
         deck_clutter=min(1.0, max(0.0,
-            truth.deck_clutter + rng.gauss(0.0, 0.18 * sigma + 0.04))),
-        mast_count=max(0.0, truth.mast_count + rng.gauss(0.0, 0.5 * sigma)),
+            truth.deck_clutter + rng.gauss(0.0, _sigma("clutter", quality)))),
+        mast_count=max(0.0, truth.mast_count
+                       + rng.gauss(0.0, _sigma("masts", quality))),
         length_reliable=reliable,
         deck_readable=deck_readable)

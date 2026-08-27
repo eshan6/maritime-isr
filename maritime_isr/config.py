@@ -411,6 +411,26 @@ ANOMALY_THRESHOLDS = {
     "maiden_zone_visit":    0.60,
     "lane_deviation":       0.65,
     "anchored_outside_limits": 0.60,
+    # --- Area 5: the electro-optical loop (ADR-037) ----------------------
+    #
+    # `imagery_type_mismatch` at 0.55, above `dark_vessel` and level with
+    # `notification_unmatched`. The reasoning is the same shape as the gates
+    # around it: how strong is the *weakest* thing that should reach a queue.
+    #
+    # The rule in `anomaly/imagery.py` has already refused everything marginal
+    # before a score exists — a look below 0.45 image quality, a classifier
+    # below 0.62 confidence, and any pair of classes the image could not have
+    # separated under its own conditions. What survives is a hull the camera
+    # says is a different kind of ship from the one she broadcasts, which is
+    # about as legible a finding as this system produces. The floor a survivor
+    # can reach is 0.62 x (0.6 + 0.4 x 0.45) = 0.48, so the gate genuinely
+    # binds: a barely-admissible verdict off a barely-admissible image does not
+    # reach the queue, and a confident one off a good image clears comfortably.
+    #
+    # It sits *above* `dark_vessel` deliberately. A dark contact is a claim
+    # about a sensor picture; this is an accusation against a named hull with
+    # an owner and an agent, and the cost of being wrong is higher.
+    "imagery_type_mismatch": 0.55,
 }
 RISK_HALF_LIFE_DAYS = 30.0        # anomaly contributions to risk decay
 RISK_SANCTION_HOPS = 3            # graph proximity search depth for risk
