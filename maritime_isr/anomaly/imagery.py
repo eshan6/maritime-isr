@@ -66,12 +66,12 @@ from typing import Optional
 # family-level label, so the vocabulary merge is measured against these groups —
 # see `eo.classify.FAMILY_SEPARATION_THRESHOLD`. Re-exported so a reader of this
 # rule can find the taxonomy it is applying.
-from ..eo.classify import (AIS_TYPE_FAMILY, family_of_declared,
-                           family_of_imaged)
+from ..eo.classify import (AIS_TYPE_FAMILY, families_of_imaged,
+                           family_of_declared)
 
 __all__ = ["ImageryFinding", "check_declared_type", "CONTRADICTION", "OK",
            "NOT_CHECKABLE", "MIN_MISMATCH_QUALITY", "MIN_MISMATCH_CONFIDENCE",
-           "AIS_TYPE_FAMILY", "family_of_declared", "family_of_imaged"]
+           "AIS_TYPE_FAMILY", "family_of_declared", "families_of_imaged"]
 
 CONTRADICTION = "contradiction"
 OK = "ok"
@@ -181,32 +181,46 @@ def check_declared_type(*, declared_class: Optional[str], verdict,
 
     # (5) Families, which is the level a declaration is answerable at.
     d_family = family_of_declared(declared_class)
-    i_family = family_of_imaged(imaged)
+    # **The model's own reading of its own label, wherever it supplies one.**
+    # Re-deriving it here against the default vocabulary is how a swapped-in
+    # classifier's coarse labels got over-read into precise family claims and
+    # accused a third of an honest fleet — see `eo.classify.families_of_imaged`.
+    # The fallback stands for a third-party verdict that declines to say.
+    i_families = getattr(verdict, "imaged_families", None)
+    if i_families is None:
+        i_families = families_of_imaged(imaged, quality=quality, band=band)
     detail["declared_family"] = d_family
-    detail["imaged_family"] = i_family
+    detail["imaged_families"] = sorted(i_families) if i_families else None
     if d_family is None:
         return ImageryFinding(
             check, NOT_CHECKABLE, 0.0,
-            f"She declares {_pretty(declared_class)}, which this system holds "
-            f"no reference shape for, so the image supports no comparison.",
-            detail)
-    if i_family is None:
+            f"She declares {_pretty(declared_class)}, which the AIS ship-type "
+            f"standard does not cleanly place in a family, so the image "
+            f"supports no comparison.", detail)
+    if i_families is None:
         return ImageryFinding(
             check, NOT_CHECKABLE, 0.0,
-            f"The image supports only “{_pretty(imaged)}”, which spans more "
-            f"than one AIS ship-type family, so it cannot contradict a "
-            f"declared {_pretty(declared_class)}. In the {band} band at "
-            f"quality {float(quality):.2f} this model cannot see the deck, and "
-            f"the deck is what would separate them.", detail)
+            f"The image supports only “{_pretty(imaged)}”, which rules out no "
+            f"AIS ship-type family, so it cannot contradict a declared "
+            f"{_pretty(declared_class)}. In the {band} band at quality "
+            f"{float(quality):.2f} this model cannot resolve her far enough.",
+            detail)
 
-    # (4) Different classes, same family: an ordinary disagreement, not a lie.
-    if d_family == i_family:
+    # (4) The image leaves her declared family open. Either it agrees, or it
+    # cannot separate her family from another and has ruled nothing out — and
+    # in both cases she has contradicted nothing. This is where a hull
+    # declaring `bulker` that images unmistakably as a general cargo ship goes
+    # quiet: both are cargo, and two sources classifying one hull differently
+    # inside a family is routine (ADR-034's `class_quibble`).
+    if d_family in i_families:
+        spans = (f" The image narrows her to {', '.join(sorted(i_families))}, "
+                 f"which includes what she declares."
+                 if len(i_families) > 1 else "")
         return ImageryFinding(
             check, OK, min(0.9, float(verdict.confidence)),
             f"She declares {_pretty(declared_class)} and images as "
             f"{_pretty(imaged)}. Both are {d_family} under the AIS ship-type "
-            f"standard, and two sources classifying one hull differently "
-            f"inside a family is routine.", detail)
+            f"standard.{spans}", detail)
 
     # (2) Strong enough to accuse?
     if float(verdict.confidence) < MIN_MISMATCH_CONFIDENCE:
@@ -226,7 +240,8 @@ def check_declared_type(*, declared_class: Optional[str], verdict,
         check, CONTRADICTION, conf,
         f"She broadcasts that she is a {_pretty(declared_class)}, which is a "
         f"{d_family} under the AIS ship-type standard. The camera images her "
-        f"as a {_pretty(imaged)} — a {i_family} — at confidence "
+        f"as a {_pretty(imaged)}, which this model can place in "
+        f"{' or '.join(sorted(i_families))} and nothing else, at confidence "
         f"{float(verdict.confidence):.2f} in the {band} band. A hull does not "
         f"change shape between messages.",
         detail)

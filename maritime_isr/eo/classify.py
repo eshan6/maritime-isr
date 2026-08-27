@@ -162,13 +162,6 @@ AIS_TYPE_FAMILY: dict[str, str] = {
     "naval": "military",
 }
 
-#: Coarse imagery labels that **span** families, and therefore support no
-#: comparison at all. "merchant" is what an image resolves to when the deck is
-#: not readable — at night, or at the far end of the useful range — and it
-#: covers both tanker and cargo. Reporting a contradiction from it would be
-#: asserting the very feature the image failed to carry.
-_SPANNING_LABELS = frozenset({"merchant", "vessel"})
-
 #: Coarse group labels the classifier's merge produces, and the family each
 #: belongs to. Anything not here falls through to :data:`AIS_TYPE_FAMILY`,
 #: because an un-merged label *is* a fine class name.
@@ -184,11 +177,60 @@ def family_of_declared(vessel_class: Optional[str]) -> Optional[str]:
     return AIS_TYPE_FAMILY.get(str(vessel_class))
 
 
-def family_of_imaged(label: Optional[str]) -> Optional[str]:
-    """The family an imagery label implies, or None if it implies none."""
-    if not label or label in _SPANNING_LABELS:
+def families_of_imaged(label: Optional[str], *, quality: Optional[float] = None,
+                       band: Optional[str] = None,
+                       coarse_of: Optional[dict] = None) -> Optional[frozenset]:
+    """Every family an imagery label leaves open, or None if it bounds nothing.
+
+    **A set, not a single family, and the difference decides whether the
+    headline scenario can fire at all.** Under most conditions this model cannot
+    separate a tanker from a bulker, so it publishes the merged label
+    ``merchant``. Asking that label which family it *means* gives no answer —
+    but the label still rules out every family it does not contain, and a hull
+    broadcasting that she is a fishing vessel while imaging as a merchant has
+    plainly been contradicted. A first version of this returned None there and
+    let the brief's own headline example through untouched.
+
+    So the question asked is "which families does this label leave open", and a
+    contradiction is a declared family that is **not** in the set. The members
+    are read from the merge measured at this capture's own conditions, so the
+    answer narrows in a good daylight look and widens at night, on its own.
+
+    Returns None when the set cannot be bounded — a label one of whose members
+    is a class the AIS standard does not cleanly cover, which rules nothing out.
+
+    **``coarse_of`` must come from the model that produced the label, and a
+    measured defect is why the parameter exists.** The first version resolved
+    every label against the *default* model's vocabulary. Swap in
+    :class:`SilhouetteClassifier`, whose vocabulary at a marginal look collapses
+    to ``small_craft`` and ``vessel``, and the default model — which holds no
+    such labels — fell through to the fixed group table, read ``small_craft`` as
+    meaning fishing and nothing else, and accused **36% of an entirely honest
+    fleet**. A label means what the model that emitted it meant by it, so the
+    classifier now publishes its own family set on the verdict and this fallback
+    path is reached only for a third-party model that declines to.
+    """
+    if not label:
         return None
-    return _GROUP_FAMILY.get(str(label)) or AIS_TYPE_FAMILY.get(str(label))
+    if coarse_of is None:
+        if quality is None or band is None:
+            return None
+        coarse_of = separability_at(quality, band)["coarse_of"]
+    members = [fine for fine, group in coarse_of.items() if group == label]
+    if not members:
+        # A label from a model whose vocabulary this one does not hold — a
+        # customer's own classifier, say. Fall back to the fixed tables rather
+        # than refusing: an un-merged fine name and the three standard group
+        # names are still interpretable.
+        fam = _GROUP_FAMILY.get(str(label)) or AIS_TYPE_FAMILY.get(str(label))
+        return frozenset({fam}) if fam else None
+    fams = set()
+    for m in members:
+        fam = AIS_TYPE_FAMILY.get(m)
+        if fam is None:
+            return None
+        fams.add(fam)
+    return frozenset(fams)
 
 
 def _coarse_name(group: set[str]) -> str:
@@ -249,8 +291,9 @@ def measure_separability(*, quality: float = VOCABULARY_REFERENCE_QUALITY,
 
     cm = confusion_matrix(y_true, y_pred)
     groups = confusable_groups(cm)
+    merged = _merge_across_families(cm, groups)
     coarse_of: dict[str, str] = {}
-    for g in groups:
+    for g in merged:
         label = _coarse_name(set(g))
         for member in g:
             coarse_of[member] = label
@@ -259,11 +302,94 @@ def measure_separability(*, quality: float = VOCABULARY_REFERENCE_QUALITY,
     vocabulary = sorted(set(coarse_of.values()))
 
     temperature, calibration = _calibrate(dist_rows, y_true, coarse_of)
-    return {"confusion": cm, "groups": [sorted(g) for g in groups],
+    return {"confusion": cm,
+            "groups": [sorted(g) for g in merged],
+            "type_groups": [sorted(g) for g in groups],
             "vocabulary": vocabulary, "coarse_of": coarse_of,
             "temperature": temperature, "calibration": calibration,
             "conditions": {"quality": quality, "band": band,
                            "aspect_deg": aspect_deg, "samples": samples}}
+
+
+#: How often a class may be mistaken for one in a *different* AIS ship-type
+#: family before this model loses the right to name that family at all.
+#:
+#: **This threshold is the one that keeps the mismatch rule honest, and the
+#: build did not have it until the false positives were counted.** The fine
+#: confusion merge inherited from `tracks.vessel_type` asks "can the model tell
+#: A from B", at 25%. That is the right question for *describing* a contact and
+#: the wrong one for *accusing* a named hull, because the two are not the same
+#: bar and they do not even weight the same errors: calling a bulker a general
+#: cargo ship is a harmless slip inside one family, while calling her a product
+#: tanker is the difference between silence and an alert.
+#:
+#: Measured on the prototypes at a good daylight look: `product_tanker` was
+#: called `bulker` on 15% of samples and `bulker` was called `product_tanker` on
+#: 12%. Both sat comfortably under the 25% type-merge bar, so both stayed
+#: separate labels — and on 1,500 honest hulls the rule then produced 22 false
+#: accusations, against two authored lies in the corpus. A ten-to-one false
+#: positive rate is the alert-fatigue failure ADR-004 exists to prevent.
+#:
+#: 5% is set from what an accusation is worth rather than from what made the
+#: numbers look good: a claim used to contradict a vessel's own declared
+#: identity may be wrong across families at most one time in twenty *before*
+#: corroboration, and `detect_imagery_mismatch` then requires more than one look
+#: agreeing. Raising it would let the tanker/bulker pair back in; lowering it
+#: collapses the vocabulary to "merchant" and the rule can never fire.
+FAMILY_SEPARATION_THRESHOLD = 0.05
+
+
+def _merge_across_families(cm: dict[str, dict[str, int]],
+                           groups: list[set[str]]) -> list[set[str]]:
+    """Merge any class this model cannot reliably place in an AIS family.
+
+    Takes the type-level groups and unions two classes further whenever one is
+    mistaken for the other across a family boundary more than
+    :data:`FAMILY_SEPARATION_THRESHOLD` of the time. A merged group that spans
+    two families is named by :func:`_coarse_name` as `merchant` (or `vessel`),
+    and `family_of_imaged` returns None for those — so a capture that lands on
+    one supports no contradiction at all, which is the honest outcome.
+
+    Derived from the measured matrix, exactly as the type merge is. If a future
+    feature genuinely separates a tanker's deck from a bulker's, the group
+    dissolves on its own and nothing here needs editing.
+    """
+    parent = {c: c for c in cm}
+    for g in groups:
+        members = sorted(g)
+        for m in members[1:]:
+            parent[m] = members[0]
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    for a in sorted(cm):
+        fam_a = AIS_TYPE_FAMILY.get(a)
+        total = sum(cm[a].values()) or 1
+        for b, n in cm[a].items():
+            fam_b = AIS_TYPE_FAMILY.get(b)
+            if a == b or b not in parent:
+                continue
+            # Only a *cross-family* error disqualifies a family claim. A class
+            # with no family (a dhow) can neither be placed nor mis-placed, so
+            # it is left alone rather than dragged into a merge.
+            if fam_a is None or fam_b is None or fam_a == fam_b:
+                continue
+            if n / total > FAMILY_SEPARATION_THRESHOLD:
+                union(a, b)
+
+    out: dict[str, set[str]] = {}
+    for c in cm:
+        out.setdefault(find(c), set()).add(c)
+    return [g for g in out.values() if len(g) > 1]
 
 
 def _coarse_probs(dists: dict[str, float], coarse_of: dict[str, str],
@@ -467,6 +593,11 @@ class ImageVerdict:
     confidence: float = 0.0
     fine_type: Optional[str] = None
     probabilities: dict = field(default_factory=dict)
+    #: Which AIS ship-type families this label leaves open, **as the model that
+    #: produced it understands its own vocabulary**. None means it bounds
+    #: nothing. Published here rather than re-derived downstream because a label
+    #: means what its author meant by it — see :func:`families_of_imaged`.
+    imaged_families: Optional[frozenset] = None
     identity_subject: Optional[str] = None
     identity_confidence: float = 0.0
     identity_basis: str = ""
@@ -491,6 +622,8 @@ class ImageVerdict:
         return {"imaged_type": self.imaged_type,
                 "type_confidence": round(float(self.confidence), 3),
                 "fine_type": self.fine_type,
+                "imaged_families": (sorted(self.imaged_families)
+                                    if self.imaged_families else None),
                 "probabilities": {k: round(v, 3) for k, v in sorted(
                     self.probabilities.items(), key=lambda kv: -kv[1])},
                 "identity_subject": self.identity_subject,
@@ -585,6 +718,8 @@ class _NearestPrototype:
 
         v.imaged_type = top
         v.confidence = min(0.97, conf)
+        # What this label means, resolved in *this* model's own vocabulary.
+        v.imaged_families = families_of_imaged(top, coarse_of=coarse_of)
         bits = [f"nearest prototype {fine_top}",
                 f"{'length withheld (bow-on)' if not seen.length_reliable else f'{seen.length_m:.0f} m'}",
                 f"deck {'unreadable on thermal' if not seen.deck_readable else f'{seen.deck_clutter:.2f}'}"]
