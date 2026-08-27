@@ -24,7 +24,7 @@ from __future__ import annotations
 import sys
 import time
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -781,6 +781,264 @@ def run_anomalies(store: GraphStore, tracks_out: dict,
     return fired
 
 
+#: How long one cueing slot is, and how far the campaign reaches.
+#:
+#: Half an hour is the coarsest slot at which the geometry still moves — a
+#: merchant covers six kilometres in it, which is most of the range band inside
+#: which a mismatch is provable — and the finest at which a campaign over an
+#: eight-week corpus is a few thousand assignments rather than a hundred
+#: thousand. The slew constraint never binds at this length and that is correct:
+#: it exists for the two-minute case a real station would run.
+EO_SLOT_SECONDS = 1800.0
+
+#: The campaign is run in weekly stages so the loop can close. Each stage is
+#: handed what the previous stage's images concluded, which is what makes a
+#: contradicted hull get looked at again and a confirmed one stop consuming
+#: cameras. One long plan would rank repeatedly and never learn.
+EO_STAGE_DAYS = 7.0
+
+
+def run_eo_loop(store, all_tracks, alerts_before: int) -> dict:
+    """Area 5 (ADR-037) — cue, capture, classify, and bind to the track.
+
+    **This runs after the anomaly library, and the ordering is the design.**
+    Cueing is driven by suspicion, and suspicion is what that pass produces. A
+    camera network that decided where to look before anything had been flagged
+    would be a raster scan, which is what the requirement is asking to replace.
+
+    Nothing here is scenario-aware except the `CaptureSource`, which is the
+    camera. The scheduler, the classifier, the library and the mismatch rule are
+    the same objects a deployment would run.
+    """
+    import numpy as np
+
+    from maritime_isr.eo.camera import default_camera_network
+    from maritime_isr.eo.capture import (TABLE as EO_TABLE, land_captures,
+                                         publish_captures, run_captures)
+    from maritime_isr.eo.classify import (PrototypeClassifier,
+                                          ReferenceLibrary,
+                                          SilhouetteClassifier)
+    from maritime_isr.eo.cue import CueCandidate, plan_cueing
+    from maritime_isr.ingest.landing import SYNTHETIC_SOURCE_ID
+    from maritime_isr.scenario.eo import (TABLE as APPEARANCE_TABLE,
+                                          SimulatedCameraSource)
+    from maritime_isr.tracks.kalman import epoch_s
+
+    appearance = read_table(APPEARANCE_TABLE)
+    if not appearance:
+        print("  no scenario_eo_appearance — the camera simulator has no world "
+              "model, so no capture can be taken and none is invented")
+        return {}
+    cameras = default_camera_network()
+    print(f"  cameras        : {len(cameras)} (all simulated; there is no "
+          f"camera in this system)")
+
+    # ---- the picture, resampled onto the slot grid ------------------------
+    #
+    # Every track in the corpus is a candidate, not only the flagged ones. That
+    # is the requirement's framing — "a picture containing far more tracks than
+    # there are cameras" — and a scheduler handed only the suspicious ones would
+    # never have to choose.
+    suspicion: dict[str, tuple[float, str]] = {}
+    for a in store.alerts():
+        if a.get("disposition") == "dismiss":
+            continue
+        score = float(a.get("score") or a.get("confidence") or 0.0)
+        cur = suspicion.get(a["subject"])
+        if cur is None or score > cur[0]:
+            suspicion[a["subject"]] = (score, str(a.get("anomaly_type")
+                                                  or a.get("rule") or "alert"))
+
+    from maritime_isr.graph.identity import contact_node_id
+    from maritime_isr.schemas.keys import vessel_node_id
+
+    fixes: list[tuple[float, CueCandidate]] = []
+    for tr in all_tracks:
+        pts = tr.points[tr.points.quality != "outlier"] \
+            if hasattr(tr.points, "quality") else tr.points
+        if len(pts) == 0:
+            continue
+        has_id = bool(getattr(tr, "has_identity", False))
+        subject = (vessel_node_id(f"vessel:mmsi:{tr.mmsi}") if False else
+                   (f"vessel:mmsi:{tr.mmsi}" if has_id else
+                    contact_node_id(str(tr.track_key), source=tr.source.name)))
+        # The graph knows the canonical subject for an identified hull; use it
+        # where it exists so suspicion and captures land on the same node.
+        if has_id:
+            from maritime_isr.graph.identity import resolve_mmsi
+            subject = resolve_mmsi(store, tr.mmsi)
+        length = None
+        if "length_est_m" in pts.columns:
+            vals = [v for v in pts["length_est_m"].tolist() if v]
+            length = float(np.median(vals)) if vals else None
+        ts = epoch_s(pts["ts"])
+        susp, why = suspicion.get(subject, (0.0, ""))
+        for i in range(0, len(pts), 3):     # one candidate per ~3 fixes
+            fixes.append((float(ts[i]), CueCandidate(
+                subject_id=subject, track_id=tr.track_id,
+                lat=float(pts["lat"].iloc[i]), lon=float(pts["lon"].iloc[i]),
+                sog_kn=float(pts["sog_kn"].iloc[i]
+                             if "sog_kn" in pts.columns else 0.0),
+                cog_deg=float(pts["cog_deg"].iloc[i]
+                              if "cog_deg" in pts.columns else 0.0),
+                length_m=length, suspicion=susp, suspicion_reason=why,
+                identity_known=has_id, track_source=tr.source.name,
+                is_synthetic=True)))
+    if not fixes:
+        print("  no tracks to cue over")
+        return {}
+    fixes.sort(key=lambda f: f[0])
+    print(f"  picture        : {len({c.subject_id for _t, c in fixes}):,} "
+          f"distinct target(s), {len(fixes):,} candidate position(s)")
+
+    slot_index: dict[int, list[CueCandidate]] = {}
+    t_start = fixes[0][0]
+    for t, c in fixes:
+        slot_index.setdefault(int((t - t_start) // EO_SLOT_SECONDS),
+                              []).append(c)
+
+    def feed_for(base: float):
+        def feed(when):
+            k = int((when.timestamp() - t_start) // EO_SLOT_SECONDS)
+            # One candidate per subject per slot: several fixes of one hull in
+            # thirty minutes are one target, not three.
+            seen, out = set(), []
+            for c in slot_index.get(k, ()):
+                if c.subject_id in seen:
+                    continue
+                seen.add(c.subject_id)
+                out.append(c)
+            return out
+        return feed
+
+    # ---- the campaign, in weekly stages so the loop closes ----------------
+    source = SimulatedCameraSource(appearance)
+    classifier = PrototypeClassifier()
+    library = ReferenceLibrary()
+    imaged_at: dict[str, float] = {}
+    states: dict[str, str] = {}
+    all_caps = []
+    plans = []
+
+    t_end = fixes[-1][0]
+    stage_seconds = EO_STAGE_DAYS * 86400.0
+    n_stages = max(1, int((t_end - t_start) // stage_seconds) + 1)
+    t0 = datetime.fromtimestamp(t_start, tz=timezone.utc)
+    for stage in range(n_stages):
+        start = t0 + timedelta(seconds=stage_seconds * stage)
+        plan = plan_cueing(feed_for(t_start), cameras, t0=start,
+                           slots=int(stage_seconds / EO_SLOT_SECONDS),
+                           slot_seconds=EO_SLOT_SECONDS,
+                           imaged_at=imaged_at, verdict_state=states)
+        plans.append(plan)
+        caps = run_captures(plan, source=source, classifier=classifier,
+                            library=library, is_synthetic=True)
+        all_caps.extend(caps)
+        # Close the loop: what this stage's images concluded changes what the
+        # next stage thinks is worth a camera.
+        for c in caps:
+            imaged_at[c.subject_id] = c.taken_at.timestamp()
+        _update_states(store, caps, states)
+
+    n_task = sum(len(p.taskings) for p in plans)
+    n_defer = sum(len(p.deferrals) for p in plans)
+    slots = sum(p.camera_slots for p in plans)
+    counters = Counter()
+    for p in plans:
+        counters.update(p.counters)
+    print(f"  cueing         : {n_task:,} tasking(s) over {slots:,} "
+          f"camera-slot(s) ({n_task / max(slots, 1):.1%} utilisation), "
+          f"{n_defer:,} deferral(s) recorded")
+    for k in ("candidates_seen", "below_priority_floor", "no_camera_in_reach",
+              "outranked", "slew_too_far", "idle_camera_slots"):
+        print(f"    {k:<24}{counters[k]:>10,}")
+    if source.misses:
+        print(f"    {'no world model':<24}{source.misses:>10,}  "
+              f"(the simulator could not say what was at that bearing; no "
+              f"capture was invented)")
+
+    present = sum(1 for c in all_caps if c.target_present)
+    empty = len(all_caps) - present
+    claims = sum(1 for c in all_caps if c.verdict and c.verdict.is_claim)
+    ident = sum(1 for c in all_caps if c.verdict and c.verdict.identity_subject)
+    print(f"  captures       : {len(all_caps):,} — {present:,} with a target "
+          f"in frame, {empty:,} empty (a resolved radar track, not an alert)")
+    print(f"                   {claims:,} type claim(s), {ident:,} "
+          f"re-recognised from the library of {len(library):,} entries")
+
+    written = land_captures(all_caps,
+                            source_id=f"{SYNTHETIC_SOURCE_ID}:eo-camera",
+                            is_synthetic=True)
+    for table, n in sorted(written.items()):
+        print(f"  landed {n:,} row(s) into {table}")
+    pub = publish_captures(store, all_caps)
+    print(f"  graph          : {pub['nodes']:,} eo_capture node(s), "
+          f"{pub['depicts']:,} depicts, {pub['captured-by']:,} captured-by")
+
+    # ---- swap-ability, demonstrated on the same captures ------------------
+    #
+    # The brief asks for this to be shown rather than asserted. Same images,
+    # same loop, a second model: the vocabulary is coarser and the claim rate
+    # differs, and not one line of the cueing, tagging or rule code changed.
+    thin = SilhouetteClassifier()
+    thin_claims = 0
+    for cap in all_caps:
+        if cap.observed is None:
+            continue
+        v = thin.classify(cap.observed, quality=cap.image_quality,
+                          band=cap.band, library=ReferenceLibrary())
+        thin_claims += int(v.is_claim)
+    print(f"  classifier swap: {classifier.name} made {claims:,} type claim(s) "
+          f"on these captures; {thin.name} makes {thin_claims:,} on the same "
+          f"images, through the same interface, with no other change")
+
+    print(plans[max(range(len(plans)), key=lambda i: len(plans[i].taskings))]
+          .format())
+    return dict(captures=all_caps, plans=plans, table=EO_TABLE)
+
+
+def _update_states(store, caps, states: dict) -> None:
+    """Fold this stage's verdicts into what the scheduler believes.
+
+    `confirmed` means an image agreed with what she broadcasts and there is
+    little left to learn; `contradicted` means the opposite and she should be
+    looked at again, which is how the corroborating second look gets taken.
+    """
+    from maritime_isr.anomaly.imagery import check_declared_type
+    from maritime_isr.api.reader import open_reader
+
+    declared: dict[str, str] = {}
+    with open_reader() as reader:
+        if reader.has("gfw_vessel_identity"):
+            for r in reader.rows(
+                    "SELECT vessel_id, vessel_class FROM gfw_vessel_identity "
+                    "WHERE record_kind = 'self_reported'"):
+                if r.get("vessel_id") and r.get("vessel_class"):
+                    declared[str(r["vessel_id"])] = str(r["vessel_class"])
+    for c in caps:
+        if not c.verdict or not c.verdict.is_claim:
+            continue
+        f = check_declared_type(declared_class=declared.get(c.subject_id),
+                                verdict=c.verdict, quality=c.image_quality,
+                                band=c.band)
+        if f.outcome == "contradiction":
+            states[c.subject_id] = "contradicted"
+        elif f.outcome == "ok" and states.get(c.subject_id) != "contradicted":
+            states[c.subject_id] = "confirmed"
+
+
+def run_imagery_mismatch(store, captures) -> list[str]:
+    """The payoff: the camera against the transponder."""
+    from maritime_isr.anomaly.library import detect_imagery_mismatch
+
+    identities, _baselines = _area2_inputs()
+    rows = [c.as_row() for c in captures]
+    fired = detect_imagery_mismatch(store, rows, identities,
+                                    source_ref="scenario-combined")
+    print(f"    {'imagery_type_mismatch':<26}{len(fired):>6} alert(s)")
+    return fired
+
+
 def main() -> int:
     _hdr("1. landed corpus")
     df = load_positions()
@@ -834,6 +1092,19 @@ def main() -> int:
 
     _hdr("7b. Phase 5 — the four analyses the zone layer unlocks (ADR-030)")
     run_zone_analyses(store, zone_tracks, zone_out)
+
+    _hdr("7c. Area 5 — the electro-optical loop (ADR-037)")
+    # After the anomaly library on purpose: cueing is driven by suspicion, and
+    # suspicion is what that pass produces. A camera network that decided where
+    # to look before anything had been flagged would be a raster scan, which is
+    # what the requirement is asking to replace.
+    eo = run_eo_loop(store, zone_tracks, alerts_before=len(store.alerts()))
+
+    _hdr("7d. Area 5 — the camera against the transponder")
+    if eo.get("captures"):
+        run_imagery_mismatch(store, eo["captures"])
+    else:
+        print("  no captures, so nothing to compare against a declaration")
 
     _hdr("8. decay over the combined graph")
     dec = from_landed.decay_summary(store)
