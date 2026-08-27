@@ -219,12 +219,25 @@ fusion/    association engine + dark-vessel logic (THE fusion core — keep it s
 anomaly/   the detector library, plus the pure rule modules it calls:
            `identity.py` (is her declared identity self-consistent),
            `voyage.py` (does her declared destination and ETA match her track,
-            ADR-035) and `paperwork.py` (does her arrival notification match
+            ADR-035), `paperwork.py` (does her arrival notification match
             her track — declared last port, arrival window, declared ballast
-            against a laden draught; ADR-036). All three are pure functions
-            with three-valued outcomes — contradiction / ok / **not
-            checkable** — and "we could not check" is an answer, never folded
-            into "fine".
+            against a laden draught; ADR-036) and `imagery.py` (does a camera
+            image agree with her declared vessel type, ADR-037). All four are
+            pure functions with three-valued outcomes — contradiction / ok /
+            **not checkable** — and "we could not check" is an answer, never
+            folded into "fine".
+eo/        the electro-optical loop (ADR-037): `cue.py` is the scheduler and
+           the centre of the area — given far more tracks than cameras, which
+           track a camera is pointed at, when, and **why**, as a global
+           assignment per slot rather than a ranked list. `camera.py` is the
+           geometry and the image-quality model, `conditions.py` the light and
+           weather, `capture.py` the image bound to a track and landed as
+           evidence, `classify.py` the swappable classifier and its library,
+           `appearance.py` the numeric stand-in for pixels.
+           **There is no camera.** Every capture is simulated through the
+           `CaptureSource` seam and every row says so. Nothing here may read
+           ground truth; the simulator on the far side of that seam
+           (`scenario/eo.py`) is the world generator and may.
 coastline.py  distance from land, from the shared 1 km mask (ADR-035). NOT
            bathymetry: operating depth is absent and must not be approximated.
 assistant/ the MDA assistant (ADR-031): the ranked Vessel of Interest object —

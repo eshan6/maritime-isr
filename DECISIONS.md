@@ -3028,3 +3028,244 @@ rather than the rules:
 * Every figure here is measured on the **synthetic suite** (CLAUDE.md §4.6).
   Real-feed precision will be lower and must be re-measured on the deploy host,
   which does not exist yet.
+
+---
+
+## ADR-037 — Automating the electro-optical loop, and the flattery in a simulated sensor *(Accepted)*
+**Section 3, Area 5 of the IDEX Challenge 82 brief.**
+
+**Context.** The requirement is precise about what is wrong:
+
+> The cameras at the radar stations are operated manually by watchkeepers.
+> There is no automatic capture of an image against a radar or AIS track, no
+> classification of type and identity against a library, no tagging of the
+> image to the track, and no alert when what the camera sees disagrees with
+> what the track claims.
+
+Four things are asked for and **only one of them needs pictures**. Capture
+without operator intervention, bind the image to a track, classify against a
+library, alert on the disagreement: three are fusion and control logic. The
+brief says so outright and adds the instruction that decides the shape of the
+work — *"image classification is the commodity part of this problem, the part
+any competitor can also do. So build the loop, and treat the classifier as a
+replaceable component behind an interface."*
+
+**Decisions — six parts.**
+
+**(a) Cueing is a global assignment per slot, not a ranked list.** The obvious
+implementation sorts tracks by suspicion and gives each its best camera. That is
+**greedy per-target matching**, which CLAUDE.md §6 bans one domain along in the
+association core, and it fails here for the identical reason: the three most
+suspicious contacts are frequently inside one station's arc, so a greedy pass
+hands that station's camera to all three, breaks the tie arbitrarily, and leaves
+fifteen cameras idle. Each slot is solved with `linear_sum_assignment` over
+cameras × candidates, the same tool `fusion/associate.py` uses.
+
+**(b) The priority is three terms with stated weights, and the second is what
+makes it work.** `0.55 x suspicion + 0.30 x information gain + 0.15 x staleness`,
+multiplied by the expected image quality.
+
+*Suspicion* dominates because that is the requirement's own framing.
+*Information gain* — what a photograph would actually resolve — is a close second
+and is the term a naive build omits: without it the network spends every slot
+re-photographing the top of the ranked list and never looks at the other fifty
+tracks. A contact nobody can name scores 1.00; a hull whose declared identity no
+image has checked, 0.55; a hull an image already agreed with, 0.10; and a hull an
+image already *disagreed* with, 0.85 — which is what sends the camera back for
+the corroborating second look part (f) requires. *Staleness* is smallest because
+"we have not looked at her lately" is not by itself a reason to look.
+
+`PRIORITY_FLOOR = 0.30` is arithmetic rather than tuning: it is the priority of
+an ordinary unsuspected hull whose identity no image has ever checked
+(`0.30 x 0.55 + 0.15 x 1.0 = 0.315`). The rule reads *"a hull nobody suspects is
+worth exactly one look, and after that she has to earn the next one."*
+
+**(c) A closing observation window multiplies the cost, never the priority.**
+Being about to leave does not make a ship more suspicious; it makes deferring her
+more expensive. That distinction is the whole difference between a schedule and a
+sorted list, and it is where ADR-032's forward projection finally earns its keep.
+That ADR measured dead reckoning and found it *useless* as a suspicion signal —
+every vessel departs from its own projection, because a coastal voyage is mostly
+turns — while recording that the projection is good for stating an expectation.
+"Will she still be inside Mumbai's arc in twenty minutes" tolerates the error
+that "did she deviate from her predicted track" does not.
+
+**(d) The deferral ledger is half the deliverable.** Every candidate that was
+worth a camera and did not get one carries the reason: `outranked`, naming the
+camera and the target that took it, or `no_camera_in_reach`, naming the nearest
+station and the range. That is the suppression discipline ADR-028 set for the
+radar cascade and ADR-031 extended to the ranked list, and it matters more for an
+automation than for a queue — an operator who cannot find out why the system did
+*not* look at something goes back to slewing the camera by hand. The ledger is
+bounded per slot and the totals travel as counters, because an unbounded ledger
+over a corpus-length campaign is larger than the corpus.
+
+**(e) The classifier sits behind `ImageClassifier`, and the swap is
+demonstrated rather than asserted.** Two implementations ship —
+`PrototypeClassifier`, which uses every feature an image carries, and
+`SilhouetteClassifier`, restricted to what an outline gives — and
+`tests/test_area5.py` defines a **third inside the test file** and substitutes it
+into the running loop. All three produce bound, landed captures; the verdicts
+differ; nothing in the cueing, the tagging or the mismatch rule changes between
+the runs. The pipeline prints the same comparison over the real captures.
+
+There are no pixels. `eo/appearance.py` defines the six measurements a vision
+model would extract from a photograph — length, slenderness, where the
+superstructure sits, freeboard ratio, deck clutter, mast count — and the loop
+consumes those rather than images. That is what makes the interface concrete: a
+customer's model drops in by producing the same six numbers from real imagery.
+Every capture row carries `capture_mode='simulated'`, an empty `image_ref`, and
+the model's own `provenance` string, which says it has never seen an image.
+
+**(f) The mismatch rule compares at the AIS ship-type family, and requires
+corroboration.** Both halves were forced by measurement and neither was in the
+first build. See the defects below.
+
+**Six defects, four of which were visible only as numbers.**
+
+* **The confidence did not track accuracy, so the model refused 84% of good
+  images.** A hand-set softmax temperature had `PrototypeClassifier` picking the
+  right fine class **96%** of the time while reporting a mean confidence of
+  **0.35** — below its own 0.50 bar. The claim rate was 15-35%. A confidence that
+  does not track the hit rate is decoration, and this project's entire thesis is
+  that an operator can calibrate their trust against it. The temperature is now
+  **fitted** so mean reported confidence equals measured accuracy under the
+  capture's own conditions (ordinary temperature scaling), and the quality
+  multiplier that used to be applied on top was removed as double-counting: the
+  calibration samples are generated *at* that quality, so a poor image already
+  produces a low number because the model is genuinely less often right on poor
+  images.
+
+* **The observation noise had no floors, so the model could tell a Suezmax from
+  an Aframax.** Error falling to nearly nothing in a perfect image says a
+  photograph measures "how cluttered is her deck" to three decimal places. It
+  does not: these are soft perceptual quantities that a human analyst and a
+  vision model both estimate to a broad band however good the picture is. With
+  near-zero floors every prototype separated from every other and
+  `measure_separability` reported an eleven-class vocabulary — exactly the *"long
+  list of classes it guesses at"* the brief warns against, reached by flattering
+  the sensor rather than by measuring it. `FEATURE_NOISE` now carries an
+  irreducible floor per feature, tightest for length (a geometric measurement
+  against a known range and a known aspect) and loosest for mast count (counting
+  thin vertical structures against a bright sky).
+
+* **The type-level merge was the wrong question, and 22 honest hulls in 1,500
+  were accused.** `confusable_groups`, inherited from `tracks.vessel_type`, asks
+  "can the model tell A from B" at 25%. That is the right question for
+  *describing* a contact and the wrong one for *accusing* a named hull, and it
+  does not even weight the errors the same way: calling a bulker a general cargo
+  ship is a harmless slip inside one family, while calling her a product tanker
+  is the difference between silence and an alert. Measured at a good daylight
+  look, `product_tanker` was called `bulker` on 15% of samples and `bulker` was
+  called `product_tanker` on 12% — both comfortably under the 25% bar, so both
+  stayed separate labels, and the rule produced a ten-to-one false-positive rate
+  against the two authored lies. A second merge pass now unions any pair mistaken
+  across an **AIS ship-type family** boundary more than 5% of the time
+  (`FAMILY_SEPARATION_THRESHOLD`), and a merged group that spans two families is
+  published as `merchant`. False accusations fell to **0-0.36%** per look.
+
+* **A merged label was read as bounding nothing, which silently discarded the
+  brief's own headline example.** Under most conditions the model publishes
+  `merchant` rather than `tanker`, and the first version returned "cannot check"
+  whenever a label spanned two families. But `merchant` still rules out every
+  family it does *not* contain, and a hull broadcasting that she is a fishing
+  vessel while imaging as a merchant has plainly been contradicted — which is
+  precisely *"a vessel declaring itself a fishing vessel that images as a
+  tanker"*, the case the brief names. The comparison is now against the **set** of
+  families a label leaves open, and a contradiction is a declared family that is
+  not in it.
+
+* **The rule read another model's label in the default model's vocabulary, and
+  accused 36% of an honest fleet.** Swap in `SilhouetteClassifier`, whose
+  vocabulary at a marginal look collapses to `small_craft` and `vessel`; the
+  default model holds no such labels, fell through to a fixed table, read
+  `small_craft` as meaning fishing and nothing else, and contradicted every
+  merchant it saw. A label means what the model that emitted it meant by it, so
+  the classifier now publishes its own family set on the verdict, it is landed on
+  the capture row, and the rule never re-derives it. **This defect is why the
+  swap test earns its place**: it was invisible with one classifier and immediate
+  with two.
+
+* **Sister ships are not separable in six numbers, and the identity radius
+  pretended otherwise.** Two observations of the same hull sit 0.12 apart at the
+  median and 0.18 at the ninetieth percentile; the *closest pair of different
+  hulls* sits 0.11 apart. The distributions overlap and no radius separates them,
+  because two Suezmaxes of the same dimensions genuinely do look the same. The
+  radius is now the same-hull p90 and the work is done by the **margin**: an
+  identification is offered when a hull is distinctive against what the library
+  holds and refused when she is one of a class — the same refusal
+  `ingest/pans/resolve.py` makes rather than fuzzy-matching a transposed name
+  onto a different ship.
+
+**Corroboration, and why it is the fix rather than a higher bar.** Even at 0.3%
+per look, five hundred hulls photographed several times each is a steady trickle
+of alerts about ships that have done nothing. Raising the confidence bar does not
+help, because a wrong label and a right one look the same from inside and the bar
+suppresses true positives just as fast. Two looks taken at different ranges,
+aspects, light and visibility are close to independent, so agreeing errors are
+rare in a way that agreeing truths are not — and the loop supplies the second
+look for free through the `contradicted` information-gain term. They must agree
+on the **family**: a hull called a tanker once and a trawler once has been
+photographed badly twice, and counting that as corroboration would be counting
+confusion as evidence.
+
+**What the simulation makes easier than reality, stated rather than buried.**
+The simulated camera has a 100% presence-detection rate: slewed onto a
+sea-clutter track it reports empty water, every time. Resolving a false radar
+track is a genuine and valuable thing a camera does — clutter is the dominant
+false-positive source in the whole radar picture — but a real head in a real
+swell misses targets, and a rule built on "the camera saw nothing" would be
+calibrated against a false-negative rate this project does not have. The empty
+frame is therefore recorded on the capture, counted, and **deliberately not
+promoted to an alert**. Similarly, a bearing the simulator holds no model for
+returns *no capture at all* rather than an empty frame: a gap in the simulation
+is not an observation about the sea (ADR-021).
+
+**Consequences.**
+
+* `eo_capture` is a new conformed table, in `ALL_TABLES` and in
+  `api.reader.CONFORMED_TABLES` — the lesson ADR-035 and ADR-036 both paid for.
+  `scenario_eo_appearance` is deliberately **absent** from the reader: it is the
+  camera simulator's model of what is physically out there, the stand-in for the
+  photons a lens would collect, and only the world generator may read it. A test
+  asserts that no module under `eo/` or `anomaly/imagery.py` names it.
+* `eo_capture` is a new node type, with `depicts` and `captured-by` edges. Its
+  own type for the same reason `notification` has one (ADR-036): a photograph is
+  an artifact, not a ship. `depicts` reaches a `contact` as well as a `vessel`,
+  because a camera slewed onto a track nobody can name still photographed
+  something, and that capture is the strongest single thing the system can offer
+  about her.
+* **`fusion/` is untouched.** The brief's standing caution is that an area
+  needing a change to the fusion core has found a defect in the core. Area 5 did
+  not: the loop reads built tracks and graph alerts and writes its own table. One
+  thing was *wanted* and not taken — `fusion/contact_profile.py` is the natural
+  home for an imaged type on a dark contact, and it sits inside `fusion/` despite
+  profiling rather than fusing. Recorded as an OPEN QUESTION in STATE.md rather
+  than patched around.
+* The ranked list gains its first `imagery` factor, so five of the six evidence
+  families in `assistant/catalog.py` are now filled and only `radio` (Area 6) is
+  declared and empty. `cue_eo_camera` moves from "not built" to **"partly
+  built"**, with the halves named separately: the decision, the tagging, the
+  library and the rule run; the camera does not exist.
+* Only **one** imagery factor kind is registered, and two were considered and
+  rejected. A camera that *recognises* a previously-imaged hull is an
+  identification, not a suspicion — it raises the value of a finding that already
+  exists and asserts nothing on its own, so it travels as evidence, the posture
+  ADR-026 took for imaging opportunity and ADR-032 for forward projection. A
+  camera that finds empty water is the other, for the reason above.
+* **A mismatch is only provable close in.** The head is useful against a merchant
+  to about 20 km; the image quality needed to contradict a declared identity is
+  only reached inside about 8 km in this coast's monsoon visibility. The gap
+  between "can see her" and "can prove something about her" is recorded rather
+  than tuned away, and it is why the Area 5 hulls are authored on close coastal
+  passes and why O4 — a genuine liar 150 km offshore — is a stated capability
+  boundary rather than a miss.
+* The corpus now contains hulls whose AIS-declared type is a lie, which means the
+  vessel-type model trains on mislabelled examples. That is realistic — any
+  training set built from AIS labels contains liars — and at four hulls in two
+  hundred it is inside the noise; it is named here so a future accuracy movement
+  is not attributed to the wrong cause.
+* Every figure in this ADR is measured on the **synthetic suite**, and most of it
+  on prototype descriptors rather than on the corpus. There is no camera, no
+  image has ever been examined, and real-feed precision must be re-measured on a
+  deploy host that does not exist (CLAUDE.md §4.6, §5).
