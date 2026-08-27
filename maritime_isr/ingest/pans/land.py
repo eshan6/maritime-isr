@@ -121,7 +121,16 @@ def _row_for(path: Path, registry, *, is_synthetic: bool) -> dict:
         vessel_id=vessel_id,
         resolved_by=how,
         resolution_confidence=round(conf, 3),
-        fields_read=len(fields),
+        # **A field the form explicitly left empty is not a field read.** The
+        # extractor records "Crew: NIL" as a passage with a null value, because
+        # the agent answering "nothing" and the agent skipping the box are
+        # different facts (ADR-036's three-valued discipline, one level down).
+        # Counting those here would inflate a completeness figure with
+        # non-values, and `fields_read` gates two alerts — a document that read
+        # nothing but a column of dashes must still count as unreadable.
+        fields_read=sum(1 for f in fields.values() if f.value is not None),
+        fields_declared_absent=sum(1 for f in fields.values()
+                                   if f.value is None),
         unread_reason=unread,
         received_at=received_at,
         received_at_source=received_from,
