@@ -849,7 +849,27 @@ def run_eo_loop(store, all_tracks, alerts_before: int) -> dict:
             suspicion[a["subject"]] = (score, str(a.get("anomaly_type")
                                                   or a.get("rule") or "alert"))
 
-    from maritime_isr.graph.identity import contact_node_id, resolve_mmsi
+    from maritime_isr.graph.identity import contact_node_id
+    from maritime_isr.schemas.keys import vessel_node_id
+
+    # **MMSI to hull, through the identity table rather than through the graph
+    # walk.** `resolve_mmsi` follows `identified-as` edges and mints a
+    # provisional `vessel:mmsi:<n>` when it finds none — which is what it did
+    # for every hull in this corpus, so the captures bound to nodes that carry
+    # no declared type and the mismatch rule had nothing to check. The identity
+    # table is the side that *publishes* the canonical key (ADR-022), and it is
+    # the same table every other stage in this script joins on.
+    hull_of_mmsi: dict[int, str] = {}
+    for r in read_table("gfw_vessel_identity"):
+        if r.get("record_kind") not in (None, "", "self_reported"):
+            continue
+        m, vid = r.get("mmsi"), r.get("vessel_id")
+        if m in (None, "") or not vid:
+            continue
+        try:
+            hull_of_mmsi[int(float(m))] = vessel_node_id(str(vid))
+        except (TypeError, ValueError):
+            continue
 
     # **A radar track the correlation stage matched to a hull is not an
     # unidentified contact, and treating it as one broke the whole area.**
@@ -896,15 +916,20 @@ def run_eo_loop(store, all_tracks, alerts_before: int) -> dict:
             continue
         has_id = bool(getattr(tr, "has_identity", False))
         mmsi = tr.mmsi if has_id else identified_track.get(str(tr.track_key))
-        if mmsi is not None:
-            # The graph's canonical subject, so suspicion, captures and the
-            # declared identity all land on one node. An AIS track and the
-            # radar track of the same hull collapse to it, which is also what
-            # stops the network photographing one ship twice in a slot.
-            subject = resolve_mmsi(store, mmsi)
+        hull = hull_of_mmsi.get(int(mmsi)) if mmsi is not None else None
+        if hull is not None:
+            # The canonical subject, so suspicion, captures and the declared
+            # identity all land on one node. An AIS track and the radar track of
+            # the same hull collapse onto it, which is also what stops the
+            # network photographing one ship twice in a slot.
+            subject = hull
             has_id = True
             n_named_radar += int(not getattr(tr, "has_identity", False))
         else:
+            # Either no identity at all, or an MMSI no identity row claims —
+            # which is a gap in our coverage and not a hull, so it stays a
+            # contact rather than becoming a stub (ADR-022).
+            has_id = False
             subject = contact_node_id(str(tr.track_key), source=tr.source.name)
         length = None
         if "length_est_m" in pts.columns:

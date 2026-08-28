@@ -90,14 +90,21 @@ def build_appearance_rows(world) -> list[dict]:
     """
     rows: list[dict] = []
 
+    from ..schemas.keys import vessel_node_id
+
     for v in world.vessels.values():
         # **The hull's physical class, never what she broadcasts.** A camera
         # photographs steel. The two differ for exactly the Area 5 scenarios
         # (`cast.DECLARED_CLASS_OVERRIDES`) and that difference is the finding.
         app = descriptor_for(v.vessel_class, length_m=v.length_m,
                              beam_m=v.beam_m, draught_m=v.draught_m)
+        # **Keyed by the canonical node id, not the generator's entity id.** The
+        # cueing loop names a hull by the key the identity table publishes
+        # (ADR-022); keying this table by the scenario's own id put the camera
+        # and the scheduler in two key spaces, and the simulator answered "I
+        # hold no model of what is at that bearing" for every named hull.
         rows.append(_stamp(dict(
-            target_key=v.entity_id, key_kind="vessel",
+            target_key=vessel_node_id(v.entity_id), key_kind="vessel",
             target_kind=KIND_VESSEL, physical_class=v.vessel_class,
             length_m=round(float(v.length_m), 2),
             **_appearance_columns(app)),
@@ -186,9 +193,14 @@ class SimulatedCameraSource:
 
     @staticmethod
     def _key_for(tasking) -> str:
+        from ..schemas.keys import vessel_node_id
+
         subject = str(tasking.subject_id or "")
         if subject.startswith("vessel:"):
-            return subject
+            # Canonicalised on both sides — `vessel_node_id` is idempotent, so
+            # this accepts a raw entity id and a node id alike and lands on one
+            # key space either way.
+            return vessel_node_id(subject)
         if subject.startswith("contact:"):
             # `contact:<sensor>:<track key>` — the track key for a radar contact
             # is the station's own track number, which is what this table holds.
