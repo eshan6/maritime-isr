@@ -849,24 +849,63 @@ def run_eo_loop(store, all_tracks, alerts_before: int) -> dict:
             suspicion[a["subject"]] = (score, str(a.get("anomaly_type")
                                                   or a.get("rule") or "alert"))
 
-    from maritime_isr.graph.identity import contact_node_id
-    from maritime_isr.schemas.keys import vessel_node_id
+    from maritime_isr.graph.identity import contact_node_id, resolve_mmsi
+
+    # **A radar track the correlation stage matched to a hull is not an
+    # unidentified contact, and treating it as one broke the whole area.**
+    #
+    # Measured on the first run: all 487 captures landed on `contact:` subjects
+    # and not one on a hull, so the mismatch rule — which needs a *declared*
+    # identity to contradict — fired zero times over a corpus containing two
+    # authored lies. The cause was not the rule and not the geometry. It was
+    # that every radar track entered the candidate set as anonymous, so its
+    # information gain scored 1.00 against 0.55 for a named hull; the cameras
+    # are co-located with the radars, the radars hold about fourteen hundred
+    # coastal tracks, and the AIS hulls therefore lost every slot they were
+    # ever offered. The scheduler was working exactly as designed on an input
+    # that lied to it.
+    #
+    # The correlation stage (ADR-028) already decides this question, with
+    # evidence, and lands the answer. Reading it here is what makes "an image
+    # of a named hull is worth less than an image of a target nobody can name"
+    # a true statement rather than a systematic bias toward radar.
+    #
+    # Only `correlated` and `correlated_then_dark` count. `ambiguous` means the
+    # correlation could not choose, and `dark` means it chose "nobody" — both
+    # are exactly the cases where the identity is not established, and folding
+    # them in would be claiming an identification the cascade declined to make.
+    identified_track: dict[str, int] = {}
+    for r in read_table("radar_correlation"):
+        if r.get("status") not in ("correlated", "correlated_then_dark"):
+            continue
+        rid, mmsi = r.get("radar_track_id"), r.get("mmsi")
+        if rid and mmsi not in (None, ""):
+            try:
+                identified_track[str(rid)] = int(float(mmsi))
+            except (TypeError, ValueError):
+                continue
+    print(f"  correlation    : {len(identified_track):,} radar track(s) the "
+          f"cascade matched to a hull — cued as that hull, not as a contact")
 
     fixes: list[tuple[float, CueCandidate]] = []
+    n_named_radar = 0
     for tr in all_tracks:
         pts = tr.points[tr.points.quality != "outlier"] \
             if hasattr(tr.points, "quality") else tr.points
         if len(pts) == 0:
             continue
         has_id = bool(getattr(tr, "has_identity", False))
-        subject = (vessel_node_id(f"vessel:mmsi:{tr.mmsi}") if False else
-                   (f"vessel:mmsi:{tr.mmsi}" if has_id else
-                    contact_node_id(str(tr.track_key), source=tr.source.name)))
-        # The graph knows the canonical subject for an identified hull; use it
-        # where it exists so suspicion and captures land on the same node.
-        if has_id:
-            from maritime_isr.graph.identity import resolve_mmsi
-            subject = resolve_mmsi(store, tr.mmsi)
+        mmsi = tr.mmsi if has_id else identified_track.get(str(tr.track_key))
+        if mmsi is not None:
+            # The graph's canonical subject, so suspicion, captures and the
+            # declared identity all land on one node. An AIS track and the
+            # radar track of the same hull collapse to it, which is also what
+            # stops the network photographing one ship twice in a slot.
+            subject = resolve_mmsi(store, mmsi)
+            has_id = True
+            n_named_radar += int(not getattr(tr, "has_identity", False))
+        else:
+            subject = contact_node_id(str(tr.track_key), source=tr.source.name)
         length = None
         if "length_est_m" in pts.columns:
             vals = [v for v in pts["length_est_m"].tolist() if v]
@@ -888,8 +927,13 @@ def run_eo_loop(store, all_tracks, alerts_before: int) -> dict:
         print("  no tracks to cue over")
         return {}
     fixes.sort(key=lambda f: f[0])
-    print(f"  picture        : {len({c.subject_id for _t, c in fixes}):,} "
-          f"distinct target(s), {len(fixes):,} candidate position(s)")
+    subjects = {c.subject_id for _t, c in fixes}
+    named = sum(1 for s in subjects if s.startswith("vessel:"))
+    print(f"  picture        : {len(subjects):,} distinct target(s) "
+          f"({named:,} named, {len(subjects) - named:,} unidentified), "
+          f"{len(fixes):,} candidate position(s)")
+    print(f"                   {n_named_radar:,} radar track(s) entered as "
+          f"their correlated hull rather than as a contact")
 
     slot_index: dict[int, list[CueCandidate]] = {}
     t_start = fixes[0][0]
@@ -1007,6 +1051,12 @@ def _update_states(store, caps, states: dict) -> None:
     from maritime_isr.anomaly.imagery import check_declared_type
     from maritime_isr.api.reader import open_reader
 
+    from maritime_isr.schemas.keys import vessel_node_id
+
+    # Keyed by the canonical node id, because that is what a capture is bound
+    # to. The identity table names `vessel:eo_false_class` and the graph node is
+    # `vessel:gfw:eo_false_class`; indexing on one and looking up with the other
+    # is the join defect that made the whole area silent.
     declared: dict[str, str] = {}
     with open_reader() as reader:
         if reader.has("gfw_vessel_identity"):
@@ -1014,7 +1064,8 @@ def _update_states(store, caps, states: dict) -> None:
                     "SELECT vessel_id, vessel_class FROM gfw_vessel_identity "
                     "WHERE record_kind = 'self_reported'"):
                 if r.get("vessel_id") and r.get("vessel_class"):
-                    declared[str(r["vessel_id"])] = str(r["vessel_class"])
+                    declared[vessel_node_id(str(r["vessel_id"]))] = \
+                        str(r["vessel_class"])
     for c in caps:
         if not c.verdict or not c.verdict.is_claim:
             continue

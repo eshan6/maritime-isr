@@ -1020,6 +1020,34 @@ def test_two_looks_that_disagree_with_each_other_are_not_corroboration():
                                    source_ref="t") == []
 
 
+def test_the_declared_class_is_found_under_the_canonical_node_id():
+    """The identity table and the graph name one hull with two strings.
+
+    An identity row says `vessel:eo_false_class`; the node a capture is bound to
+    is `vessel:gfw:eo_false_class`, because `vessel_node_id` namespaces by the
+    id space the native id came from (ADR-022). The first build indexed the
+    declared classes on one and looked them up with the other, so every hull
+    came back as "broadcasts no vessel type" and the rule fired **zero** times
+    over a corpus containing two authored lies — a silent zero, which is the
+    failure mode Area 4 hit three times.
+
+    So the test feeds the shape the pipeline actually produces: a raw identity
+    id on one side, a canonical node id on the capture.
+    """
+    from maritime_isr.anomaly.library import (detect_imagery_mismatch,
+                                              vessel_node_id)
+
+    store = _store()
+    node = vessel_node_id("vessel:liar")
+    assert node != "vessel:liar", "the two key spaces must differ, or this "\
+                                  "test is asserting nothing"
+    identities = [dict(vessel_id="vessel:liar", vessel_class="fishing")]
+    caps = [_capture_row(i, subject=node) for i in range(2)]
+    fired = detect_imagery_mismatch(store, caps, identities, source_ref="t")
+    assert len(fired) == 1, (
+        "a capture bound to the canonical node must find her declared class")
+
+
 def test_a_capture_on_an_unnamed_contact_is_evidence_and_not_an_accusation():
     """A target that declared nothing cannot have lied about it.
 

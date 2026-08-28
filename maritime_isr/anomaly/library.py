@@ -1361,7 +1361,16 @@ def detect_imagery_mismatch(store, captures: list[dict],
     for row in identities:
         vid, cls = row.get("vessel_id"), row.get("vessel_class")
         if vid and cls:
-            declared[str(vid)] = str(cls)
+            # **Keyed by the canonical node id, not by the identity table's own
+            # vessel id, and the two are different strings.** An identity row
+            # names `vessel:eo_false_class`; the graph node the capture is bound
+            # to is `vessel:gfw:eo_false_class`, because `vessel_node_id`
+            # namespaces by the id space the native id came from (ADR-022). The
+            # first version indexed on one and looked up with the other, so the
+            # declared class was never found and the rule reported "she
+            # broadcasts no vessel type" for every hull in the corpus — a silent
+            # zero, which is the failure mode Area 4 hit three times.
+            declared[vessel_node_id(str(vid))] = str(cls)
 
     # vessel node -> every contradiction found on her, in capture order.
     found: dict[str, list[tuple]] = {}
@@ -1390,7 +1399,7 @@ def detect_imagery_mismatch(store, captures: list[dict],
             model_provenance=cap.get("model_provenance") or "",
             quality=quality, band=cap.get("band") or "visible")
         finding = check_declared_type(
-            declared_class=declared.get(subject), verdict=verdict,
+            declared_class=declared.get(node), verdict=verdict,
             quality=quality, band=verdict.band)
         if finding.is_contradiction:
             found.setdefault(node, []).append((finding, cap))
