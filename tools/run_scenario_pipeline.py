@@ -980,6 +980,25 @@ def run_eo_loop(store, all_tracks, alerts_before: int) -> dict:
     print(f"                   {n_named_radar:,} radar track(s) entered as "
           f"their correlated hull rather than as a contact")
 
+    # Station positions once, for the per-slot "which fix is the best look"
+    # choice below. Cameras sit on the radar stations, so nearest-station range
+    # is the same quantity the camera model starts from.
+    _stations = [(c.lat, c.lon) for c in cameras]
+
+    def _nearest_station_km(lat: float, lon: float) -> float:
+        import math
+        best = float("inf")
+        for slat, slon in _stations:
+            p1, p2 = math.radians(lat), math.radians(slat)
+            dp = math.radians(slat - lat)
+            dl = math.radians(slon - lon)
+            a = (math.sin(dp / 2) ** 2
+                 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2)
+            d = 2 * 6371.0 * math.asin(math.sqrt(min(1.0, a)))
+            if d < best:
+                best = d
+        return best
+
     slot_index: dict[int, list[CueCandidate]] = {}
     t_start = fixes[0][0]
     for t, c in fixes:
@@ -989,15 +1008,32 @@ def run_eo_loop(store, all_tracks, alerts_before: int) -> dict:
     def feed_for(base: float):
         def feed(when):
             k = int((when.timestamp() - t_start) // EO_SLOT_SECONDS)
-            # One candidate per subject per slot: several fixes of one hull in
-            # thirty minutes are one target, not three.
-            seen, out = set(), []
+            # One candidate per subject per slot — several fixes of one hull in
+            # ten minutes are one target, not three — but **the best of them,
+            # not the first**.
+            #
+            # Candidates are time-sorted, so taking the first handed the
+            # scheduler each vessel's *earliest* position in the window. For any
+            # hull closing on a station that is systematically her furthest, and
+            # for a hull departing it is her nearest: the scheduler was
+            # consistently pessimistic about exactly the vessels about to become
+            # imageable. O1 was evaluated twice at a frozen 8.588 km, at an
+            # image quality of 0.29 against a 0.35 classify floor, while her
+            # track reached 5.46 km inside the same window — her closer fixes
+            # were discarded here before the assignment ever saw them.
+            #
+            # Nearest-station distance is the proxy, not full image quality: the
+            # scheduler computes quality per camera and would have to be run to
+            # know it, while range dominates it and is one haversine away. The
+            # window is short enough that the best-ranged fix is the best look
+            # in all but contrived geometry.
+            best: dict[str, tuple[float, CueCandidate]] = {}
             for c in slot_index.get(k, ()):
-                if c.subject_id in seen:
-                    continue
-                seen.add(c.subject_id)
-                out.append(c)
-            return out
+                d = _nearest_station_km(c.lat, c.lon)
+                prev = best.get(c.subject_id)
+                if prev is None or d < prev[0]:
+                    best[c.subject_id] = (d, c)
+            return [c for _d, c in best.values()]
         return feed
 
     # ---- the campaign, in weekly stages so the loop closes ----------------
