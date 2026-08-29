@@ -45,6 +45,13 @@ CONFORMED_TABLES = (
     # Arrival notifications, extracted from the documents in the inbox
     # (ADR-036). The documents themselves are not a table — they are inputs.
     "arrival_notification",
+    # Electro-optical captures (ADR-037): an image bound to a track, with the
+    # camera, the geometry and the classifier's verdict on it. Registered for
+    # the same reason `ais_voyage` had to be — a table absent from this tuple
+    # makes `has()` answer False over a corpus that contains rows, and the
+    # consumer then reports silence rather than an empty read. That has now cost
+    # this project two areas' worth of debugging.
+    "eo_capture",
     "gfw_vessel_identity",
     "gfw_encounters",
     "gfw_loitering",
@@ -59,6 +66,13 @@ CONFORMED_TABLES = (
     # NB: scenario_truth is deliberately NOT here. It is evaluation ground truth
     # and no serving, detection or scoring code may read it (ADR-019 §d) — the
     # product must never show an operator the answer key.
+    #
+    # NB: `scenario_eo_appearance` is deliberately NOT here either, and for a
+    # related reason (ADR-037). It is the camera *simulator's* model of what is
+    # physically out there — the stand-in for the photons a real lens would
+    # collect — and only `scenario/eo.py`, which is the world generator and is
+    # entitled to know, may read it. Registering it would put it one `has()`
+    # call away from the serving layer.
 )
 
 

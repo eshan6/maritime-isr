@@ -48,6 +48,8 @@ FAMILY_DECOY = "decoy"
 FAMILY_BOUNDARY = "capability_boundary"
 #: Area 4 (ADR-036): what the paperwork declares against what the track shows.
 FAMILY_PAPERWORK = "paperwork"
+#: Area 5 (ADR-037): what a camera sees against what the transponder claims.
+FAMILY_IMAGERY = "imagery"
 
 
 @dataclass

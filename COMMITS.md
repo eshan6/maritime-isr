@@ -1222,3 +1222,77 @@ declaration to the wrong event again — read `match_arrival` and the
 `prior_calls` branch of `check_last_port` before touching any threshold. A
 count of 0 is worse: it means a check is returning "not checkable" for the whole
 corpus, which is what the filing-time defect looked like.
+
+---
+
+## Area 5 — automating the electro-optical loop (ADR-037)
+
+Four things the requirement asks for, and only one of them needs pictures:
+capture without operator intervention, bind the image to a track, classify
+against a library, alert on the disagreement. Three are control and fusion
+logic. So this builds the loop and puts the classifier behind an interface, as
+the brief instructs — *"image classification is the commodity part of this
+problem, the part any competitor can also do."*
+
+**New package `maritime_isr/eo/`.** `cue.py` is the scheduler and the centre of
+the area: given far more tracks than cameras, which track a camera is pointed at
+and when, as a **global assignment per slot** over cameras × candidates —
+because greedy per-target matching hands one station's camera to the three most
+suspicious contacts in its arc and leaves the rest idle, the failure CLAUDE.md §6
+bans one domain along. Priority is `0.55 x suspicion + 0.30 x information gain +
+0.15 x staleness`, multiplied by expected image quality; a closing observation
+window multiplies the *cost*, not the priority. `camera.py` is the geometry and
+quality model, `conditions.py` the light and weather, `capture.py` the image
+bound to a track and landed as evidence, `classify.py` the swappable classifier
+and its reference library, `appearance.py` the numeric stand-in for pixels.
+
+**There is no camera.** Every capture is simulated through the `CaptureSource`
+seam — `scenario/eo.py` in this build, a hardware driver in a deployment — and
+every row carries `capture_mode='simulated'`, an empty `image_ref`, and the
+model's own provenance string saying it has never seen an image.
+
+**Swap-ability is demonstrated, not asserted.** Two implementations ship and
+`tests/test_area5.py` defines a **third inside the test file** and substitutes it
+into the running loop; all three produce bound, landed captures and nothing else
+changes. The pipeline prints the same comparison over the real captures.
+
+**Group O** authors two lies (a tanker broadcasting fishing; a crane-equipped
+cargo ship broadcasting product tanker — the distinction motion can never make),
+one decoy that must stay silent (a cargo ship broadcasting bulker: both are
+*cargo* under the AIS ship-type standard, and a rule that fires here fires on the
+merchant fleet), and two capability boundaries stated with numbers (a genuine
+liar 150 km offshore that no camera can reach; a genuine liar whose only camera
+windows fall at night, when a thermal silhouette cannot carry a deck).
+
+**Eight defects, six of which were visible only as numbers.** A confidence that
+did not track accuracy and refused 84% of good images; an observation-noise model
+with no floors that published an eleven-class vocabulary; a merge threshold that
+asked "can the model tell A from B" when the question was "can it place her in an
+AIS ship-type family", producing 22 false accusations in 1,500 honest looks; a
+merged label read as bounding nothing, which silently discarded the brief's own
+headline example; a rule that read one model's label in another model's
+vocabulary and accused 36% of an honest fleet when a second classifier was
+swapped in; an identity radius that pretended sister ships are separable. Then
+two join defects that made the whole area silent: radar tracks the correlation
+cascade had already matched to hulls entering the cueing candidate set as
+anonymous, and a declared-class index keyed on the identity table's vessel id
+while the lookup used the canonical graph node id. Full account in ADR-037. **No
+threshold was moved to fix any of them.**
+
+Verify:
+
+```
+python -m maritime_isr.cli scenario generate --seed 7
+rm -f data/graph.sqlite && python tools/run_scenario_pipeline.py
+python -m pytest tests/test_area5.py -q
+```
+
+*Success:* stage 7c reports 16 cameras, a picture split into named and
+unidentified targets, a tasking count with its utilisation, and a deferral
+ledger whose largest bucket is `no_camera_in_reach`; stage 7d reports
+`imagery_type_mismatch` firing on the two authored hulls and no others.
+*Failure:* a count of 0 means the join broke again — check that captures carry
+`vessel:` subjects and not only `contact:` ones before touching any threshold,
+because the rule needs a *declared* identity to contradict. A count in the dozens
+means the vocabulary is being compared at a finer resolution than the AIS
+ship-type family, and the merchant fleet is about to arrive on the queue.

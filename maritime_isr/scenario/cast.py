@@ -443,7 +443,58 @@ LATE_ADDITIONS: tuple[CastEntry, ...] = (
     CastEntry("paper_false_ballast", "Suezmax", "true_anomaly",
               "P8: declares no cargo while broadcasting a laden draught",
               size=0.75),
+
+    # ---- Area 5, the electro-optical loop (ADR-037) ----------------------
+    #
+    # **The class named here is the STEEL, not the message.** A camera
+    # photographs a hull; what she broadcasts about herself is a separate fact,
+    # carried in `world.declared_class_overrides` and written only onto her AIS
+    # static record. For every other hull in this corpus the two are equal.
+    CastEntry("eo_false_class", "Suezmax", "true_anomaly",
+              "O1: a 270 m tanker broadcasting that she is a fishing vessel",
+              size=0.62),
+    CastEntry("eo_crane_ship", "general_cargo", "true_anomaly",
+              "O2: a crane-equipped cargo ship broadcasting product tanker — "
+              "the distinction motion can never make", size=0.55),
+    CastEntry("eo_class_cousin", "bulker", "decoy",
+              "O3: a bulker broadcasting general cargo. Both are dry cargo "
+              "under the AIS type standard; a rule that fires here fires on "
+              "the merchant fleet", size=0.5),
+    CastEntry("eo_night_liar", "general_cargo", "true_anomaly",
+              "O4: the same lie as O2, and every camera window she has falls "
+              "at night, when a thermal silhouette cannot see a deck",
+              size=0.45),
+    CastEntry("eo_beyond_reach", "product_tanker", "decoy",
+              "O5: works 150 km offshore all window. No camera can reach her "
+              "and the cueing ledger has to say so", size=0.5),
 )
+
+#: What a hull **broadcasts** about her type, where that differs from the steel.
+#:
+#: A property of the cast, like :data:`REGISTRY_DISAGREEMENTS`, and applied in
+#: :func:`build_vessels` before the registry attestations are written — because
+#: the registry records what she is *registered* as, which for these hulls is
+#: what she declares. The fraud is upstream of the paperwork (ADR-037).
+#:
+#: Deliberately tiny. Every other hull in the corpus declares her own class, so
+#: the honest majority is the denominator against which two mismatches mean
+#: something — the same reasoning `group_p` gives for its honest notifications.
+DECLARED_CLASS_OVERRIDES: dict[str, str] = {
+    # O1: 270 m of tanker, broadcasting the AIS type code of a trawler. The
+    # brief's own worked example, in the brief's own words.
+    "eo_false_class": "fishing",
+    # O2 and O4: a crane-equipped cargo ship broadcasting product tanker. Both
+    # are merchants of similar length running at similar speeds, so no motion
+    # feature separates them (ADR-033) and no registry disagrees — the deck is
+    # the only evidence there is, and only a camera in daylight sees a deck.
+    "eo_crane_ship": "product_tanker",
+    "eo_night_liar": "product_tanker",
+    # O3: a bulker broadcasting general cargo. NOT an override that should ever
+    # fire: both are cargo under the AIS ship-type standard, and two sources
+    # classifying one hull differently is the `class_quibble` argument
+    # (ADR-034), not a lie.
+    "eo_class_cousin": "general_cargo",
+}
 
 #: The fishing-fleet-aggregation decoy. Sized to the phenomenon, not to the
 #: headline cast count — see the module docstring.
@@ -526,6 +577,12 @@ def build_vessels(world: ScenarioWorld) -> None:
         )
         world.add_vessel(v)
 
+    # What a handful of hulls broadcast about their own type, before the
+    # registry is written from it. Order matters here too and in the same
+    # direction as the IMO break below: the registry records the *declared*
+    # class for these hulls, so the override has to exist first (ADR-037).
+    world.declared_class_overrides.update(DECLARED_CLASS_OVERRIDES)
+
     # Order matters: the registry is written from the hulls as *registered*,
     # and only then does F1 start broadcasting a corrupted number. Reversing
     # these two would put the typo in the registry as well, and a typo both
@@ -603,7 +660,16 @@ def build_registry_attestations(world: ScenarioWorld) -> None:
     attest: dict[str, dict] = {}
     for v in world.vessels.values():
         attest[v.entity_id] = dict(
-            name=v.name, call_sign=v.call_sign, vessel_class=v.vessel_class,
+            name=v.name, call_sign=v.call_sign,
+            # **The registry records what she is registered as, which for the
+            # Area 5 hulls is what she broadcasts and not what she is made of**
+            # (ADR-037). That is the whole point of those scenarios: the fraud
+            # is upstream of the paperwork, so no registry check can find it and
+            # only a photograph can. A registry that disagreed with her
+            # declaration would make the camera redundant and the scenario would
+            # then demonstrate nothing about Area 5.
+            vessel_class=(world.declared_class_overrides.get(v.entity_id)
+                          or v.vessel_class),
             mmsi=v.mmsi, imo=v.imo)
 
     for key, changes in REGISTRY_DISAGREEMENTS.items():

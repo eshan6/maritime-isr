@@ -17,3 +17,10 @@ frontend/.vite/
 # backend serve the UI with no Node/npm on the demo machine (see app.py
 # _mount_frontend). Rebuild it with `cd frontend && npm run build` after any
 # frontend change, and commit the result.
+
+# Transient git worktrees created for background subagents. Each is a full
+# checkout of this repository; committing one would nest a copy of the repo
+# inside itself. They are removed automatically when the agent finishes.
+# NB: only `worktrees/` is ignored, not `.claude/` — project settings, skills
+# and hooks under `.claude/` are legitimately committable.
+.claude/worktrees/

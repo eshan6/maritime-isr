@@ -13,7 +13,8 @@ choreography, then decoys and misses.
 from __future__ import annotations
 
 from . import background, commercial_traffic, decoys, group_a, group_b
-from . import group_c, group_d, group_e, group_f, group_p, group_r, group_z
+from . import group_c, group_d, group_e, group_f, group_o, group_p, group_r
+from . import group_z
 from . import misses
 
 #: Execution order. Background first, then the spine's early identity events,
@@ -38,6 +39,10 @@ ALL = (
     # the same reason: every hull in it is new and unshared, so appending
     # leaves the existing temporal choreography byte-identical.
     *group_f.SCENARIOS,
+    # The electro-optical group runs after the factor group for the fourth
+    # instance of the same reason: every hull in it is new and unshared, so
+    # appending leaves the existing temporal choreography byte-identical.
+    *group_o.SCENARIOS,
     *decoys.SCENARIOS,
     *misses.SCENARIOS,
     # The paperwork group runs LAST and that is load-bearing, not stylistic:

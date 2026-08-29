@@ -207,6 +207,38 @@ def narrate_factor(f: Factor, *, name: str) -> str:
                 f"disproves. " + " ".join(str(x) for x in statements[:2])
                 + f" {conf.capitalize()}.{source}{shown}")
 
+    if f.kind == "imagery_type_mismatch":
+        # **Name both types and where the picture came from.** The whole value
+        # of this factor over the behavioural ones is that it rests on a
+        # photograph, so the sentence has to say which camera, at what range and
+        # in what light — a watchkeeper deciding whether to believe it is really
+        # asking how good the look was. It also has to say the image is
+        # simulated, because in this build it always is (ADR-037) and a factor
+        # that let a reader assume otherwise would be the overclaim CLAUDE.md §5
+        # exists to prevent.
+        imaged = d.get("imaged_type")
+        declared = d.get("declared_class") or d.get("declared_group")
+        station = d.get("station")
+        quality = d.get("image_quality")
+        looks = d.get("corroborating_captures")
+        model = d.get("model_name")
+        seen = (f"images as {imaged}" if imaged else "images as another kind")
+        says = (f"while she broadcasts the type of {declared}"
+                if declared else "while her transponder says otherwise")
+        where = f" Taken from the {station} camera." if station else ""
+        howgood = (f" Image quality {float(quality):.2f}."
+                   if quality not in (None, "") else "")
+        corrob = ""
+        if looks and int(looks) > 1:
+            corrob = (f" {int(looks)} separate looks agree, at different range "
+                      f"and aspect, which is what separates a mismatch from a "
+                      f"bad photograph.")
+        sim = (f" The image is simulated and carries no pixels; {model} read it."
+               if model else " The image is simulated and carries no pixels.")
+        return (f"A camera {seen} {says}, and a hull does not change shape "
+                f"between messages. {conf.capitalize()}.{where}{howgood}"
+                f"{corrob}{sim}")
+
     if f.kind == "notification_unmatched":
         declared = d.get("declared_name") or "an unnamed vessel"
         imo = d.get("imo") or d.get("declared_imo")

@@ -121,7 +121,16 @@ def _row_for(path: Path, registry, *, is_synthetic: bool) -> dict:
         vessel_id=vessel_id,
         resolved_by=how,
         resolution_confidence=round(conf, 3),
-        fields_read=len(fields),
+        # **A field the form explicitly left empty is not a field read.** The
+        # extractor records "Crew: NIL" as a passage with a null value, because
+        # the agent answering "nothing" and the agent skipping the box are
+        # different facts (ADR-036's three-valued discipline, one level down).
+        # Counting those here would inflate a completeness figure with
+        # non-values, and `fields_read` gates two alerts — a document that read
+        # nothing but a column of dashes must still count as unreadable.
+        fields_read=sum(1 for f in fields.values() if f.value is not None),
+        fields_declared_absent=sum(1 for f in fields.values()
+                                   if f.value is None),
         unread_reason=unread,
         received_at=received_at,
         received_at_source=received_from,
@@ -145,8 +154,15 @@ def _row_for(path: Path, registry, *, is_synthetic: bool) -> dict:
     if is_synthetic:
         from ...scenario.identifiers import SYNTHETIC_SOURCE_ID
         source_id = f"{SYNTHETIC_SOURCE_ID}:{SOURCE_ID}"
+    # **The flag goes in with the source id, not after it.** Setting
+    # `is_synthetic` on the row afterwards left `stamp_envelope` believing this
+    # was a real-source row carrying a synthetic source id — precisely the
+    # drift the check exists to refuse — and it went unnoticed only because the
+    # check did not recognise the `synthetic-scenario:` prefix either. Two
+    # errors cancelling is not agreement.
     stamp_envelope(row, source_id=source_id, source_ref=path.name,
-                   acquired_at=row["received_at"], confidence=None)
+                   acquired_at=row["received_at"], confidence=None,
+                   is_synthetic=bool(is_synthetic))
     row["is_synthetic"] = bool(is_synthetic)
     return row
 

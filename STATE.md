@@ -8,6 +8,120 @@ session. `CLAUDE.md`, `ARCHITECTURE.md`, `DECISIONS.md` are stable contracts;
 > between status buckets, record what was verified vs assumed, log anything now
 > broken, and set "Next up." If you don't update it, the next session starts blind.
 
+**Last updated:** 2026-08-29 (fifth session) — **Area 4's extractor hardened
+and verified; Area 5's loop built and running but its detector still silent.**
+
+**Extractor hardening (Area 4).** Measured against labels and value formats the
+generator never writes — the corpus shares one synonym table with the extractor,
+so any accuracy figure taken on it is circular. On that independent fixture set:
+**50.0% -> 99.1% correct, and misattributions 2 -> 0.** The two it was getting
+wrong are the failure that matters, a value landing on the *wrong* field: it read
+`crew_count` as "Owner: BLUEWATER SHIPPING LTD" off a label whose value was empty
+followed by the next label. Corpus-side extraction is unchanged (293 of 295
+resolved, 0 unreadable), which is the right outcome: robustness on unseen forms
+bought without disturbing what already worked. Full suite green.
+
+**Two landing defects, both latent since Area 4 shipped.** `stamp_envelope`
+enforced bare equality on `synthetic-scenario` while `graph.store` and
+`scenario.validate` matched a `synthetic-scenario:` prefix; the three disagreed.
+Area 4 survived only because it set `is_synthetic` *after* stamping and so never
+tripped the check — two errors cancelling, which is not agreement. Area 5 set it
+before and the pipeline died with 487 captures in hand. Both fixed; the invariant
+now actually guards the drift it exists for.
+
+---
+
+**Fourth session** — **Area 5 built: the electro-optical loop, and six defects
+that only counting exposed.**
+
+**0. Area 5 — automating the electro-optical loop (ADR-037).** The requirement
+names four things and only one of them needs pictures: capture without operator
+intervention, bind the image to a track, classify against a library, alert on
+the disagreement. Three are control and fusion logic, so those are what got
+built, and the classifier sits behind an interface as the brief instructs.
+
+**The cueing scheduler is the centre of it.** Given a picture with far more
+tracks than there are cameras, it decides which track each camera is pointed at
+and when, as a **global assignment per slot** — `linear_sum_assignment` over
+cameras × candidates, the same tool the association core uses, because greedy
+per-target matching double-books one station's camera onto the three most
+suspicious contacts in its arc and leaves the rest idle (CLAUDE.md §6, one
+domain along). Priority is `0.55 x suspicion + 0.30 x information gain + 0.15 x
+staleness`, multiplied by expected image quality from range, aspect, light and
+visibility; a closing observation window multiplies the *cost* rather than the
+priority, because being about to leave does not make a ship more suspicious, it
+makes deferring her more expensive. Every tasking carries the arithmetic and a
+sentence; every candidate that was worth a camera and did not get one carries
+the reason — `outranked`, naming who took the camera, or `no_camera_in_reach`,
+naming the nearest station and the range.
+
+**There is no camera and no image exists.** Every capture is simulated through
+the `CaptureSource` seam — in this build by `scenario/eo.py`, which is the world
+generator and is entitled to know what is out there; in a deployment by a driver
+talking to hardware. Every capture row carries `capture_mode='simulated'`, an
+empty `image_ref` and the model's own provenance string saying it has never seen
+an image. Nothing under `eo/` may read ground truth and a test asserts it.
+
+**Six defects, four visible only as numbers** (full detail in ADR-037):
+
+* **The confidence did not track accuracy**, so 84% of good images were refused
+  — the model picked the right class 96% of the time while reporting a mean
+  confidence of 0.35, below its own bar. The softmax temperature is now fitted
+  to measured accuracy.
+* **The observation noise had no floors**, so the model "could" tell a Suezmax
+  from an Aframax and published an eleven-class vocabulary — the long list of
+  classes it guesses at that the brief warns against, reached by flattering the
+  sensor.
+* **The vocabulary merge asked the wrong question.** The 25% type-level merge
+  inherited from `tracks.vessel_type` is right for describing a contact and
+  wrong for accusing a hull: `product_tanker`↔`bulker` confusion sat at 12-15%,
+  under the bar, and the rule produced **22 false accusations in 1,500 honest
+  looks**. A second merge pass unions any pair confused across an AIS ship-type
+  family boundary above 5%; false accusations fell to **0-0.36%**.
+* **A merged label was read as bounding nothing**, which silently discarded the
+  brief's own headline example — `merchant` cannot say which family she is but
+  it says which she is *not*, and a trawler-declaring hull imaging as a merchant
+  is contradicted.
+* **The rule read one model's label in another model's vocabulary** and accused
+  **36% of an honest fleet** when a second classifier was swapped in. Invisible
+  with one model, immediate with two — which is why the swap test earns its
+  place.
+* **Sister ships are not separable in six numbers.** Same-hull distances (median
+  0.12) overlap the closest cross-hull pair (0.11), so re-identification works
+  only where a hull is distinctive and the margin test refuses otherwise.
+
+**WHAT IS NOT WORKING: `imagery_type_mismatch` fires 0 times on the corpus.**
+Stated first because everything above describes a loop that runs end to end and
+still produces no finding. The pipeline is green, 1,045 captures land, 450 carry
+a type claim, and three of the four imageable O-hulls now get a usable
+photograph — but the authored contradiction O1 does not, so the alert count is
+zero where the answer key says one.
+
+Traced, not guessed. O1 is imaged twice, at 08:05 and 08:15, at an *identical*
+8.588 km and 0.29 quality against a 0.35 classify floor. Her closest approach is
+08:32 at 5.46 km. The scheduler evaluates a frozen position for her and never
+sees her close. It is not the cadence: the interval was cut from 30 to 10
+minutes and she was evaluated at the same stale fix. It is not the priority
+floor: she computes to 0.3150 against 0.30 and is eligible. It is not the camera
+arc: SYN-POR masks 10-100°, she approaches on 206-245°. **It is the candidate
+feed** — `run_eo_loop` samples one candidate per three track fixes from her
+*correlated radar track*, and those positions stop before her close pass. That
+is the next thing to fix and it is a join, like every other defect in this area.
+
+**Nothing was tuned to move this number.** The 0.30 floor, the 0.55 suspicion
+weight and the 0.35 quality floor are all untouched. Lowering any of them fires
+O1 tonight and says nothing about hulls nobody authored.
+
+**Corroboration is the fix for the residual error, not a higher bar.** A wrong
+label and a right one look the same from inside, so raising the confidence gate
+suppresses true positives just as fast. Two looks at different ranges, aspects
+and light are close to independent, and the loop supplies the second for free
+because a contradicted hull keeps a high information gain. They must agree on
+the *family*: a hull called a tanker once and a trawler once was photographed
+badly twice.
+
+---
+
 **Last updated:** 2026-08-25 (third session) — **Area 4 built: the arrival
 notification inbox, and eleven defects that all presented as silence.**
 
@@ -1363,6 +1477,18 @@ earlier 18% was measured against a corpus that was easier than reality.
   of the chain on real AOI data cannot currently be claimed.
 - **`gfw_port_visits` returned exactly 3,000 rows** = exactly 3 pages of 1,000.
   Verify this is a real count and not silent pagination truncation.
+- **The vessel-type model trains on declared class, including known lies.**
+  `gfw_vessel_identity.vessel_class` carries what a hull *broadcasts*, which is
+  right for a registry, and the type model's training fleet is built from it. So
+  Area 5's O-hulls — authored to declare a class their motion contradicts — sit
+  in the training set as a Suezmax labelled "fishing". In the real world every
+  misdeclaring vessel does the same. **Unmeasured, and deliberately so:** the
+  single-split score varies 0.700-0.986 across seeds on one corpus, which
+  swamps any effect five hulls could have, and a change that cannot be measured
+  should not be made and called a fix. Worth measuring properly with the
+  multi-split harness now in `test_coarse_accuracy_clears_its_floor`. Not known
+  to be hurting anything today.
+
 - **WPI unavailable** — NGA returns 503 on every URL variant including files
   known to exist. Publisher-side outage; retry later. `tools/probe_wpi.py`
   finds a working URL when they are back.
@@ -1410,6 +1536,28 @@ earlier 18% was measured against a corpus that was easier than reality.
 ---
 
 ## OPEN QUESTIONS — ask Eshan, do NOT invent an answer
+
+0. **`fusion/contact_profile.py` is in the wrong package, and Area 5 is the
+   second area to want it there.** It joins the cascade's verdict, an inferred
+   type, an inferred activity and the zone layer onto one description of a
+   contact — it PROFILES and never fuses, and nothing in it is fusion-core
+   logic. Area 5 wanted to add "and the camera at Mumbai imaged her at 14:20 as
+   a tanker-shaped merchant" to that sentence, which is exactly the same kind of
+   description, and **declined to**, because the brief's standing caution is
+   that an area needing a change to the fusion core has found a defect in the
+   core rather than a reason to patch one.
+
+   So the imagery evidence reaches the operator through the assistant instead,
+   which is where assembly belongs. That is a defensible home. But the profile
+   is now the one place a dark contact is described end to end and it cannot
+   carry the strongest evidence the system has about her, which is a real cost.
+
+   The question is whether `contact_profile.py` should move out of `fusion/` —
+   to `tracks/`, beside the type and activity inference it already calls, or to
+   package root beside `coastline.py` and `baselines.py`. It is a rename plus
+   an import change and it touches no logic. **Do not do it silently**: it moves
+   a module the radar work and the assistant both read, and CLAUDE.md §7 names
+   its current location.
 
 1. **Does SNAP (and pyroSAR) actually run on the Oracle ARM (aarch64) VM?**
    SNAP is JVM-based so it *should*, but native processors and some operators can

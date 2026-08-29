@@ -113,13 +113,26 @@ def stamp_envelope(
     """
     if acquired_at.tzinfo is None:
         raise ValueError("acquired_at must be timezone-aware UTC")
-    if is_synthetic and source_id != SYNTHETIC_SOURCE_ID:
+    # A `synthetic-scenario:<connector>` prefix counts as synthetic, because a
+    # synthetic row landed by a *real connector* has to say both things: which
+    # connector produced it, and that it is not real. `arrival_notification`
+    # (ADR-036) was the first such table and `eo_capture` (ADR-037) is the
+    # second; both are read by code that must not be able to mistake them for
+    # live data. `graph.store` and `scenario.validate` already match on this
+    # prefix — this function did not, and enforced bare equality, so the two
+    # disagreed. Area 4 passed only because it happened to set `is_synthetic`
+    # after stamping and so never tripped the check; Area 5 set it before and
+    # crashed the pipeline. Matching here is what makes the three agree.
+    syn_source = (source_id == SYNTHETIC_SOURCE_ID
+                  or str(source_id).startswith(f"{SYNTHETIC_SOURCE_ID}:"))
+    if is_synthetic and not syn_source:
         raise ValueError(
-            f"is_synthetic=True requires source_id={SYNTHETIC_SOURCE_ID!r}, "
-            f"got {source_id!r} — the flag and the envelope must agree")
-    if not is_synthetic and source_id == SYNTHETIC_SOURCE_ID:
+            f"is_synthetic=True requires source_id={SYNTHETIC_SOURCE_ID!r} or "
+            f"{SYNTHETIC_SOURCE_ID + ':<connector>'!r}, got {source_id!r} — "
+            f"the flag and the envelope must agree")
+    if not is_synthetic and syn_source:
         raise ValueError(
-            f"source_id={SYNTHETIC_SOURCE_ID!r} requires is_synthetic=True — "
+            f"source_id={source_id!r} requires is_synthetic=True — "
             f"the flag and the envelope must agree")
     row["source_id"] = source_id
     row["source_ref"] = source_ref
