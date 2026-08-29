@@ -783,13 +783,33 @@ def run_anomalies(store: GraphStore, tracks_out: dict,
 
 #: How long one cueing slot is, and how far the campaign reaches.
 #:
-#: Half an hour is the coarsest slot at which the geometry still moves — a
-#: merchant covers six kilometres in it, which is most of the range band inside
-#: which a mismatch is provable — and the finest at which a campaign over an
-#: eight-week corpus is a few thousand assignments rather than a hundred
-#: thousand. The slew constraint never binds at this length and that is correct:
-#: it exists for the two-minute case a real station would run.
-EO_SLOT_SECONDS = 1800.0
+#: **Derived from transit geometry, not from compute budget.** A slot is a
+#: decision interval, so the question it has to answer is: how many times does
+#: the scheduler get to consider a vessel while she is close enough to prove
+#: something about her?
+#:
+#: The band inside which a mismatch is provable reaches about 8 km in this
+#: coast's visibility. A hull passing a station at 5.5 km and 11.5 knots crosses
+#: an 11.7 km chord of that band, which takes 33 minutes. At half-hour slots
+#: that is **1.1 decisions** — and the figure barely moves with how close she
+#: passes (a 3 km pass gives 1.1, a 6 km pass gives 1.0), because a closer track
+#: lengthens the chord and the speed is unchanged. So the old value gave every
+#: transiting vessel in the corpus exactly one look, taken wherever the slot
+#: boundary happened to fall rather than near her closest approach. O1 was
+#: caught at 8.6 km on the way in, at image quality 0.29 against a 0.35 floor,
+#: and the campaign never returned to her.
+#:
+#: Ten minutes gives 3.3 decisions across the same crossing, so at least one
+#: falls near the closest point. The cost is real and was checked rather than
+#: assumed: three times the camera-slots. It is affordable because the cameras
+#: were idle in 98.4% of slots at the old cadence — a decision interval is not
+#: a rationing device when there is nothing to ration.
+#:
+#: The old comment named the defect and read it as a virtue: "a merchant covers
+#: six kilometres in it, which is most of the range band inside which a mismatch
+#: is provable". Covering most of the band between decisions is the failure, not
+#: the design point.
+EO_SLOT_SECONDS = 600.0
 
 #: The campaign is run in weekly stages so the loop can close. Each stage is
 #: handed what the previous stage's images concluded, which is what makes a
@@ -1005,8 +1025,17 @@ def run_eo_loop(store, all_tracks, alerts_before: int) -> dict:
         all_caps.extend(caps)
         # Close the loop: what this stage's images concluded changes what the
         # next stage thinks is worth a camera.
+        #
+        # **Only a capture that yielded a type counts as having imaged her.**
+        # `cue.plan_cueing` withholds the staleness clock from an unclassifiable
+        # look within a stage; setting it here unconditionally handed the next
+        # stage the opposite belief and undid that across every stage boundary.
+        # A hull photographed at 0.29 quality has not been looked at in any
+        # sense the scheduler should act on — the image proved she was there and
+        # nothing else.
         for c in caps:
-            imaged_at[c.subject_id] = c.taken_at.timestamp()
+            if c.imaged_type:
+                imaged_at[c.subject_id] = c.taken_at.timestamp()
         _update_states(store, caps, states)
 
     n_task = sum(len(p.taskings) for p in plans)
