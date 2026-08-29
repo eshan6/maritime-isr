@@ -3209,6 +3209,129 @@ on the **family**: a hull called a tanker once and a trawler once has been
 photographed badly twice, and counting that as corroboration would be counting
 confusion as evidence.
 
+**And a seventh defect, which was corroboration itself, stated as an absolute.**
+"Two agreeing looks" is a claim about a *rate* — agreeing errors are one in a
+hundred thousand **per pair of looks** — and it was enforced as a count. A
+stationary background hull sat inside one station's arc for five days, collected
+**130 classifiable looks** at a constant 6.8 km, and two of them landed on the
+same wrong family. Two out of 130 is not one pair; it is 8,385 pairs, and at that
+many draws the improbable is arithmetic. The rule accused a hull nothing had
+authored as a liar, which voids the precision claim ADR-004 exists to protect.
+
+It is fixed at both ends, because the two halves fail differently:
+
+* **`anomaly/library.MIN_CONTRADICTED_SHARE = 0.5`.** The agreeing looks must
+  also be a majority of the looks that decided anything either way
+  (`not_checkable` excluded, so worse imaging cannot make the bar easier). The
+  plain reading: if she images as what she declares more often than not, the
+  camera has not contradicted her — it agreed 128 times and disagreed twice.
+  0.5 sits far above the noise (2/130 = 0.015) and far below the authored liars,
+  contradicted on two thirds to nine tenths of their decisive looks; anywhere in
+  roughly 0.2–0.6 separates the two populations, so this is a boundary between
+  measured distributions rather than a number tuned to a target count. This half
+  holds however the images arrived.
+* **`eo/cue.MAX_LOOKS_PER_VERDICT = 3`, made to bind.** Once three classifiable
+  looks have settled a hull's declared type, her information-gain term drops to
+  `INFO_SETTLED` (0.05) — a fourth photograph resolves nothing the first three
+  did not. A hull nothing else has flagged then falls below `PRIORITY_FLOOR` and
+  the camera goes elsewhere, which returns the wasted slots; a hull with real
+  suspicion behind her stays in the order **on that suspicion**, which is the
+  right reason to keep watching a ship. This half depends on the scheduler being
+  the only source of captures, which is why it is not the only half.
+
+The bound also had to be made to *work*: it lived in a dict local to each
+`plan_cueing` call while the pipeline schedules a long window as consecutive
+three-slot calls, so the counter reset at every boundary, never reached three,
+and had **no effect at all** on a run of a thousand taskings. `CuePlan` now
+carries the counts out and the caller feeds them back — and the caller counts on
+what the image *returned*, not on the quality the scheduler expected of it,
+because a look that came back too dim to read did not answer the question. A
+memory that resets between calls is not memory, and a bound that cannot be
+reached is not a bound; both were green in the unit suite.
+
+**And five defects that presented as silence — the area's own headline finding
+never fired on the corpus until all five were closed.** Removing the false
+positive above left `imagery_type_mismatch` at **zero**, which is the worse bug.
+Each of these hid the one behind it, and none was visible in a green unit suite:
+
+* **The corpus held no lie.** `DECLARED_CLASS_OVERRIDES` is keyed by cast key
+  (`eo_false_class`) so it reads beside `LATE_ADDITIONS`; both readers ask
+  `declared_class_overrides.get(v.entity_id)`, which is `vessel:eo_false_class`.
+  Merged un-keyed, every lookup missed, every authored liar broadcast the truth
+  about herself, and the rule was **correct** to stay silent. This is the third
+  time this area has been silenced by two id spaces for one hull — the identity
+  index and the canonical node id above are the other two — which is why
+  `build_vessels` now raises rather than skipping an override that names nobody,
+  and why the property is checked at the cast in a unit test rather than after a
+  twenty-minute pipeline run.
+* **The camera cannot size a hull that only AIS reported.** Pixels-on-target is
+  length over range, so a candidate with no length is refused as unobservable —
+  the right refusal, since inventing a length invents the quality the whole
+  priority model multiplies by. But only radar measures length, and 44% of
+  candidate positions came from AIS tracks that carry none. O1 was a candidate
+  **above the floor in ten consecutive slots with a camera free**, and was imaged
+  in the two where the nearest fix happened to be the radar one; in the rest the
+  camera declined to look at a 270 m tanker 5.5 km off Porbandar in clear
+  daylight. Length is a property of the hull, and the two tracks are collapsed
+  onto one subject precisely because they are one ship, so it is merged across
+  them — measured, never read off her AIS static message, which would be taking
+  the word of a hull we are in the middle of accusing of lying about herself.
+* **The loop closed at the stage boundary rather than at the classifier's
+  latency.** O1's first look contradicted her at 08:15; `verdict_state` advanced
+  only when the stage ended, so for the rest of it the scheduler still believed
+  her unverified, reset her staleness clock on the look it had just taken, and
+  dropped her to 0.165 against a 0.30 floor. A stage is a planning convenience;
+  a batch interval is a claim about how long it takes to read an image. Making
+  them one number meant the second claim was never examined. Stages are now one
+  slot, which is what a deployment does.
+* **The urgency lookahead stopped at the plan's last slot**, so at one slot a
+  stage every candidate was maximally urgent and the term stopped discriminating
+  entirely — the faster loop would have silently traded it away. Whether anything
+  can see her later is a fact about the sea, not about where this call stops.
+  Fixed, and while fixing it the term was found to be charging the same premium
+  whether or not anything was left to learn: it kept buying the camera for a hull
+  leaving cover whom this pass had already photographed, while a hull nobody had
+  ever imaged waited. It is now scaled by information gain. Urgency measures what
+  is about to be lost, and an answer already in hand is not lost.
+* **The pipeline reset the staleness clock at the stage boundary even for an
+  unsettled contradiction**, reinstating at the seam the exact deadlock the
+  withholding inside `plan_cueing` exists to break. The two rules have to state
+  the same thing at both scales or the boundary quietly undoes the fix — the same
+  shape of defect as the look counter resetting between calls.
+
+**Capacity: the floor is an opportunity cost, not a quality bar.** 115,028
+camera-slots were spent on nothing while 46,527 reachable targets were refused
+for scoring under 0.30, and the marginal images are exactly where this area's
+hulls live. Below-floor targets now stay in the same global assignment charged
+`BELOW_FLOOR_PENALTY`, larger than any value spread and therefore lexicographic:
+they take only a camera **no** above-floor target could have used. Still one
+assignment, not a greedy second pass over the leftovers — CLAUDE.md §6 does not
+stop applying because the targets are cheap. They are marked `opportunistic` on
+the tasking and counted separately, so a fill cannot inflate the utilisation
+figure that is meant to measure demand. This is safe only because of the share
+rule: under a bare count of two, more looks meant more chances to accuse an
+honest hull; under a share, the denominator grows with them and an extra look
+makes an accusation *harder*.
+
+**Utilisation is 4.5% and that is honest.** 89,480 deferrals are
+`no_camera_in_reach` — a 20 km lens against the Arabian Sea. The idle slots are a
+statement about coverage, not a scheduling defect, and the fix for them is a
+different sensor, which is the same answer O4 already gives.
+
+**No threshold was moved to make a count come out right.**
+`MIN_MISMATCH_QUALITY` (0.45), `MIN_MISMATCH_CONFIDENCE` (0.62),
+`PRIORITY_FLOOR` (0.30), `MIN_CLASSIFY_QUALITY` (0.35) and
+`MIN_CORROBORATING_CAPTURES` (2) are unchanged from the build that reported zero.
+
+**Where the corpus now stands (synthetic suite, seed 7).** O1 and O2 fire, each
+on two decisive looks that agree, `contradicted_share` 1.0. O3 — the decoy that
+declares bulker and is general cargo, both dry cargo under the AIS standard — is
+photographed clearly and reports `ok`. O4 is never captured at all: 150 km
+offshore, every slot defers her with the range to the nearest station attached.
+O5 collects sixteen thermal looks that all decline, which is the capability
+boundary she was authored to state — a silhouette carries no deck. **Two alerts,
+both authored, nothing else.**
+
 **What the simulation makes easier than reality, stated rather than buried.**
 The simulated camera has a 100% presence-detection rate: slewed onto a
 sea-clutter track it reports empty water, every time. Resolving a false radar

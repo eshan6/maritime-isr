@@ -43,6 +43,36 @@ from maritime_isr.scenario.measure_radar import (  # noqa: E402
     format_radar_measurement, measure_radar)
 
 
+def _clear_synthetic_table(table: str) -> int:
+    """Drop the synthetic rows of one derived table, keeping any real ones.
+
+    Same shape as `scenario.run.clear`: partitions are rewritten without the
+    synthetic rows rather than deleted, so a partition holding both kinds keeps
+    what it should.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from maritime_isr.ingest.landing import table_day_partitions
+
+    removed = 0
+    for path in table_day_partitions(table):
+        try:
+            tbl = pq.read_table(path)
+        except Exception:                                     # noqa: BLE001
+            continue
+        rows = tbl.to_pylist()
+        keep = [r for r in rows if not r.get("is_synthetic")]
+        if len(keep) == len(rows):
+            continue
+        removed += len(rows) - len(keep)
+        if keep:
+            pq.write_table(pa.Table.from_pylist(keep, schema=tbl.schema), path)
+        else:
+            path.unlink(missing_ok=True)
+    return removed
+
+
 def _hdr(title: str) -> None:
     print()
     print("=" * 76)
@@ -811,11 +841,37 @@ def run_anomalies(store: GraphStore, tracks_out: dict,
 #: the design point.
 EO_SLOT_SECONDS = 600.0
 
-#: The campaign is run in weekly stages so the loop can close. Each stage is
-#: handed what the previous stage's images concluded, which is what makes a
-#: contradicted hull get looked at again and a confirmed one stop consuming
-#: cameras. One long plan would rank repeatedly and never learn.
-EO_STAGE_DAYS = 7.0
+#: How often the loop closes — how soon what an image concluded can change what
+#: the scheduler does next.
+#:
+#: **Set by how long an opportunity lasts, not by the calendar.** The
+#: corroboration rule needs a second agreeing look, and the mechanism for
+#: getting one is that a contradicted hull is re-ranked. That only works if the
+#: verdict reaches the scheduler while she is still in view. At weekly stages it
+#: never did: a coastal transit is inside the provable band for about half an
+#: hour, so the first contradicting image landed in a stage that had already
+#: been planned, and the loop closed six days after she had gone.
+#:
+#: **One slot, because in a deployment the loop's latency is the classifier's
+#: latency, and that is seconds.** Half an hour was still a batch, and it was
+#: measured costing the area its two authored findings. O1 passes Porbandar
+#: observable for 78 minutes, at an image quality good enough to settle her
+#: identity for about 55 of them. Her first look at 08:15 contradicted what she
+#: broadcasts — but `verdict_state` only advanced at the stage boundary, so for
+#: the rest of that stage the scheduler still believed her unverified, reset her
+#: staleness clock on the look it had just taken, and dropped her to 0.165
+#: against a 0.30 floor. Porbandar's camera then sat idle through six slots in
+#: which she was in clear view. By the time the verdict arrived her window had
+#: closed, and the corroborating second look the rule requires was never taken.
+#: The camera saw a 270 m tanker broadcasting that she was a trawler, and the
+#: system reported nothing.
+#:
+#: A stage is a planning convenience; a batch interval is a claim about how long
+#: it takes to read an image. Making them the same number meant the second claim
+#: was never examined. There is no assignment work lost: each call ranked only
+#: its own slots either way, so what multiplies is per-call setup, and the
+#: lookahead that urgency depends on no longer stops at the plan's edge.
+EO_STAGE_SLOTS = 1
 
 
 def run_eo_loop(store, all_tracks, alerts_before: int) -> dict:
@@ -838,7 +894,8 @@ def run_eo_loop(store, all_tracks, alerts_before: int) -> dict:
     from maritime_isr.eo.classify import (PrototypeClassifier,
                                           ReferenceLibrary,
                                           SilhouetteClassifier)
-    from maritime_isr.eo.cue import CueCandidate, plan_cueing
+    from maritime_isr.eo.cue import (MAX_LOOKS_PER_VERDICT, CueCandidate,
+                                     plan_cueing)
     from maritime_isr.ingest.landing import SYNTHETIC_SOURCE_ID
     from maritime_isr.scenario.eo import (TABLE as APPEARANCE_TABLE,
                                           SimulatedCameraSource)
@@ -971,6 +1028,38 @@ def run_eo_loop(store, all_tracks, alerts_before: int) -> dict:
     if not fixes:
         print("  no tracks to cue over")
         return {}
+
+    # **How long she is belongs to the hull, not to the fix that reported her.**
+    #
+    # An AIS track carries no `length_est_m` — the length comes from the radar
+    # measurement — and the camera model needs a length to work out pixels on
+    # target, so it refuses a candidate that has none. Both of O1's tracks are
+    # collapsed onto one subject above precisely because they are one ship, and
+    # then the length was left attached to whichever track the slot happened to
+    # pick. In half her slots the feed picked the AIS fix, handed the scheduler
+    # a hull of unknown size, and the camera declined to look at a 270 m tanker
+    # sitting 5.5 km off Porbandar in clear daylight. She was a candidate in ten
+    # consecutive slots, above the floor in all ten with a camera free, and was
+    # imaged in the two where the nearest fix happened to be the radar one.
+    #
+    # Measured, not declared: the radar's estimate is what this system has
+    # observed about her size, and reading it off her AIS static message would
+    # be taking the word of a hull we are in the middle of accusing of lying
+    # about herself.
+    lengths: dict[str, list[float]] = {}
+    for _t, c in fixes:
+        if c.length_m:
+            lengths.setdefault(c.subject_id, []).append(float(c.length_m))
+    merged = {s: float(np.median(v)) for s, v in lengths.items()}
+    n_filled = 0
+    for _t, c in fixes:
+        if not c.length_m and c.subject_id in merged:
+            c.length_m = merged[c.subject_id]
+            n_filled += 1
+    if n_filled:
+        print(f"                   {n_filled:,} candidate position(s) took "
+              f"their length from another track of the same hull "
+              f"({len(merged):,} target(s) with a measured length)")
     fixes.sort(key=lambda f: f[0])
     subjects = {c.subject_id for _t, c in fixes}
     named = sum(1 for s in subjects if s.startswith("vessel:"))
@@ -979,6 +1068,25 @@ def run_eo_loop(store, all_tracks, alerts_before: int) -> dict:
           f"{len(fixes):,} candidate position(s)")
     print(f"                   {n_named_radar:,} radar track(s) entered as "
           f"their correlated hull rather than as a contact")
+
+    # Station positions once, for the per-slot "which fix is the best look"
+    # choice below. Cameras sit on the radar stations, so nearest-station range
+    # is the same quantity the camera model starts from.
+    _stations = [(c.lat, c.lon) for c in cameras]
+
+    def _nearest_station_km(lat: float, lon: float) -> float:
+        import math
+        best = float("inf")
+        for slat, slon in _stations:
+            p1, p2 = math.radians(lat), math.radians(slat)
+            dp = math.radians(slat - lat)
+            dl = math.radians(slon - lon)
+            a = (math.sin(dp / 2) ** 2
+                 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2)
+            d = 2 * 6371.0 * math.asin(math.sqrt(min(1.0, a)))
+            if d < best:
+                best = d
+        return best
 
     slot_index: dict[int, list[CueCandidate]] = {}
     t_start = fixes[0][0]
@@ -989,28 +1097,58 @@ def run_eo_loop(store, all_tracks, alerts_before: int) -> dict:
     def feed_for(base: float):
         def feed(when):
             k = int((when.timestamp() - t_start) // EO_SLOT_SECONDS)
-            # One candidate per subject per slot: several fixes of one hull in
-            # thirty minutes are one target, not three.
-            seen, out = set(), []
+            # One candidate per subject per slot — several fixes of one hull in
+            # ten minutes are one target, not three — but **the best of them,
+            # not the first**.
+            #
+            # Candidates are time-sorted, so taking the first handed the
+            # scheduler each vessel's *earliest* position in the window. For any
+            # hull closing on a station that is systematically her furthest, and
+            # for a hull departing it is her nearest: the scheduler was
+            # consistently pessimistic about exactly the vessels about to become
+            # imageable. O1 was evaluated twice at a frozen 8.588 km, at an
+            # image quality of 0.29 against a 0.35 classify floor, while her
+            # track reached 5.46 km inside the same window — her closer fixes
+            # were discarded here before the assignment ever saw them.
+            #
+            # Nearest-station distance is the proxy, not full image quality: the
+            # scheduler computes quality per camera and would have to be run to
+            # know it, while range dominates it and is one haversine away. The
+            # window is short enough that the best-ranged fix is the best look
+            # in all but contrived geometry.
+            #
+            # A candidate the camera model cannot evaluate loses to one it can,
+            # whatever the range: a fix with no length yields no pixels-on-
+            # target and is refused as unobservable, so preferring it because it
+            # is 300 m nearer trades a look for nothing. The merge above means
+            # this rarely binds now; it stays because "nearest" is a proxy for
+            # "best look" and a candidate that cannot be looked at is not one.
+            best: dict[str, tuple[tuple[int, float], CueCandidate]] = {}
             for c in slot_index.get(k, ()):
-                if c.subject_id in seen:
-                    continue
-                seen.add(c.subject_id)
-                out.append(c)
-            return out
+                rank = (0 if c.length_m else 1,
+                        _nearest_station_km(c.lat, c.lon))
+                prev = best.get(c.subject_id)
+                if prev is None or rank < prev[0]:
+                    best[c.subject_id] = (rank, c)
+            return [c for _r, c in best.values()]
         return feed
 
-    # ---- the campaign, in weekly stages so the loop closes ----------------
+    # ---- the campaign, one slot at a time so the loop closes ---------------
     source = SimulatedCameraSource(appearance)
     classifier = PrototypeClassifier()
     library = ReferenceLibrary()
     imaged_at: dict[str, float] = {}
     states: dict[str, str] = {}
+    #: Looks that actually yielded a type, per subject, across every stage. The
+    #: scheduler bounds how many of these one verdict is worth; that bound is
+    #: only a bound if the count survives the stage boundary, and at three slots
+    #: a stage a per-call counter never reaches three.
+    classified: dict[str, int] = {}
     all_caps = []
     plans = []
 
     t_end = fixes[-1][0]
-    stage_seconds = EO_STAGE_DAYS * 86400.0
+    stage_seconds = EO_STAGE_SLOTS * EO_SLOT_SECONDS
     n_stages = max(1, int((t_end - t_start) // stage_seconds) + 1)
     t0 = datetime.fromtimestamp(t_start, tz=timezone.utc)
     for stage in range(n_stages):
@@ -1018,7 +1156,8 @@ def run_eo_loop(store, all_tracks, alerts_before: int) -> dict:
         plan = plan_cueing(feed_for(t_start), cameras, t0=start,
                            slots=int(stage_seconds / EO_SLOT_SECONDS),
                            slot_seconds=EO_SLOT_SECONDS,
-                           imaged_at=imaged_at, verdict_state=states)
+                           imaged_at=imaged_at, verdict_state=states,
+                           classified_looks=classified)
         plans.append(plan)
         caps = run_captures(plan, source=source, classifier=classifier,
                             library=library, is_synthetic=True)
@@ -1033,10 +1172,34 @@ def run_eo_loop(store, all_tracks, alerts_before: int) -> dict:
         # A hull photographed at 0.29 quality has not been looked at in any
         # sense the scheduler should act on — the image proved she was there and
         # nothing else.
-        for c in caps:
-            if c.imaged_type:
-                imaged_at[c.subject_id] = c.taken_at.timestamp()
+        #
+        # The look count is carried the same way and for the same reason, but
+        # counted on what the image *returned* rather than on what the
+        # scheduler expected of it. The plan carries its own optimistic count
+        # out (`plan.classified_looks`); seeding the next stage from that would
+        # charge a hull for a look that came back too dim to read.
+        #
+        # **And an unsettled contradiction does not reset the clock here
+        # either.** `plan_cueing` withholds it inside a stage precisely so a
+        # hull whose image disagreed with her declaration stays stale enough to
+        # clear `PRIORITY_FLOOR` and be looked at again; resetting it at the
+        # boundary handed the next stage the opposite belief and reinstated the
+        # deadlock the withholding exists to break — an unsuspicious hull,
+        # freshly imaged and contradicted, scores 0.2550 against a 0.30 floor.
+        # Every authored liar got **exactly one classifiable look** and the rule
+        # then waited forever for a corroborating second one, so the whole area
+        # reported zero. The two rules must state the same thing at both scales
+        # or the boundary quietly undoes the fix, which is the same shape of
+        # defect as the look counter resetting between calls.
         _update_states(store, caps, states)
+        for c in caps:
+            if not c.imaged_type:
+                continue
+            classified[c.subject_id] = classified.get(c.subject_id, 0) + 1
+            unsettled = (states.get(c.subject_id) == "contradicted"
+                         and classified[c.subject_id] < MAX_LOOKS_PER_VERDICT)
+            if not unsettled:
+                imaged_at[c.subject_id] = c.taken_at.timestamp()
 
     n_task = sum(len(p.taskings) for p in plans)
     n_defer = sum(len(p.deferrals) for p in plans)
@@ -1044,11 +1207,22 @@ def run_eo_loop(store, all_tracks, alerts_before: int) -> dict:
     counters = Counter()
     for p in plans:
         counters.update(p.counters)
+    n_opp = counters.get("opportunistic_looks", 0)
     print(f"  cueing         : {n_task:,} tasking(s) over {slots:,} "
           f"camera-slot(s) ({n_task / max(slots, 1):.1%} utilisation), "
           f"{n_defer:,} deferral(s) recorded")
-    for k in ("candidates_seen", "below_priority_floor", "no_camera_in_reach",
-              "outranked", "slew_too_far", "idle_camera_slots"):
+    # Split, because one utilisation figure covering both would be a claim the
+    # plan does not support: a look taken only because the head was free is not
+    # a look the priority model would have paid for, and reading them together
+    # would let a fill inflate the number that is supposed to measure demand.
+    if n_opp:
+        print(f"                   {n_task - n_opp:,} earned their slot; "
+              f"{n_opp:,} filled a camera nothing else could use "
+              f"({(n_task - n_opp) / max(slots, 1):.1%} / "
+              f"{n_opp / max(slots, 1):.1%})")
+    for k in ("candidates_seen", "below_priority_floor", "opportunistic_looks",
+              "no_camera_in_reach", "outranked", "slew_too_far",
+              "idle_camera_slots"):
         print(f"    {k:<24}{counters[k]:>10,}")
     if source.misses:
         print(f"    {'no world model':<24}{source.misses:>10,}  "
@@ -1064,6 +1238,15 @@ def run_eo_loop(store, all_tracks, alerts_before: int) -> dict:
     print(f"                   {claims:,} type claim(s), {ident:,} "
           f"re-recognised from the library of {len(library):,} entries")
 
+    # **This campaign replaces the last one; it does not add to it.**
+    # `eo_capture` is a derived output regenerated wholesale on every pipeline
+    # run, so leaving the previous run's rows in place breaks the invariant that
+    # a derived layer is reproducible from raw plus a git SHA (CLAUDE.md §4.2) —
+    # and worse, the corroboration rule reads the table whole and would count
+    # one run's look and the next run's look at the same hull as two independent
+    # looks. Clearing here rather than in `scenario clear` because this is the
+    # stage that produces them: a table is cleared by whoever regenerates it.
+    _clear_synthetic_table(EO_TABLE)
     written = land_captures(all_caps,
                             source_id=f"{SYNTHETIC_SOURCE_ID}:eo-camera",
                             is_synthetic=True)

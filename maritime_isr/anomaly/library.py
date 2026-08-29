@@ -1322,7 +1322,37 @@ def detect_arrival_without_notification(store, notifications: list[dict],
 #: Two, not three: the third look buys a factor of three hundred against a false
 #: positive rate that is already negligible, and costs the findings whose hull
 #: only ever passed a camera twice.
+#:
+#: **Necessary and not sufficient** — "one in a hundred thousand" above is *per
+#: pair of looks*, and a hull photographed a hundred times offers thousands of
+#: pairs. See :data:`MIN_CONTRADICTED_SHARE`, which is the same claim enforced
+#: as the rate it always was.
 MIN_CORROBORATING_CAPTURES = 2
+
+#: And what share of the looks that decided anything must be the agreeing ones.
+#:
+#: The count above is necessary and not sufficient, because it is a statement
+#: about a *rate* enforced as an absolute. Two agreeing errors are one in a
+#: hundred thousand **per pair of looks**; over a hundred looks there are
+#: thousands of pairs and the same arithmetic makes two agreeing errors
+#: near-certain. A stationary hull that sat in one station's arc for five days
+#: is exactly that case, and the rule accused her on the two looks out of a
+#: hundred and thirty that happened to land on `container`.
+#:
+#: A majority is the honest reading of "the camera disagrees with her": if she
+#: images as what she declares more often than not, the camera does not disagree
+#: with her — it disagreed twice and agreed a hundred and twenty-eight times.
+#: 0.5 sits far above the noise floor (two in a hundred and thirty is 0.015) and
+#: far below the authored true positives, which are contradicted on two thirds
+#: to nine tenths of their decisive looks. It is not tuned to a target count:
+#: anywhere in roughly 0.2..0.6 separates these two populations, and 0.5 is the
+#: one value in that range that means something an operator can state.
+#:
+#: `eo.cue` bounds the looks as well, which fixes the same problem from the
+#: other end and returns the wasted camera-slots. Both, because they fail
+#: differently: the bound depends on the scheduler being the only source of
+#: captures, and this ratio holds however the images arrived.
+MIN_CONTRADICTED_SHARE = 0.5
 
 
 def detect_imagery_mismatch(store, captures: list[dict],
@@ -1355,7 +1385,7 @@ def detect_imagery_mismatch(store, captures: list[dict],
     reaches the operator through the capture record; it is not an accusation.
     """
     from ..eo.classify import ImageVerdict
-    from .imagery import check_declared_type
+    from .imagery import NOT_CHECKABLE, check_declared_type
 
     declared: dict[str, str] = {}
     for row in identities:
@@ -1374,6 +1404,11 @@ def detect_imagery_mismatch(store, captures: list[dict],
 
     # vessel node -> every contradiction found on her, in capture order.
     found: dict[str, list[tuple]] = {}
+    #: vessel node -> looks that decided anything either way. `not_checkable` is
+    #: excluded: an image too dim or too oblique to read is not a look that said
+    #: she was fine, and counting it as one would make the ratio below harder to
+    #: clear the worse the imaging got.
+    decisive: dict[str, int] = {}
     for cap in captures:
         subject = str(cap.get("subject_id") or "")
         if not subject.startswith("vessel:"):
@@ -1401,6 +1436,8 @@ def detect_imagery_mismatch(store, captures: list[dict],
         finding = check_declared_type(
             declared_class=declared.get(node), verdict=verdict,
             quality=quality, band=verdict.band)
+        if finding.outcome != NOT_CHECKABLE:
+            decisive[node] = decisive.get(node, 0) + 1
         if finding.is_contradiction:
             found.setdefault(node, []).append((finding, cap))
 
@@ -1434,6 +1471,13 @@ def detect_imagery_mismatch(store, captures: list[dict],
             by_family.setdefault(key, []).append((finding, cap))
         agreeing = max(by_family.values(), key=len)
         if len(agreeing) < MIN_CORROBORATING_CAPTURES:
+            continue
+        n_decisive = max(decisive.get(node, len(hits)), len(agreeing))
+        if len(agreeing) < MIN_CONTRADICTED_SHARE * n_decisive:
+            # Photographed enough times that two agreeing looks prove nothing.
+            # See `MIN_CONTRADICTED_SHARE`. Not an alert and not a near-miss:
+            # the camera's own answer, over her whole record, is that she is
+            # what she says she is.
             continue
         agreeing.sort(key=lambda fc: -float(fc[0].confidence))
         finding, cap = agreeing[0]
@@ -1488,6 +1532,9 @@ def detect_imagery_mismatch(store, captures: list[dict],
                          band=cap.get("band"),
                          image_quality=cap.get("image_quality"),
                          corroborating_captures=len(supporting),
+                         decisive_captures=n_decisive,
+                         contradicted_share=round(
+                             len(agreeing) / max(n_decisive, 1), 3),
                          capture_mode=cap.get("capture_mode"),
                          model_name=cap.get("model_name"),
                          lat=cap.get("lat"), lon=cap.get("lon"),

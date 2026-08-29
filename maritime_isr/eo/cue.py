@@ -97,10 +97,30 @@ W_STALENESS = 0.15
 #: population a camera should not be spent on.
 PRIORITY_FLOOR = 0.30
 
+#: How many classifiable looks one unsettled verdict is worth.
+#:
+#: `anomaly.library` needs two agreeing looks before it will accuse a hull, so a
+#: contradicted vessel is held stale until she has had them. Three, not two, so
+#: a pair that disagrees gets one tie-break — and then it stops, because the
+#: corroboration rule's premise is that agreeing errors are rare across a few
+#: independent looks, and that premise dies under repetition. Left unbounded, a
+#: stationary hull in one camera's arc collected 130 looks in five days and the
+#: rule fired on the two that happened to agree.
+MAX_LOOKS_PER_VERDICT = 3
+
 #: How much a closing observation window is allowed to move the assignment.
 #: At 0.6 a last-chance look outranks an equally valuable one that can be taken
 #: in any of the next four slots, and does not outrank one worth two-thirds
 #: more. Urgency should reorder a queue, never rewrite it.
+#:
+#: **Scaled by information gain, because urgency measures what is about to be
+#: lost and nothing is lost by missing a question already answered.** Applied
+#: flat, it kept buying the camera for a hull leaving cover whom this pass had
+#: already photographed, while a hull nobody had ever imaged waited — the
+#: closing window is only an argument for the look that would otherwise never
+#: be taken. It is strongest exactly where it should be: an unresolved
+#: contradiction (0.85) on a ship about to pass out of range, which is the one
+#: case where the corroborating second look is genuinely now or never.
 URGENCY_WEIGHT = 0.6
 
 #: Staleness ramp. Below `FRESH_HOURS` a second image tells us nothing new;
@@ -123,6 +143,14 @@ INFO_UNIDENTIFIED = 1.00     # nothing broadcasting: an image is the only lead
 INFO_UNVERIFIED = 0.55       # she declares an identity nothing has checked
 INFO_CONFIRMED = 0.10        # an image already agreed with her declaration
 INFO_CONTRADICTED = 0.85     # an image already disagreed: look again, harder
+INFO_SETTLED = 0.05          # asked and answered `MAX_LOOKS_PER_VERDICT` times
+
+#: What a below-floor target is charged to keep it behind every above-floor one.
+#: Larger than any value the matrix can hold (priority and quality are both in
+#: [0,1] and urgency multiplies by at most 1.6), so the solver can never trade an
+#: above-floor tasking away to buy two cheap ones — a below-floor target takes
+#: only a camera nothing else could use. See the eligibility block.
+BELOW_FLOOR_PENALTY = 10.0
 
 #: A very large cost, standing in for "this pairing is impossible". Finite
 #: rather than infinite because the solver requires a finite matrix; pairings at
@@ -157,14 +185,26 @@ class CueCandidate:
     track_source: str = "radar"
     is_synthetic: bool = False
 
-    def information_gain(self, *, imaged_before: int, verdict_state: str
-                         ) -> float:
+    def information_gain(self, *, imaged_before: int, verdict_state: str,
+                         classified_before: int = 0) -> float:
         """What a photograph of her would resolve that is not already resolved."""
         if not self.identity_known:
             # An unnamed contact stays worth imaging even after one look: the
             # first image gives a type, and a second, later look gives a
-            # movement history for a hull the system still cannot name.
+            # movement history for a hull the system still cannot name. There is
+            # no declaration to settle, so the bound below does not apply to her.
             return INFO_UNIDENTIFIED if not imaged_before else 0.65
+        if (classified_before >= MAX_LOOKS_PER_VERDICT
+                and verdict_state in ("contradicted", "confirmed")):
+            # **Asked and answered.** Three classifiable looks have agreed or
+            # disagreed with what she broadcasts; a fourth resolves nothing the
+            # first three did not. Dropping the term here rather than only
+            # withholding the staleness clock is what actually frees the slot:
+            # at this gain a hull nothing else has flagged falls below
+            # `PRIORITY_FLOOR` and the camera goes elsewhere, while a hull with
+            # real suspicion behind her stays in the order on that suspicion —
+            # which is the right reason to keep watching a ship.
+            return INFO_SETTLED
         if verdict_state == "contradicted":
             return INFO_CONTRADICTED
         if verdict_state == "confirmed":
@@ -249,6 +289,14 @@ class CuePlan:
     n_cameras: int = 0
     #: Counts the ledger deliberately does not enumerate — see `plan_cueing`.
     counters: dict = field(default_factory=dict)
+    #: Classifiable looks per subject at the end of the plan, counted on
+    #: *expected* quality — the scheduler is choosing before the shutter opens
+    #: and has nothing else to count on. A caller that has since taken the
+    #: images should seed the next call from those instead: a look expected to
+    #: be classifiable that came back dim did not answer the question, and only
+    #: the capture knows which happened. This is the same split `imaged_at`
+    #: already runs on.
+    classified_looks: dict = field(default_factory=dict)
 
     @property
     def camera_slots(self) -> int:
@@ -352,6 +400,30 @@ def _staleness(now: float, last_imaged_at: Optional[float]) -> float:
     return (hours - FRESH_HOURS) / (STALE_HOURS - FRESH_HOURS)
 
 
+def _settled(c: CueCandidate, states: dict, n_classified: dict) -> bool:
+    """Has the camera finished answering what it can answer about her?
+
+    Asymmetric on purpose, and it is the same asymmetry `INFO_CONFIRMED` (0.10)
+    and `INFO_CONTRADICTED` (0.85) already encode. **One agreeing look settles a
+    confirmation**: she photographs as what she broadcasts, which is the
+    unremarkable case and needs no second opinion. **A contradiction is an
+    accusation** and is not settled until it has the corroborating looks
+    `anomaly.library` requires before it will make one — up to
+    `MAX_LOOKS_PER_VERDICT`, after which repetition stops being evidence.
+
+    An unidentified contact is never settled: she has declared nothing, so there
+    is no question here to close, and her value is a movement history that keeps
+    accruing.
+    """
+    if not c.identity_known:
+        return False
+    state = states.get(c.subject_id)
+    if state == "confirmed":
+        return True
+    return (state == "contradicted"
+            and n_classified.get(c.subject_id, 0) >= MAX_LOOKS_PER_VERDICT)
+
+
 def _sentence(c: CueCandidate, v: CameraView, terms: dict, urgency: float
               ) -> str:
     """The one line a watchkeeper reads instead of slewing the camera herself."""
@@ -385,6 +457,7 @@ def plan_cueing(feed: Callable[[datetime], Sequence[CueCandidate]],
                 t0: datetime, slots: int, slot_seconds: float = 1800.0,
                 imaged_at: Optional[dict[str, float]] = None,
                 verdict_state: Optional[dict[str, str]] = None,
+                classified_looks: Optional[dict[str, int]] = None,
                 max_deferrals_per_slot: int = 12,
                 priority_floor: float = PRIORITY_FLOOR) -> CuePlan:
     """Produce a tasking order over a window, and the reasons for what it left.
@@ -395,11 +468,20 @@ def plan_cueing(feed: Callable[[datetime], Sequence[CueCandidate]],
     in the pipeline from two thousand resampled tracks without knowing the
     difference.
 
-    ``imaged_at`` and ``verdict_state`` seed the loop's memory — when she was
-    last photographed and whether that photograph agreed with what she declares.
-    Both are carried forward across slots inside the plan, which is what makes
+    ``imaged_at``, ``verdict_state`` and ``classified_looks`` seed the loop's
+    memory — when she was last photographed, whether that photograph agreed with
+    what she declares, and how many looks have been good enough to say. All
+    three are carried forward across slots inside the plan, which is what makes
     this a control loop rather than a repeated ranking: a camera spent in slot 3
     changes what slot 4 is worth spending on.
+
+    **They must be carried across calls too, by the caller.** A window longer
+    than one plan is scheduled as consecutive `plan_cueing` calls, and a memory
+    that resets at each boundary is not memory. `classified_looks` was the case
+    that proved it: bounded within a call and reset between them, the bound was
+    unreachable at three slots a stage and had no effect at all on a run of a
+    thousand. `CuePlan.classified_looks` carries the counts out for the caller
+    to feed back in.
     """
     from scipy.optimize import linear_sum_assignment
 
@@ -410,10 +492,18 @@ def plan_cueing(feed: Callable[[datetime], Sequence[CueCandidate]],
                    n_cameras=len(cameras))
     imaged: dict[str, float] = dict(imaged_at or {})
     n_imaged: dict[str, int] = {}
+    #: Classifiable looks so far, per subject. Separate from `n_imaged`, which
+    #: counts every tasking including the dim ones that yield no type. Seeded
+    #: from the caller so the bound survives a stage boundary.
+    n_classified: dict[str, int] = dict(classified_looks or {})
     states: dict[str, str] = dict(verdict_state or {})
     counters = {"candidates_seen": 0, "below_priority_floor": 0,
                 "no_camera_in_reach": 0, "outranked": 0,
-                "slew_too_far": 0, "idle_camera_slots": 0}
+                "slew_too_far": 0, "idle_camera_slots": 0,
+                #: Below-floor targets that took a camera nothing else wanted.
+                #: Reported separately so utilisation cannot be read as though
+                #: every look was one the plan would have paid for.
+                "opportunistic_looks": 0}
     # Where each camera was left pointing, so the slew to the next target can be
     # charged against the slot. At half-hour slots this never binds; at
     # two-minute slots it is the difference between a plan and a wish.
@@ -434,7 +524,8 @@ def plan_cueing(feed: Callable[[datetime], Sequence[CueCandidate]],
                 "suspicion": max(0.0, min(1.0, float(c.suspicion or 0.0))),
                 "information_gain": c.information_gain(
                     imaged_before=n_imaged.get(c.subject_id, 0),
-                    verdict_state=states.get(c.subject_id, "unknown")),
+                    verdict_state=states.get(c.subject_id, "unknown"),
+                    classified_before=n_classified.get(c.subject_id, 0)),
                 "staleness": _staleness(now, imaged.get(c.subject_id)),
             }
             priority = (W_SUSPICION * terms["suspicion"]
@@ -443,9 +534,45 @@ def plan_cueing(feed: Callable[[datetime], Sequence[CueCandidate]],
             terms["priority"] = priority
             scored.append((c, terms, priority))
 
-        eligible = [(c, terms, p) for c, terms, p in scored
-                    if p >= priority_floor]
-        counters["below_priority_floor"] += len(scored) - len(eligible)
+        # ---- who competes for a camera, and on what footing ----------------
+        #
+        # **The floor is an opportunity cost, not a quality bar, and when the
+        # camera has no better use the opportunity cost is zero.** Filtering
+        # below-floor candidates out of the matrix entirely spent 115,028 camera
+        # slots on nothing while 46,527 reachable targets were refused for
+        # scoring under 0.30 — a head sitting still is not worth more than a
+        # marginal image, and the marginal images are exactly where the hulls
+        # this area exists to catch live: the authored liars are on coastal
+        # passes at 0.4-0.5 expected quality, and one of them collected five
+        # looks too dim to read before a classifiable one arrived.
+        #
+        # So they stay in the assignment and are charged `BELOW_FLOOR_PENALTY`,
+        # which is larger than any value spread and therefore lexicographic: a
+        # below-floor target can only ever take a camera that **no** above-floor
+        # target could have used. One global assignment still, not a greedy
+        # second pass over the leftovers — the ban in CLAUDE.md §6 does not stop
+        # applying because the targets are cheap.
+        #
+        # This is safe now and would not have been before. Under a bare count of
+        # two agreeing looks, more looks meant more chances to accuse an honest
+        # hull; under `MIN_CONTRADICTED_SHARE` the denominator grows with them,
+        # so an extra look makes an accusation harder, not easier.
+        eligible: list[tuple] = []
+        opportunistic: set[int] = set()
+        n_below = 0
+        for c, terms, p in scored:
+            if p >= priority_floor:
+                eligible.append((c, terms, p))
+                continue
+            n_below += 1
+            if _settled(c, states, n_classified):
+                # Asked and answered. A spare camera is free; pointing it at a
+                # question this system has already closed is not, because every
+                # frame lands as evidence an operator may have to read.
+                continue
+            opportunistic.add(len(eligible))
+            eligible.append((c, terms, p))
+        counters["below_priority_floor"] += n_below
         if not eligible:
             counters["idle_camera_slots"] += len(cameras)
             continue
@@ -482,8 +609,15 @@ def plan_cueing(feed: Callable[[datetime], Sequence[CueCandidate]],
         for j, (c, _terms, _p) in enumerate(eligible):
             future = 0
             for ahead in range(1, LOOKAHEAD_SLOTS + 1):
-                if k + ahead >= slots:
-                    break
+                # **Deliberately not truncated at the plan's last slot.** The
+                # question urgency asks is "will anything be able to see her
+                # later", and that is a fact about the sea, not about where this
+                # call happens to stop. Cutting the horizon at `slots` made every
+                # candidate in a short plan maximally urgent — at one slot a
+                # stage, urgency became the constant 1.0 and stopped
+                # discriminating at all, which would have silently traded the
+                # whole term away for the faster loop that fixed the timing.
+                # The caller schedules the next stage; the ship keeps sailing.
                 t_ahead = t + timedelta(seconds=slot_seconds * ahead)
                 la, lo = _project(c, slot_seconds * ahead)
                 if best_view(cameras, lat=la, lon=lo, when=t_ahead,
@@ -497,7 +631,11 @@ def plan_cueing(feed: Callable[[datetime], Sequence[CueCandidate]],
         cost = [[_IMPOSSIBLE] * n_cols for _ in range(n_rows)]
         for (i, j), v in views.items():
             value = eligible[j][2] * v.quality
-            cost[i][j] = -(value * (1.0 + URGENCY_WEIGHT * urgency[j]))
+            at_risk = URGENCY_WEIGHT * urgency[j] * eligible[j][1][
+                "information_gain"]
+            cost[i][j] = -(value * (1.0 + at_risk))
+            if j in opportunistic:
+                cost[i][j] += BELOW_FLOOR_PENALTY
         rows, cols = linear_sum_assignment(cost)
 
         taken: set[int] = set()
@@ -509,6 +647,12 @@ def plan_cueing(feed: Callable[[datetime], Sequence[CueCandidate]],
             c, terms, priority = eligible[j]
             value = priority * v.quality
             sentence = _sentence(c, v, terms, urgency[j])
+            if j in opportunistic:
+                counters["opportunistic_looks"] += 1
+                sentence += (f" Taken on a camera that would otherwise have "
+                             f"been idle — she scores {priority:.2f}, under the "
+                             f"{priority_floor:.2f} floor, and nothing "
+                             f"outranked her for this slot.")
             plan.taskings.append(Tasking(
                 tasking_id=f"eot-{k:05d}-{cameras[i].station_id}",
                 camera_id=cameras[i].camera_id,
@@ -526,6 +670,14 @@ def plan_cueing(feed: Callable[[datetime], Sequence[CueCandidate]],
                      "weights": {"suspicion": W_SUSPICION,
                                  "information_gain": W_INFORMATION,
                                  "staleness": W_STALENESS},
+                     # Named on the tasking, because an operator asking "why did
+                     # you photograph *that*" deserves the honest answer, which
+                     # is that she scored under the bar and the camera had
+                     # nothing better to do. Silently mixing these in with the
+                     # tasks that earned their slot would make the arithmetic on
+                     # the page stop explaining the plan.
+                     "opportunistic": j in opportunistic,
+                     "priority_floor": priority_floor,
                      "view": v.as_dict()},
                 sentence=sentence,
                 is_synthetic=bool(c.is_synthetic or cameras[i].is_synthetic)))
@@ -543,8 +695,58 @@ def plan_cueing(feed: Callable[[datetime], Sequence[CueCandidate]],
             # authored mismatch could not fire.
             #
             # Presence is recorded either way; only the clock is withheld.
+            #
+            # **And a look that raises a question we cannot yet act on has not
+            # settled it either.** `anomaly.library` will not accuse a hull on
+            # one image — a single photograph misplaces an honest vessel about
+            # three times in a thousand, which across a fleet is a steady
+            # trickle of false accusations — so it requires two agreeing looks,
+            # and says the second comes for free because a contradicted hull
+            # keeps a high information gain here.
+            #
+            # It did not come for free. Arithmetic: a hull with no behavioural
+            # suspicion, freshly imaged and *contradicted*, scores
+            # `0.55x0 + 0.30x0.85 + 0.15x0 = 0.2550` against a 0.30 floor. Below
+            # it. The camera photographed a ship, saw she was lying about what
+            # she is, and then ranked her too low to look again — while the rule
+            # waited for a second look that could never be taken. The two rules
+            # deadlocked, and they deadlocked precisely for the hull with
+            # nothing suspicious in her motion, which is the whole population
+            # the camera exists to catch.
+            #
+            # So an unsettled contradiction keeps her stale. The floor and the
+            # weights are untouched; what changes is that "we have looked at
+            # her" now means the looking finished the job.
+            # **Bounded, because "we need a second look" is not "we need
+            # unlimited looks".** Withholding the clock outright removed the
+            # brake with nothing in its place, and a *stationary* hull sat in
+            # one camera's arc for five days and collected 130 looks at a
+            # constant 6.8 km. The classifier is noisy by design — it returned
+            # product_tanker, Aframax, bulker, container, reefer and Suezmax for
+            # the same ship — and across 130 draws two agreeing on a wrong
+            # family stops being unlikely and becomes certain. The corroboration
+            # rule's premise is that two looks rarely agree in error; that holds
+            # at two looks and fails at a hundred. It fired on an honest hull.
+            #
+            # So the clock is withheld only until she has had the looks the
+            # verdict actually needs. After that she is settled as far as the
+            # camera can settle her, and repetition is not evidence.
+            #
+            # Not the same question as `_settled`, which asks whether there is
+            # anything left to learn about her. This asks only whether the clock
+            # may run: a hull whose verdict is still `unknown` was just
+            # photographed and should go to the back of the queue like any
+            # other, while `_settled` would rightly say nothing about her is
+            # closed yet. Two different questions, so two names.
             if v.quality >= MIN_CLASSIFY_QUALITY:
-                imaged[c.subject_id] = now
+                # Counted *before* the test, or the third look never releases
+                # the clock and the bound quietly costs a fourth.
+                n_classified[c.subject_id] = n_classified.get(c.subject_id, 0) + 1
+                clock_may_run = (
+                    states.get(c.subject_id) != "contradicted"
+                    or n_classified[c.subject_id] >= MAX_LOOKS_PER_VERDICT)
+                if clock_may_run:
+                    imaged[c.subject_id] = now
             n_imaged[c.subject_id] = n_imaged.get(c.subject_id, 0) + 1
         counters["idle_camera_slots"] += len(cameras) - len(taken)
 
@@ -589,6 +791,7 @@ def plan_cueing(feed: Callable[[datetime], Sequence[CueCandidate]],
                     explanation=why, priority=priority,
                     detail={"nearest_station": nearest}))
     plan.counters = counters
+    plan.classified_looks = n_classified
     return plan
 
 

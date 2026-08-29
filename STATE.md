@@ -8,8 +8,62 @@ session. `CLAUDE.md`, `ARCHITECTURE.md`, `DECISIONS.md` are stable contracts;
 > between status buckets, record what was verified vs assumed, log anything now
 > broken, and set "Next up." If you don't update it, the next session starts blind.
 
-**Last updated:** 2026-08-29 (fifth session) — **Area 4's extractor hardened
-and verified; Area 5's loop built and running but its detector still silent.**
+**Last updated:** 2026-08-29 (sixth session) — **Area 5 fires for the first
+time: 2 alerts, both authored, no false positive. Area 4 unchanged at 3/2/1.**
+
+**Area 5 was silent because the corpus held no lie.** `DECLARED_CLASS_OVERRIDES`
+is written in cast keys (`eo_false_class`); both readers look it up by entity id
+(`vessel:eo_false_class`). Merged un-keyed, every lookup missed, so every
+authored liar broadcast the truth about herself and the rule was correct to say
+nothing. **Third time this area has been silenced by two id spaces for one hull**
+— ADR-037 records the other two. `build_vessels` now re-keys and *raises* on an
+override that names nobody, and a unit test checks the property at the cast in a
+second rather than after a twenty-minute pipeline run.
+
+**Then four more, each hiding the next.** (1) The camera refuses a hull of
+unknown size, and 44% of candidate positions carried no length — an AIS track
+has none, only radar measures it — so the feed handed the scheduler an
+unmeasurable hull in half of O1's slots and the camera declined to look at a
+270 m tanker 5.5 km offshore in clear daylight. Length is a property of the
+hull, so it is now merged across her tracks. (2) The loop closed at stage
+boundaries, not at the classifier's latency: O1's first look contradicted her at
+08:15 and the scheduler did not know until the stage ended, reset her staleness
+clock on the look it had just taken, and dropped her below the floor for six
+slots she was in clear view. Stages are now one slot. (3) The urgency lookahead
+stopped at the plan's last slot, which at one slot a stage made every candidate
+maximally urgent — fixed, and urgency is now scaled by information gain, because
+nothing is lost by missing a question already answered. (4) The pipeline reset
+the staleness clock at the boundary even for an unsettled contradiction, undoing
+inside `plan_cueing` the fix that exists to supply the corroborating look.
+
+**The one alert the area used to produce was a false positive**, on an honest
+stationary hull that collected **130 looks** in one arc; two of them agreed on
+`container` and the rule accused her. "Two agreeing looks" is a claim about a
+rate (one in 100,000 **per pair**) enforced as an absolute, and 130 looks hold
+8,385 pairs. Fixed at both ends: `MIN_CONTRADICTED_SHARE = 0.5` (the agreeing
+looks must be a majority of the looks that decided anything) and a bound of 3
+classifiable looks per settled verdict in `eo.cue`, which also returns the
+wasted slots. **No threshold was moved to make a count come out right** —
+`MIN_MISMATCH_QUALITY` (0.45), `MIN_MISMATCH_CONFIDENCE` (0.62),
+`PRIORITY_FLOOR` (0.30) and `MIN_CORROBORATING_CAPTURES` (2) are all untouched.
+
+**Capacity.** Cameras sat idle in 115,028 slots while 46,527 reachable targets
+were refused for scoring under the floor. The floor is an opportunity cost, so
+below-floor targets now stay in the same global assignment charged a penalty
+larger than any value spread — they take only a camera nothing else could use,
+they are marked `opportunistic` on the tasking, and utilisation is reported
+split so a fill cannot inflate the number that measures demand. Utilisation is
+still **4.5%**, and that is honest: 89,480 deferrals are `no_camera_in_reach`,
+which is a 20 km lens against the Arabian Sea, not a scheduling defect.
+
+**Three corpus-accounting tests had been skipping silently.** They asked
+`api.reader` for `scenario_truth`, which ADR-019 deliberately does not register
+there, so "no such table" read as "no corpus" on a corpus that had the answer
+key all along. They read the partitions directly now and pass.
+
+**All figures here are on the synthetic suite** (seed 7). No camera exists, no
+image has ever been examined, and nothing in Area 5 has run on real data or on
+the Oracle VM, which is still not provisioned (CLAUDE.md §5).
 
 **Extractor hardening (Area 4).** Measured against labels and value formats the
 generator never writes — the corpus shares one synonym table with the extractor,

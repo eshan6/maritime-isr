@@ -581,7 +581,25 @@ def build_vessels(world: ScenarioWorld) -> None:
     # registry is written from it. Order matters here too and in the same
     # direction as the IMO break below: the registry records the *declared*
     # class for these hulls, so the override has to exist first (ADR-037).
-    world.declared_class_overrides.update(DECLARED_CLASS_OVERRIDES)
+    #
+    # **Re-keyed to the entity id, because both readers look up by it.** The
+    # dict above is written in cast keys (`eo_false_class`) so it reads beside
+    # `LATE_ADDITIONS`; `land.py` and `build_registry_attestations` both ask
+    # `declared_class_overrides.get(v.entity_id)`, which is `vessel:eo_false_
+    # class`. Merged un-keyed, every lookup missed, every authored liar
+    # broadcast the truth about herself, and Area 5 could not fire on a single
+    # one of them — the corpus contained no lie for a camera to catch. It is the
+    # third time this area has been silenced by two id spaces for one hull
+    # (ADR-037 records the other two), which is why the loop below refuses
+    # rather than skipping an override that names nobody.
+    for key, declared in DECLARED_CLASS_OVERRIDES.items():
+        vid = entity_id(key)
+        if vid not in world.vessels:
+            raise KeyError(
+                f"DECLARED_CLASS_OVERRIDES names {key!r}, which is not in the "
+                f"cast. An override that lands on nobody is a scenario that "
+                f"cannot fire, and it fails silently — see ADR-037.")
+        world.declared_class_overrides[vid] = declared
 
     # Order matters: the registry is written from the hulls as *registered*,
     # and only then does F1 start broadcasting a corrupted number. Reversing

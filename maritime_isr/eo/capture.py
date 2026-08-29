@@ -212,7 +212,25 @@ class EOCapture:
 
 
 def _capture_id(t: Tasking) -> str:
-    body = f"{t.tasking_id}|{t.camera_id}|{t.subject_id}|{t.at.isoformat()}"
+    """Which camera looked at what, when. **Not which plan produced it.**
+
+    `tasking_id` carries a plan-order counter (`eot-00048-SYN-POR`), so it moves
+    whenever the scheduler's output shifts — a different cadence, a different
+    feed, any change at all. Hashing it made the *same photograph* land under a
+    new id on every code change, and `land_table` dedupes on this id, so instead
+    of replacing the old row the run appended beside it.
+
+    The effect was not cosmetic. `eo_capture` is read whole by the corroboration
+    rule, which needs two agreeing *independent* looks before it will accuse a
+    hull. Captures from separate pipeline runs sat in the table together and
+    were counted as corroboration — three rows for O1 at one instant, carrying
+    three different `ingested_at` stamps hours apart. A re-run was manufacturing
+    the very independence the rule exists to require.
+
+    The identity of a photograph is the camera, the subject and the instant.
+    None of those move when the planner does.
+    """
+    body = f"{t.camera_id}|{t.subject_id}|{t.at.isoformat()}"
     return "eoc_" + hashlib.sha1(body.encode()).hexdigest()[:12]
 
 
