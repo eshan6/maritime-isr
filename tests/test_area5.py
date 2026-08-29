@@ -163,6 +163,30 @@ def test_a_bow_on_look_is_worse_than_a_broadside_one():
     assert broadside.quality > bow_on.quality
 
 
+def test_a_target_of_unknown_length_cannot_be_imaged_at_any_range():
+    """The property that made the length merge necessary, pinned.
+
+    Pixels on target is length over range, so a hull whose length nothing has
+    measured yields no expected quality and the camera declines. That is the
+    right refusal — inventing a length would invent the image quality the whole
+    priority model multiplies by — but it means a length known to the *system*
+    and merely absent from *this fix* silently costs the look. O1 has an AIS
+    track with no length and a radar track with one; in the slots where the feed
+    picked the AIS fix, the camera refused a 270 m tanker 5.5 km offshore in
+    clear daylight.
+    """
+    from maritime_isr.eo.camera import view
+
+    cam = _camera()
+    known = view(cam, lat=21.66, lon=69.61, when=T_DAY, length_m=194.0,
+                 heading_deg=90.0)
+    unknown = view(cam, lat=21.66, lon=69.61, when=T_DAY, length_m=None,
+                   heading_deg=90.0)
+    assert known.observable and known.quality > 0.0
+    assert not unknown.observable, (
+        "a hull of unknown size must be refused, not guessed at")
+
+
 def test_a_terrain_masked_bearing_is_not_an_imaging_opportunity():
     """The camera is on the tower behind the same headland as the radar.
 
@@ -369,6 +393,65 @@ def test_a_closing_window_reorders_the_queue_without_rewriting_it():
     assert "vessel:staying" in plan.subjects()
 
 
+def test_a_closing_window_argues_for_the_look_that_would_never_be_taken():
+    """Urgency measures what is about to be lost, and an answer is not lost.
+
+    Applied flat, the premium kept buying the camera for a hull leaving cover
+    whom this pass had already confirmed, while a hull nobody had ever imaged
+    waited — an inversion, because a look you can still take tomorrow is worth
+    more than a duplicate of one you took ten minutes ago. Scaling it by
+    information gain puts it where it belongs, which is also where the area
+    needs it: an unresolved contradiction on a ship about to leave range is the
+    one case where the corroborating second look is genuinely now or never.
+    """
+    cams = [_camera()]
+    answered = _candidate(subject_id="vessel:answered", track_id="a",
+                          lat=21.645, lon=69.58, suspicion=0.5, sog_kn=22.0,
+                          cog_deg=270.0, identity_known=True)
+    fresh = _candidate(subject_id="vessel:fresh", track_id="f",
+                       lat=21.645, lon=69.58, suspicion=0.5, sog_kn=0.2,
+                       cog_deg=0.0, identity_known=True)
+    plan = _plan([answered, fresh], cams, slots=1,
+                 verdict_state={"vessel:answered": "confirmed"})
+    assert [t.subject_id for t in plan.taskings] == ["vessel:fresh"], (
+        "a closing window on a settled question must not outrank an open one")
+
+    # Same geometry, same closing window, but the question is still open and
+    # the rule downstream needs a second look to act on it.
+    plan = _plan([answered, fresh], cams, slots=1,
+                 verdict_state={"vessel:answered": "contradicted"})
+    assert [t.subject_id for t in plan.taskings] == ["vessel:answered"], (
+        "an unresolved contradiction leaving cover is exactly what urgency is "
+        "for")
+
+
+def test_the_lookahead_does_not_stop_at_the_edge_of_the_plan():
+    """Whether anything can see her later is a fact about the sea.
+
+    Truncating the horizon at the plan's last slot made every candidate in a
+    short plan maximally urgent, and at one slot a stage — which is what closing
+    the loop at the classifier's latency requires — urgency became the constant
+    1.0 and stopped discriminating at all. That would have traded the whole term
+    away for the faster loop, silently.
+    """
+    leaving = _candidate(subject_id="vessel:leaving", track_id="lv",
+                         lat=21.645, lon=69.58, suspicion=0.5, sog_kn=25.0,
+                         cog_deg=270.0, identity_known=True)
+    staying = _candidate(subject_id="vessel:staying", track_id="st",
+                         lat=21.645, lon=69.58, suspicion=0.5, sog_kn=0.0,
+                         cog_deg=0.0, identity_known=True)
+    plan = _plan([leaving, staying], [_camera()], slots=1)
+    by_subject = {t.subject_id: t for t in plan.taskings}
+    urgencies = {d.subject_id: d for d in plan.deferrals}
+    got = by_subject.get("vessel:leaving") or by_subject.get("vessel:staying")
+    assert got is not None and urgencies, "the fixture must produce both"
+    # The one that will still be there must not be as urgent as the one that
+    # will not, even though the plan ends after this slot.
+    assert got.urgency > 0.0
+    assert got.subject_id == "vessel:leaving", (
+        "a one-slot plan must still tell a closing window from an open one")
+
+
 def test_a_camera_cannot_slew_across_the_horizon_inside_a_short_slot():
     """A schedule that ignores the time to move the head is a wish.
 
@@ -442,6 +525,80 @@ def test_an_idle_camera_is_counted_rather_than_hidden():
     assert plan.camera_slots == 2
     assert plan.counters["idle_camera_slots"] == 1
     assert 0.0 < plan.utilisation() <= 1.0
+
+
+def test_an_idle_camera_takes_a_below_floor_target_rather_than_nothing():
+    """The floor is an opportunity cost, and an idle camera has none to pay.
+
+    Over the corpus this was 115,028 camera-slots spent on nothing while 46,527
+    reachable targets were refused for scoring under 0.30. The marginal images
+    are where this area's hulls live — the authored liars pass at 0.4-0.5
+    expected quality, and one collected five looks too dim to read before a
+    classifiable one arrived — so refusing them while the head sits still buys
+    nothing and costs the finding.
+    """
+    from maritime_isr.eo.cue import PRIORITY_FLOOR
+
+    cams = [_camera()]
+    # Confirmed by an earlier image and freshly imaged: nothing left to resolve,
+    # so she is under the floor on every term.
+    dull = _candidate(subject_id="vessel:dull", track_id="d",
+                      lat=21.645, lon=69.58, suspicion=0.0,
+                      identity_known=True)
+    plan = _plan([dull], cams, imaged_at={"vessel:dull": T_DAY.timestamp()},
+                 verdict_state={"vessel:dull": "unknown"})
+    assert plan.counters["below_priority_floor"] >= 1, (
+        "this fixture is only meaningful if she is genuinely under the floor")
+    assert [t.subject_id for t in plan.taskings] == ["vessel:dull"]
+    assert plan.counters["opportunistic_looks"] == 1
+    got = plan.taskings[0]
+    assert got.why["opportunistic"] is True, (
+        "an operator asking why this was photographed must get the real reason")
+    assert got.priority < PRIORITY_FLOOR
+    assert "otherwise have been idle" in got.sentence
+
+
+def test_a_below_floor_target_never_displaces_one_that_earned_its_slot():
+    """Cheap looks fill leftovers; they do not compete.
+
+    The solver minimises a total, so without a penalty larger than any value
+    the matrix can hold it would happily trade one earned tasking for two cheap
+    ones. That would make the floor meaningless rather than conditional.
+    """
+    cams = [_camera()]
+    earned = _candidate(subject_id="vessel:hot", track_id="h",
+                        lat=21.645, lon=69.58, suspicion=0.9,
+                        identity_known=True)
+    cheap = _candidate(subject_id="vessel:dull", track_id="d",
+                       lat=21.646, lon=69.581, suspicion=0.0,
+                       identity_known=True)
+    plan = _plan([cheap, earned], cams,
+                 imaged_at={"vessel:dull": T_DAY.timestamp()},
+                 verdict_state={"vessel:dull": "unknown"})
+    assert [t.subject_id for t in plan.taskings] == ["vessel:hot"], (
+        "the one camera must go to the target that cleared the floor")
+    assert plan.counters["opportunistic_looks"] == 0
+
+
+def test_a_settled_hull_is_not_given_a_look_just_because_a_camera_is_free():
+    """A spare camera is free; a frame an operator may have to read is not.
+
+    The bound exists because repetition stopped being evidence, and an
+    opportunistic fill that ignored it would hand back the 130 looks it was
+    written to prevent.
+    """
+    from maritime_isr.eo.cue import MAX_LOOKS_PER_VERDICT
+
+    cams = [_camera()]
+    done = _candidate(subject_id="vessel:done", track_id="x",
+                      lat=21.645, lon=69.58, suspicion=0.0,
+                      identity_known=True)
+    plan = _plan([done], cams,
+                 imaged_at={"vessel:done": T_DAY.timestamp()},
+                 verdict_state={"vessel:done": "contradicted"},
+                 classified_looks={"vessel:done": MAX_LOOKS_PER_VERDICT})
+    assert plan.taskings == []
+    assert plan.counters["idle_camera_slots"] == 1
 
 
 def test_the_scheduler_survives_a_picture_far_larger_than_the_network():
@@ -1048,6 +1205,40 @@ def test_the_declared_class_is_found_under_the_canonical_node_id():
         "a capture bound to the canonical node must find her declared class")
 
 
+def test_the_authored_liars_actually_broadcast_the_lie():
+    """The corpus has to contain a lie before a camera can catch one.
+
+    `DECLARED_CLASS_OVERRIDES` is written in cast keys (`eo_false_class`) and
+    both readers look it up by entity id (`vessel:eo_false_class`). Merged
+    un-keyed, every lookup missed, every authored liar broadcast the truth about
+    herself, and the rule was correct to stay silent on a corpus that no longer
+    held a single misdeclaration — a green unit suite over an empty premise,
+    which is exactly the failure section 6 of this file exists for.
+
+    Checked at the cast, not at the corpus: this is a property of the world the
+    generator builds, and it should fail here in a second rather than after a
+    twenty-minute pipeline run.
+    """
+    from maritime_isr.scenario.cast import (DECLARED_CLASS_OVERRIDES,
+                                            build_vessels, entity_id)
+    from maritime_isr.scenario.profile import CorpusProfile
+    from maritime_isr.scenario.world import ScenarioWorld
+
+    world = ScenarioWorld.new(7, CorpusProfile.load())
+    build_vessels(world)
+    assert DECLARED_CLASS_OVERRIDES, "the fixture is empty"
+    for key, declared in DECLARED_CLASS_OVERRIDES.items():
+        vid = entity_id(key)
+        assert world.declared_class_overrides.get(vid) == declared, (
+            f"{key} does not broadcast {declared!r} — the override never "
+            f"reached the id space the identity writer reads")
+        # And it must actually differ from the steel, or the scenario is a hull
+        # telling the truth and there is nothing for a camera to contradict.
+        assert world.vessels[vid].vessel_class != declared or key.endswith(
+            "class_cousin"), (
+            f"{key} declares what she is, so nothing is being tested")
+
+
 def test_a_capture_on_an_unnamed_contact_is_evidence_and_not_an_accusation():
     """A target that declared nothing cannot have lied about it.
 
@@ -1060,6 +1251,130 @@ def test_a_capture_on_an_unnamed_contact_is_evidence_and_not_an_accusation():
     store = _store()
     caps = [_capture_row(i, subject="contact:radar:SYN-A:4") for i in range(3)]
     assert detect_imagery_mismatch(store, caps, [], source_ref="t") == []
+
+
+def test_two_agreeing_looks_out_of_a_hundred_are_not_corroboration():
+    """The rule the false positive walked through, stated as a test.
+
+    An honest hull parked inside one station's arc collected 130 looks. The
+    classifier is noisy by design, so it returned a scatter of types, and two of
+    the 130 landed on the same wrong family. Under a bare count of two that is
+    an accusation; over a hundred and thirty looks it is arithmetic.
+
+    Two looks agreeing in error is one in a hundred thousand *per pair*. A
+    hundred and thirty looks hold 8,385 pairs. The count was always a claim
+    about a rate, and this is what happens when a rate is enforced as an
+    absolute.
+    """
+    from maritime_isr.anomaly.library import (detect_imagery_mismatch,
+                                              vessel_node_id)
+
+    store = _store()
+    identities = [dict(vessel_id="vessel:liar", vessel_class="fishing")]
+    node = vessel_node_id("vessel:liar")
+
+    # 128 looks agreeing with what she declares, two disagreeing.
+    caps = [_capture_row(i, subject=node, imaged_type="fishing_vessel",
+                         families="fishing") for i in range(128)]
+    caps += [_capture_row(1000 + i, subject=node, imaged_type="tanker",
+                          families="tanker") for i in range(2)]
+    assert detect_imagery_mismatch(store, caps, identities,
+                                   source_ref="t") == [], (
+        "a hull the camera agreed with 128 times has not been contradicted")
+
+    # The same two contradictions, on a hull the camera only ever read twice.
+    few = [_capture_row(1000 + i, subject=node, imaged_type="tanker",
+                        families="tanker") for i in range(2)]
+    assert len(detect_imagery_mismatch(store, few, identities,
+                                       source_ref="t")) == 1, (
+        "the evidence that fires on two looks must still fire on two looks")
+
+
+def test_a_hull_contradicted_on_most_of_her_looks_still_fires():
+    """The share test must not cost the findings the area exists to make.
+
+    The authored liars image as what they are on most of their decisive looks —
+    that is what being a different ship than you declare means. A share rule
+    that suppressed them would be trading the true positives for the false one,
+    which is the trade the corroboration comment already refuses.
+    """
+    from maritime_isr.anomaly.library import (detect_imagery_mismatch,
+                                              vessel_node_id)
+
+    store = _store()
+    identities = [dict(vessel_id="vessel:liar", vessel_class="fishing")]
+    node = vessel_node_id("vessel:liar")
+    caps = [_capture_row(i, subject=node, imaged_type="tanker",
+                         families="tanker") for i in range(7)]
+    caps += [_capture_row(100 + i, subject=node, imaged_type="fishing_vessel",
+                          families="fishing") for i in range(3)]
+    fired = detect_imagery_mismatch(store, caps, identities, source_ref="t")
+    assert len(fired) == 1, (
+        "seven contradictions against three agreements is a contradiction")
+
+
+def test_the_look_bound_survives_a_stage_boundary():
+    """A memory that resets between calls is not memory.
+
+    A window longer than one plan is scheduled as consecutive `plan_cueing`
+    calls. The bound on how many classifiable looks one verdict is worth lived
+    in a dict local to each call, and the pipeline's stages are three slots
+    long, so the counter never reached three and the bound had no effect on a
+    run of a thousand taskings. It is only a bound if it crosses the boundary.
+    """
+    from maritime_isr.eo.cue import MAX_LOOKS_PER_VERDICT
+
+    cams = [_camera()]
+    hull = _candidate(subject_id="vessel:seen", track_id="s",
+                      lat=21.645, lon=69.58, suspicion=0.0,
+                      identity_known=True)
+    last_week = (T_DAY - timedelta(days=5)).timestamp()
+    state = {"vessel:seen": "contradicted"}
+
+    unbounded = _plan([hull], cams, imaged_at={"vessel:seen": last_week},
+                      verdict_state=state)
+    assert [t.subject_id for t in unbounded.taskings] == ["vessel:seen"], (
+        "an unsettled contradiction must still buy a corroborating look")
+
+    settled = _plan([hull], cams, imaged_at={"vessel:seen": last_week},
+                    verdict_state=state,
+                    classified_looks={"vessel:seen": MAX_LOOKS_PER_VERDICT})
+    assert settled.taskings == [], (
+        "a hull already read three times has nothing a fourth look resolves")
+    assert settled.counters["below_priority_floor"] >= 1
+
+
+def test_a_settled_hull_with_real_suspicion_keeps_her_camera():
+    """The bound must free slots without blinding the loop.
+
+    Once the imagery question is answered, a fourth photograph resolves nothing
+    *about her declared type* — but a hull something else has flagged is still
+    worth watching, and for that reason, not this one. Suspicion carries her,
+    which is the term that should.
+    """
+    from maritime_isr.eo.cue import MAX_LOOKS_PER_VERDICT
+
+    cams = [_camera()]
+    flagged = _candidate(subject_id="vessel:hot", track_id="h",
+                         lat=21.645, lon=69.58, suspicion=0.8,
+                         identity_known=True)
+    plan = _plan([flagged], cams,
+                 imaged_at={"vessel:hot": (T_DAY - timedelta(days=5)).timestamp()},
+                 verdict_state={"vessel:hot": "contradicted"},
+                 classified_looks={"vessel:hot": MAX_LOOKS_PER_VERDICT})
+    assert [t.subject_id for t in plan.taskings] == ["vessel:hot"], (
+        "suspicion, not an exhausted information term, keeps a camera on her")
+
+
+def test_the_plan_carries_its_look_counts_out_for_the_next_call():
+    """The caller cannot feed the bound forward if the plan does not report it."""
+    cams = [_camera()]
+    hull = _candidate(subject_id="vessel:seen", track_id="s",
+                      lat=21.645, lon=69.58, suspicion=0.0,
+                      identity_known=True)
+    plan = _plan([hull], cams)
+    assert plan.classified_looks.get("vessel:seen", 0) >= 1, (
+        "a classifiable look must be counted where the caller can read it")
 
 
 def _store():
@@ -1192,3 +1507,137 @@ def test_the_recommendation_does_not_claim_a_camera_this_system_lacks():
     cap = ACTIONS["cue_eo_camera"]["capability"]
     assert "Partly built" in cap
     assert "no camera" in cap.lower()
+
+
+# ==========================================================================
+# 8. the corpus outcome — the section that would have caught the silence
+# ==========================================================================
+#
+# Area 5 shipped with 47 unit tests, all green, while `imagery_type_mismatch`
+# fired **zero** times on the corpus. Nothing raised, nothing failed; the loop
+# ran end to end, landed a thousand captures, and produced no finding. Every
+# other area in this project learned the same lesson the same way — the count
+# against the answer key is what exposes a rule that has gone quiet, and no
+# amount of unit testing substitutes for it.
+#
+# These read the landed corpus and skip when there is none, like the fixtures
+# in `test_radar_classification.py`. Reading `scenario_truth` here is
+# legitimate and required: this is the evaluation harness, running after the
+# pipeline, which CLAUDE.md §8 mandates on every model change. No detector sees
+# it.
+
+def _o_truth():
+    """The authored group-O truth rows, or a skip.
+
+    Read straight off the landed partitions with `read_table`, **not** through
+    `api.reader`, which deliberately does not register `scenario_truth` (ADR-019
+    — the serving layer must never be able to see the answer key). Asking the
+    reader for it returns "no such table" whether or not it was generated, so
+    these three tests skipped silently on a corpus that had the truth rows all
+    along, and the accounting they exist to do was never done.
+    """
+    from maritime_isr.api import graph_service as gsvc
+    from maritime_isr.ingest.landing import read_table
+
+    if not gsvc.graph_exists():
+        pytest.skip("no landed corpus — run tools/run_scenario_pipeline.py")
+    rows = [x for x in read_table("scenario_truth")
+            if str(x.get("scenario_id", "")).startswith("O")]
+    if not rows:
+        pytest.skip("no group-O scenarios in this corpus")
+    return rows
+
+
+def _imagery_alerts():
+    from maritime_isr.api import graph_service as gsvc
+    if not gsvc.graph_exists():
+        pytest.skip("no graph — run tools/run_scenario_pipeline.py")
+    with gsvc.open_graph() as store:
+        return [a for a in store.alerts()
+                if a.get("rule") == "imagery_type_mismatch"]
+
+
+def test_every_imagery_alert_is_accounted_for_against_the_answer_key():
+    """No alert without a truth row behind it.
+
+    A flood is a bug and zero is a worse bug, but the failure this catches is
+    the third one: alerts that are neither. Each `imagery_type_mismatch` must
+    name a hull some scenario authored to be caught, or it is a false
+    accusation and the precision claim is void (ADR-004).
+    """
+    truth = _o_truth()
+    expected = {e for t in truth if t.get("expected_detection")
+                for e in (t.get("entity_ids") or "").split(",") if e}
+    alerts = _imagery_alerts()
+    subjects = {str(a.get("subject", "")) for a in alerts}
+
+    unaccounted = {s for s in subjects
+                   if not any(e.split(":")[-1] in s for e in expected)}
+    assert not unaccounted, (
+        f"{len(unaccounted)} imagery alert(s) name hulls no scenario authored "
+        f"to be caught: {sorted(unaccounted)[:5]}")
+
+
+def test_no_imagery_decoy_is_ever_accused():
+    """The decoys are the precision measurement.
+
+    O3 is a bulker declaring general cargo — both are cargo under the AIS
+    ship-type standard, so two sources classifying her differently is a
+    quibble, not a lie. O4 never comes inside camera range. O5 passes at night.
+    A rule that fires on any of them is measuring its own confusion.
+    """
+    truth = _o_truth()
+    decoys = {e for t in truth if not t.get("expected_detection")
+              for e in (t.get("entity_ids") or "").split(",") if e}
+    if not decoys:
+        pytest.skip("no imagery decoys in this corpus")
+    subjects = {str(a.get("subject", "")) for a in _imagery_alerts()}
+    for d in decoys:
+        key = d.split(":")[-1]
+        assert not any(key in s for s in subjects), (
+            f"decoy {d} was accused — a decoy that fires is worse than no "
+            f"decoy, because it turns a precision figure into a claim about "
+            f"nothing")
+
+
+def test_the_camera_reaches_the_hulls_the_area_exists_to_catch():
+    """**The silence detector.** Every authored true anomaly must at least be
+    photographed well enough to have a type read.
+
+    Deliberately weaker than "must alert": the corroboration rule needs two
+    agreeing looks and a corpus may honestly not offer two, so demanding an
+    alert would fail for a reason that is not a defect. But a hull the scenario
+    placed inside camera range, which the loop never once photographs well
+    enough to classify, is the loop not working — and that is exactly the state
+    Area 5 shipped in, undetected, because nothing asserted it.
+
+    O4 is excluded by name: she is the decoy authored to stay out of reach, so
+    zero usable looks at her is the correct outcome and the only one.
+    """
+    import duckdb
+
+    truth = _o_truth()
+    want = {e.split(":")[-1] for t in truth if t.get("expected_detection")
+            for e in (t.get("entity_ids") or "").split(",") if e}
+    want.discard("eo_beyond_reach")
+    if not want:
+        pytest.skip("no imageable true anomalies authored")
+
+    con = duckdb.connect()
+    try:
+        table = ("read_parquet('data/conformed/eo_capture/**/*.parquet')")
+        rows = con.execute(
+            f"SELECT subject_id, count(*) FILTER (WHERE imaged_type IS NOT NULL)"
+            f" FROM {table} GROUP BY 1").fetchall()
+    except Exception:                                          # noqa: BLE001
+        pytest.skip("no eo_capture landed")
+    finally:
+        con.close()
+
+    classified = {s: n for s, n in rows if n}
+    for key in sorted(want):
+        assert any(key in s for s in classified), (
+            f"{key} was never photographed well enough to read a type. The "
+            f"scenario places her inside camera range, so this is the cueing "
+            f"loop failing to reach the hull the area exists for, not a "
+            f"property of the corpus")

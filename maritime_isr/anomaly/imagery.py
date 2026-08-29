@@ -238,9 +238,14 @@ def check_declared_type(*, declared_class: Optional[str], verdict,
     conf = min(0.95, float(verdict.confidence) * (0.6 + 0.4 * float(quality)))
     return ImageryFinding(
         check, CONTRADICTION, conf,
-        f"She broadcasts that she is a {_pretty(declared_class)}, which is a "
-        f"{d_family} under the AIS ship-type standard. The camera images her "
-        f"as a {_pretty(imaged)}, which this model can place in "
+        # The family is named as a category, not with an article: for a hull
+        # broadcasting `fishing` the two words coincide, and "she is a fishing,
+        # which is a fishing under the AIS ship-type standard" was the headline
+        # sentence of the whole area. This is the line an operator reads to
+        # decide whether to act.
+        f"She broadcasts that she is a {_pretty(declared_class)}, which the "
+        f"AIS ship-type standard places in the {d_family} family. The camera "
+        f"images her as a {_pretty(imaged)}, which this model can place in "
         f"{' or '.join(sorted(i_families))} and nothing else, at confidence "
         f"{float(verdict.confidence):.2f} in the {band} band. A hull does not "
         f"change shape between messages.",

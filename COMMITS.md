@@ -1296,3 +1296,102 @@ ledger whose largest bucket is `no_camera_in_reach`; stage 7d reports
 because the rule needs a *declared* identity to contradict. A count in the dozens
 means the vocabulary is being compared at a finer resolution than the AIS
 ship-type family, and the merchant fleet is about to arrive on the queue.
+
+---
+
+## Area 5 — five defects that presented as silence, and one that presented as an alert
+
+`maritime_isr/scenario/cast.py`, `maritime_isr/eo/cue.py`,
+`maritime_isr/anomaly/library.py`, `maritime_isr/anomaly/imagery.py`,
+`tools/run_scenario_pipeline.py`, `tests/test_area5.py`
+
+Area 5 shipped with a green unit suite, ran end to end, and produced exactly one
+`imagery_type_mismatch` on the corpus. That alert was a **false positive**, and
+the two hulls the area was authored to catch had never fired. Both halves are
+now fixed and the corpus reports **2 alerts, both authored, none else**.
+
+**The silence had five causes, each hiding the one behind it.**
+
+1. **The corpus held no lie.** `DECLARED_CLASS_OVERRIDES` is keyed by cast key
+   (`eo_false_class`); both readers look it up by entity id
+   (`vessel:eo_false_class`). Merged un-keyed, every lookup missed and every
+   authored liar broadcast the truth about herself — the rule was correct to say
+   nothing. The third time this area has been silenced by two id spaces for one
+   hull. `build_vessels` re-keys and now **raises** on an override that names
+   nobody, because an override that lands on no one fails silently.
+2. **The camera cannot size a hull an AIS track reported.** Pixels-on-target is
+   length over range, and only radar measures length, so 44% of candidate
+   positions carried none and were refused as unobservable. O1 was a candidate
+   above the floor in ten consecutive slots with a camera free, and was imaged in
+   the two where the nearest fix happened to be the radar one. Length is a
+   property of the hull, so it is merged across the tracks that collapse onto her.
+3. **The loop closed at the stage boundary, not at the classifier's latency.**
+   O1's first look contradicted her at 08:15; the scheduler did not learn it
+   until the stage ended, reset her staleness clock on the look it had just
+   taken, and dropped her to 0.165 against a 0.30 floor for six slots in which
+   she was in clear view. Stages are one slot now — in a deployment the loop's
+   latency is the time to read an image, which is seconds.
+4. **The urgency lookahead stopped at the plan's last slot**, which at one slot a
+   stage makes every candidate maximally urgent. It now looks ahead in time, and
+   is scaled by information gain: urgency measures what is about to be lost, and
+   nothing is lost by missing a question already answered.
+5. **The pipeline reset the staleness clock across the boundary even for an
+   unsettled contradiction**, undoing at the seam the withholding that exists
+   inside `plan_cueing` to supply the corroborating second look.
+
+**The false positive was corroboration stated as an absolute.** An honest,
+stationary hull sat in one station's arc for five days and collected **130
+classifiable looks**; the classifier is noisy by design, two of them agreed on
+`container`, and the rule accused her. "Two agreeing looks" is a claim about a
+rate — one in a hundred thousand *per pair* — and 130 looks hold 8,385 pairs.
+Fixed at both ends because they fail differently: `MIN_CONTRADICTED_SHARE = 0.5`
+requires the agreeing looks to be a majority of the looks that decided anything
+(this holds however the images arrived), and `MAX_LOOKS_PER_VERDICT = 3` in
+`eo.cue` stops re-imaging a settled hull (this returns the wasted slots). The
+bound also had to be made reachable: it lived in a dict local to each
+`plan_cueing` call while stages were three slots long, so it never reached three
+and had **no effect at all** on a run of a thousand taskings.
+
+**Capacity: the floor is an opportunity cost, not a quality bar.** 115,028
+camera-slots were spent on nothing while 46,527 reachable targets were refused
+for scoring under 0.30. Below-floor targets now stay in the same global
+assignment charged a penalty larger than any value spread, so they take only a
+camera nothing else could use; they are marked `opportunistic` on the tasking and
+counted separately, so a fill cannot inflate the utilisation figure that is meant
+to measure demand. This is safe only because of the share rule above: under a
+bare count, more looks meant more chances to accuse an honest hull; under a
+share, an extra look makes an accusation harder.
+
+**No threshold was moved to make a count come out right.**
+`MIN_MISMATCH_QUALITY` (0.45), `MIN_MISMATCH_CONFIDENCE` (0.62),
+`PRIORITY_FLOOR` (0.30), `MIN_CLASSIFY_QUALITY` (0.35) and
+`MIN_CORROBORATING_CAPTURES` (2) are all unchanged.
+
+Also: three corpus-accounting tests had been **skipping silently** because they
+asked `api.reader` for `scenario_truth`, which ADR-019 deliberately does not
+register there — "no such table" read as "no corpus". They read the partitions
+directly now. And the headline sentence an operator reads said "she is a fishing,
+which is a fishing under the AIS ship-type standard"; the family is now named as
+a category rather than with an article.
+
+Verify:
+
+```
+python -m maritime_isr.cli scenario generate --seed 7
+rm -f data/graph.sqlite && python tools/run_scenario_pipeline.py
+python -m pytest tests/test_area5.py -q
+```
+
+*Success:* stage 7c reports candidate positions taking their length from another
+track of the same hull, a utilisation split into "earned their slot" and "filled
+a camera nothing else could use", and a deferral ledger whose largest bucket is
+`no_camera_in_reach`; stage 7d reports `imagery_type_mismatch` **2 alert(s)**, on
+`eo_false_class` (O1) and `eo_crane_ship` (O2) and no others; the Area 4 rules
+report `paperwork_contradiction` 3, `notification_unmatched` 2,
+`arrival_without_notification` 1. `tests/test_area5.py` runs 62 tests with **no
+skips** — a skip here means the corpus or the graph is missing and the accounting
+did not happen.
+*Failure:* a count of 0 with the decoys also silent means the overrides did not
+land — check `world.declared_class_overrides` is keyed by entity id before
+touching any threshold. A count above 2, or any alert on a hull outside group O,
+means the share rule is not holding and the merchant fleet is next.
