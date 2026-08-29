@@ -105,11 +105,20 @@ ACTIONS: dict[str, dict] = {
         capability="Not built. Radio is Area 6 of the Section-3 brief; this "
                    "system holds no VHF audio and cannot transcribe a reply."),
     "cue_eo_camera": dict(
-        base_priority=85, performed_by="operator",
+        base_priority=85, performed_by="system",
         headline="Point a camera at her and get an image",
-        capability="Not built. Automatic EO cueing and image classification "
-                   "are Area 5 of the Section-3 brief; today a watchkeeper "
-                   "slews the camera by hand."),
+        # **Half built, and the halves have to be named separately** (ADR-037).
+        # The cueing decision, the tagging, the library and the mismatch rule
+        # are real code that runs; the camera is not. Saying "built" would claim
+        # a photograph this system cannot take, and saying "not built" would
+        # hide the part of Area 5 that is actually finished.
+        capability="Partly built (ADR-037). The system decides automatically "
+                   "which track a camera should be pointed at and when, "
+                   "explains the choice, binds the resulting image to the "
+                   "track and alerts where it disagrees with her declared "
+                   "type. There is no camera: every capture is simulated "
+                   "through a named interface and every capture row says so. "
+                   "A watchkeeper still slews a real head by hand."),
     "dispatch_patrol": dict(
         base_priority=70, performed_by="operator",
         headline="Consider tasking a surface unit",

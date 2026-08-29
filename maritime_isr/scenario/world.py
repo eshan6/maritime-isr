@@ -156,6 +156,19 @@ class ScenarioWorld:
     #: "cannot check". Built by `cast.build_registry_attestations`.
     registry_attestations: dict = field(default_factory=dict)
 
+    #: entity_id -> the vessel type this hull **broadcasts**, where that differs
+    #: from the steel she is made of (ADR-037).
+    #:
+    #: The physical class on `SyntheticVessel` decides her dimensions, her
+    #: motion and what a camera would see; this decides only what her AIS static
+    #: message says. Every other hull in the corpus declares what she is, and
+    #: the two are the same value — so this dict is empty except for the Area 5
+    #: scenarios whose entire finding is that the picture and the message
+    #: disagree. Consumed by `land_world` when it writes the `self_reported`
+    #: identity row and by nothing else: a hull cannot broadcast a type in one
+    #: table and a different one in another.
+    declared_class_overrides: dict = field(default_factory=dict)
+
     _next_serial: int = 0
     #: entity_id -> [(t_start, t_end, label)] — the occupancy calendar that
     #: keeps one hull from being in two places at once.

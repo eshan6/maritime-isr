@@ -154,8 +154,15 @@ def _row_for(path: Path, registry, *, is_synthetic: bool) -> dict:
     if is_synthetic:
         from ...scenario.identifiers import SYNTHETIC_SOURCE_ID
         source_id = f"{SYNTHETIC_SOURCE_ID}:{SOURCE_ID}"
+    # **The flag goes in with the source id, not after it.** Setting
+    # `is_synthetic` on the row afterwards left `stamp_envelope` believing this
+    # was a real-source row carrying a synthetic source id — precisely the
+    # drift the check exists to refuse — and it went unnoticed only because the
+    # check did not recognise the `synthetic-scenario:` prefix either. Two
+    # errors cancelling is not agreement.
     stamp_envelope(row, source_id=source_id, source_ref=path.name,
-                   acquired_at=row["received_at"], confidence=None)
+                   acquired_at=row["received_at"], confidence=None,
+                   is_synthetic=bool(is_synthetic))
     row["is_synthetic"] = bool(is_synthetic)
     return row
 

@@ -50,6 +50,14 @@ NODE_TYPES_V1 = [
     # ADR-022 exists to prevent — and would then let a neighbourhood query
     # return a piece of paper as if it were a vessel.
     "notification",
+    # An electro-optical capture (ADR-037). Its own type for the same reason
+    # `notification` has one: it is an *artifact* — a photograph, or in this
+    # build the record of one — and not a ship. Folding it onto the vessel it
+    # depicts would lose the two facts that make it evidence: which camera took
+    # it and when, and that a capture can depict a target nothing can name. It
+    # also lets the graph hold a capture whose frame turned out to be empty,
+    # which is a real answer about a radar track and belongs on the record.
+    "eo_capture",
 ]
 
 # name -> dict(src=[...], dst=[...], half_life_days=float|None, kind=state|event)
@@ -105,6 +113,21 @@ EDGE_TYPES_V1: dict[str, dict] = {
     # because nothing checked. Now both halves exist.
     "loiter-in-zone": dict(src=["vessel", "contact"], dst=["zone"],
                            half_life_days=None, kind="event"),
+    # --- the electro-optical loop (ADR-037) -------------------------------
+    # A photograph WAS taken, so both are events and neither decays: the
+    # picture does not become less true with age, though what it shows may
+    # become less relevant — which is what `eo/cue.py`'s staleness term is for,
+    # and it belongs in the scheduler rather than in a half-life here.
+    #
+    # `depicts` reaches a `contact` as well as a `vessel` on purpose. A camera
+    # slewed onto a radar track nobody can name still took a picture of
+    # something, and that capture is the strongest single thing the system can
+    # offer about her — refusing to record it because the subject has no
+    # identity would discard exactly the case the requirement is about.
+    "depicts":       dict(src=["eo_capture"], dst=["vessel", "contact"],
+                          half_life_days=None, kind="event"),
+    "captured-by":   dict(src=["eo_capture"], dst=["sensor"],
+                          half_life_days=None, kind="event"),
 }
 
 
