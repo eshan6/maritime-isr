@@ -68,6 +68,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional, Sequence
 
 from .camera import EOCamera, CameraView, best_view, view
+from .classify import MIN_CLASSIFY_QUALITY
 
 __all__ = ["CueCandidate", "Tasking", "Deferral", "CuePlan", "plan_cueing",
            "W_SUSPICION", "W_INFORMATION", "W_STALENESS", "PRIORITY_FLOOR",
@@ -531,7 +532,19 @@ def plan_cueing(feed: Callable[[datetime], Sequence[CueCandidate]],
             taken.add(j)
             winners[j] = (i, v)
             pointing[cameras[i].camera_id] = v.bearing_deg
-            imaged[c.subject_id] = now
+            # **A look that cannot answer the question does not count as
+            # having asked it.** `MIN_CAPTURE_QUALITY` (0.20) sits below
+            # `MIN_CLASSIFY_QUALITY` (0.35) on purpose — a dim image still
+            # confirms a target is there, which is worth the slew. But it
+            # yields no type, and resetting the staleness clock on it marked
+            # her imaged and dropped her down the order for good: one useless
+            # look bought permanent freshness. O1 and O2 were each imaged
+            # exactly once, at 0.29 and 0.22, and never revisited, so the
+            # authored mismatch could not fire.
+            #
+            # Presence is recorded either way; only the clock is withheld.
+            if v.quality >= MIN_CLASSIFY_QUALITY:
+                imaged[c.subject_id] = now
             n_imaged[c.subject_id] = n_imaged.get(c.subject_id, 0) + 1
         counters["idle_camera_slots"] += len(cameras) - len(taken)
 
