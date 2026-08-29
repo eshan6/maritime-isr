@@ -109,6 +109,17 @@ CONTEXT_EDGE_TYPES = {
     #: single hull and adds a leaf per gap rather than a relationship between
     #: hulls.
     "gap": ("reported-gap",),
+    #: The electro-optical loop's edges (ADR-037), and **the same failure as
+    #: `reported-gap` above, recurring.** Area 5 landed `depicts` and
+    #: `captured-by` without registering them here, so 1,462 of 2,912 current
+    #: edges — every photograph the system had taken — were in the graph and
+    #: drawable from no view at all. The count test caught it again, which is
+    #: the argument for keeping that test: a new edge type is easy to add and
+    #: easy to forget, and the symptom is a graph that looks complete.
+    #:
+    #: Off by default like the rest: a capture hangs off one hull and adds a
+    #: leaf per photograph rather than a relationship between hulls.
+    "imagery": ("depicts", "captured-by"),
 }
 
 

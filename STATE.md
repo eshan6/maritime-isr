@@ -8,8 +8,31 @@ session. `CLAUDE.md`, `ARCHITECTURE.md`, `DECISIONS.md` are stable contracts;
 > between status buckets, record what was verified vs assumed, log anything now
 > broken, and set "Next up." If you don't update it, the next session starts blind.
 
-**Last updated:** 2026-08-27 (fourth session) — **Area 5 built: the
-electro-optical loop, and six defects that only counting exposed.**
+**Last updated:** 2026-08-29 (fifth session) — **Area 4's extractor hardened
+and verified; Area 5's loop built and running but its detector still silent.**
+
+**Extractor hardening (Area 4).** Measured against labels and value formats the
+generator never writes — the corpus shares one synonym table with the extractor,
+so any accuracy figure taken on it is circular. On that independent fixture set:
+**50.0% -> 99.1% correct, and misattributions 2 -> 0.** The two it was getting
+wrong are the failure that matters, a value landing on the *wrong* field: it read
+`crew_count` as "Owner: BLUEWATER SHIPPING LTD" off a label whose value was empty
+followed by the next label. Corpus-side extraction is unchanged (293 of 295
+resolved, 0 unreadable), which is the right outcome: robustness on unseen forms
+bought without disturbing what already worked. Full suite green.
+
+**Two landing defects, both latent since Area 4 shipped.** `stamp_envelope`
+enforced bare equality on `synthetic-scenario` while `graph.store` and
+`scenario.validate` matched a `synthetic-scenario:` prefix; the three disagreed.
+Area 4 survived only because it set `is_synthetic` *after* stamping and so never
+tripped the check — two errors cancelling, which is not agreement. Area 5 set it
+before and the pipeline died with 487 captures in hand. Both fixed; the invariant
+now actually guards the drift it exists for.
+
+---
+
+**Fourth session** — **Area 5 built: the electro-optical loop, and six defects
+that only counting exposed.**
 
 **0. Area 5 — automating the electro-optical loop (ADR-037).** The requirement
 names four things and only one of them needs pictures: capture without operator
@@ -66,6 +89,28 @@ an image. Nothing under `eo/` may read ground truth and a test asserts it.
 * **Sister ships are not separable in six numbers.** Same-hull distances (median
   0.12) overlap the closest cross-hull pair (0.11), so re-identification works
   only where a hull is distinctive and the margin test refuses otherwise.
+
+**WHAT IS NOT WORKING: `imagery_type_mismatch` fires 0 times on the corpus.**
+Stated first because everything above describes a loop that runs end to end and
+still produces no finding. The pipeline is green, 1,045 captures land, 450 carry
+a type claim, and three of the four imageable O-hulls now get a usable
+photograph — but the authored contradiction O1 does not, so the alert count is
+zero where the answer key says one.
+
+Traced, not guessed. O1 is imaged twice, at 08:05 and 08:15, at an *identical*
+8.588 km and 0.29 quality against a 0.35 classify floor. Her closest approach is
+08:32 at 5.46 km. The scheduler evaluates a frozen position for her and never
+sees her close. It is not the cadence: the interval was cut from 30 to 10
+minutes and she was evaluated at the same stale fix. It is not the priority
+floor: she computes to 0.3150 against 0.30 and is eligible. It is not the camera
+arc: SYN-POR masks 10-100°, she approaches on 206-245°. **It is the candidate
+feed** — `run_eo_loop` samples one candidate per three track fixes from her
+*correlated radar track*, and those positions stop before her close pass. That
+is the next thing to fix and it is a join, like every other defect in this area.
+
+**Nothing was tuned to move this number.** The 0.30 floor, the 0.55 suspicion
+weight and the 0.35 quality floor are all untouched. Lowering any of them fires
+O1 tonight and says nothing about hulls nobody authored.
 
 **Corroboration is the fix for the residual error, not a higher bar.** A wrong
 label and a right one look the same from inside, so raising the confidence gate
@@ -1432,6 +1477,18 @@ earlier 18% was measured against a corpus that was easier than reality.
   of the chain on real AOI data cannot currently be claimed.
 - **`gfw_port_visits` returned exactly 3,000 rows** = exactly 3 pages of 1,000.
   Verify this is a real count and not silent pagination truncation.
+- **The vessel-type model trains on declared class, including known lies.**
+  `gfw_vessel_identity.vessel_class` carries what a hull *broadcasts*, which is
+  right for a registry, and the type model's training fleet is built from it. So
+  Area 5's O-hulls — authored to declare a class their motion contradicts — sit
+  in the training set as a Suezmax labelled "fishing". In the real world every
+  misdeclaring vessel does the same. **Unmeasured, and deliberately so:** the
+  single-split score varies 0.700-0.986 across seeds on one corpus, which
+  swamps any effect five hulls could have, and a change that cannot be measured
+  should not be made and called a fix. Worth measuring properly with the
+  multi-split harness now in `test_coarse_accuracy_clears_its_floor`. Not known
+  to be hurting anything today.
+
 - **WPI unavailable** — NGA returns 503 on every URL variant including files
   known to exist. Publisher-side outage; retry later. `tools/probe_wpi.py`
   finds a working URL when they are back.
