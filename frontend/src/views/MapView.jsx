@@ -276,6 +276,8 @@ export function MapView() {
   const [locate, setLocate] = useState(null);
   //: Has the tracks request come back? Not the same as having tracks.
   const [tracksReady, setTracksReady] = useState(false);
+  //: Why there are no tracks, when the reason is us rather than the sea.
+  const [trackError, setTrackError] = useState(null);
   // **Eighteen of twenty-four layers used to be on at first paint.** Every one
   // of them had been defaulted on for a real reason, each recorded in its own
   // session — "the footprints were the one unambiguously real thing and they
@@ -461,7 +463,12 @@ export function MapView() {
     api.alerts().then((r) => set({ alerts: r.items })).catch(() => {});
     api.tracks({ max_points: 160 })
       .then((r) => { live && setTracks(r.items || []); note("tracks", r.note); })
-      .catch(() => {})
+      // **A failed request is not an empty sea.** This was swallowed, and the
+      // status line then read "no AIS tracks in this window", which is a claim
+      // about the DATA made on the strength of a request that never returned.
+      // The operator gets a blank map and a sentence telling them the blankness
+      // is real. Same class of error as a silent truncation.
+      .catch((e) => { live && setTrackError(String(e?.message || e)); })
       // Settled either way. "Still loading" and "loaded, and she is not in it"
       // look identical from `tracks.length === 0`, and a deep link that cannot
       // tell them apart waits forever on an empty corpus — silently, which is
@@ -907,7 +914,11 @@ export function MapView() {
               ? `${onScreen} of ${movingCount} vessel`
                 + (movingCount === 1 ? "" : "s") + " moving"
                 + (window_.playsWholeCorpus ? "" : " · AIS window")
-              : "no AIS tracks in this window"}
+              : trackError
+                ? `could not load tracks: ${trackError}`
+                : !tracksReady
+                  ? "loading tracks…"
+                  : "no AIS tracks in this window"}
         </span>
       </div>
 
