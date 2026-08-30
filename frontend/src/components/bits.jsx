@@ -1,8 +1,11 @@
 // Small shared presentational pieces. Kept together so the visual language of
 // "finding vs candidate" and "risk" is defined once.
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { api } from "../api.js";
-import { NA, num, riskBand, riskLabel, RISK_COMPONENT_LABEL } from "../lib/format.js";
+import { NA, num, riskBand, riskLabel, RISK_COMPONENT_LABEL,
+         FAMILY_ORDER, familyColor, familyLabel, fmtDateTime,
+         provenanceLine } from "../lib/format.js";
 
 export function NAtext() {
   return <span className="na">{NA}</span>;
@@ -183,5 +186,133 @@ export function RiskDecomposition({ risk }) {
         sum — never a bare number.
       </p>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Find her on the map
+// ---------------------------------------------------------------------------
+
+// Every vessel anywhere in the product carries this. The operator's next
+// question after "who is she and why is she flagged" is almost always "where is
+// she", and until now the only answer was to leave the screen, open the map and
+// hunt — through a picture holding thousands of tracks.
+//
+// **It goes to her last known position when there is no live one, and says
+// which it did.** In the deployed product the AIS feed is live and most hulls
+// have a current fix; the ones worth looking at are frequently the ones that do
+// not, because going dark is the finding. A button that silently showed a
+// six-hour-old position as though it were current would be lying at exactly the
+// moment the operator most needs to know — so the map states the age of the fix
+// on arrival rather than the button pretending it is fresh.
+export function FindOnMap({ id, name, compact = false }) {
+  const nav = useNavigate();
+  if (!id) return null;
+  return (
+    <button
+      className="btn-map"
+      title={`Show ${name || "this vessel"} on the map — her live position, or her last known one if she is not currently reporting`}
+      onClick={(e) => {
+        e.stopPropagation();   // rows are clickable; this is not a row click
+        nav(`/?vessel=${encodeURIComponent(id)}`);
+      }}
+    >
+      <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true">
+        <path d="M8 1.5c-2.5 0-4.5 2-4.5 4.5 0 3.2 4 8.3 4.2 8.5a.4.4 0 0 0 .6 0c.2-.2 4.2-5.3 4.2-8.5 0-2.5-2-4.5-4.5-4.5z"
+              fill="none" stroke="currentColor" strokeWidth="1.4" />
+        <circle cx="8" cy="6" r="1.7" fill="currentColor" />
+      </svg>
+      {compact ? "Map" : "Find on map"}
+    </button>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// The score makeup bar, and the legend that makes it mean something
+// ---------------------------------------------------------------------------
+
+// One vessel's score, divided between the factors that produced it.
+//
+// Segments are laid out in a fixed family order rather than by size, so two
+// rows can be compared by eye: the same colour is always in the same place. The
+// track behind them is the full 0–1 scale, so a bar that fills a third of the
+// row is a score of about 0.33 — the length means something on its own, which a
+// bar normalised to the top-scoring row would not.
+export function MakeupBar({ factors, score }) {
+  const fs = [...(factors || [])].sort(
+    (a, b) => FAMILY_ORDER.indexOf(a.family) - FAMILY_ORDER.indexOf(b.family));
+  return (
+    <span className="mkbar" role="img"
+          aria-label={`score ${(score || 0).toFixed(2)} of 1, made up of `
+            + fs.map((f) => `${f.kind.replace(/_/g, " ")} ${f.points.toFixed(2)}`).join(", ")}>
+      {fs.map((f) => (
+        <i key={f.factor_id}
+           style={{ width: `${100 * (f.points || 0)}%`, background: familyColor(f.family) }}
+           title={`${familyLabel(f.family)} — ${f.kind.replace(/_/g, " ")}: `
+                  + `${f.points.toFixed(3)} of ${(score || 0).toFixed(3)}`} />
+      ))}
+      <i className="mkbar-rest" />
+    </span>
+  );
+}
+
+// Shown once above a list, never per row.
+export function FamilyLegend({ families }) {
+  const shown = FAMILY_ORDER.filter((f) => !families || families.has(f));
+  if (shown.length === 0) return null;
+  return (
+    <div>
+      <div className="muted t-meta">
+        The bar is the score out of 1, split into the factors that built it.
+        Colour is the kind of evidence a factor came from; length is the points
+        it contributed. A short bar is a low score, not a small chart.
+      </div>
+      <div className="legend">
+        {shown.map((f) => (
+          <span className="legend-item" key={f}>
+            <span className="legend-swatch" style={{ background: familyColor(f) }} />
+            {familyLabel(f)}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Evidence
+// ---------------------------------------------------------------------------
+
+// One evidence item is a block, not a line.
+//
+// The fact goes first, at reading weight. Under it, when it happened, and who
+// says so — and, where this system derived the claim rather than receiving it,
+// what it did to get there. That last line is the one that used to read
+// `source graph / events`, which named a table inside this repository: an
+// operator cannot audit a folder, and a product whose whole proposition is
+// traceable trust cannot cite one.
+export function EvidenceList({ items }) {
+  if (!items || items.length === 0) return null;
+  return (
+    <ul className="evi">
+      {items.map((e, i) => {
+        const { origin, derivation } = provenanceLine(e.provenance);
+        return (
+          <li key={i}>
+            <div className="evi-fact">{e.label}</div>
+            {e.occurred_at && (
+              <div className="evi-when">{fmtDateTime(e.occurred_at)}</div>
+            )}
+            <div className="evi-src">
+              Source: <span className="who">{origin}</span>
+              {e.confidence != null && (
+                <span className="muted"> · confidence {num(e.confidence, 2)}</span>
+              )}
+            </div>
+            {derivation && <div className="evi-derived">{derivation}</div>}
+          </li>
+        );
+      })}
+    </ul>
   );
 }

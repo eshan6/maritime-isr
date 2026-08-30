@@ -52,9 +52,32 @@ def _na(v, suffix: str = "") -> str:
 
 
 def _fmt_ts(iso: Optional[str]) -> str:
+    """DD/MM/YYYY HH:MM UTC — the same format the interface uses.
+
+    The report is the artefact that leaves the building: it is emailed, printed
+    and filed, and it is read by people who never saw the screen it came from.
+    A document that dates an incident differently from the console that raised
+    it invites exactly one question — which of the two is right — and there is
+    no good answer to it. So the format is fixed here to match `format.js`,
+    rather than left as the ISO string the database happens to hold.
+
+    Times stay UTC and keep saying so. A maritime position report is made in
+    UTC; re-stamping it in whatever zone the server sits in would change the
+    claim.
+    """
     if not iso:
         return '<span class="na">not available</span>'
-    return _esc(str(iso)[:19].replace("T", " ") + "Z")
+    s = str(iso)
+    try:
+        d = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        # An unparseable stamp is shown as it was stored rather than dropped:
+        # a malformed timestamp is a data defect somebody needs to see, and
+        # silently blanking it hides the defect instead of the bad value.
+        return _esc(s)
+    if d.tzinfo is not None:
+        d = d.astimezone(timezone.utc)
+    return _esc(f"{d.day:02d}/{d.month:02d}/{d.year} {d.hour:02d}:{d.minute:02d} UTC")
 
 
 def _num(v, digits: int = 1, suffix: str = "") -> str:

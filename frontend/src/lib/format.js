@@ -16,17 +16,99 @@ export function num(v, digits = 1, suffix = "") {
   return suffix ? `${s}${suffix}` : s;
 }
 
+// Dates are DD/MM/YYYY across the whole product, and the whole product means
+// every surface: tables, evidence lists, alert cards, exported reports.
+//
+// Two reasons it is one function and not a call to `toLocaleDateString`. The
+// operator's browser locale is not the operator's convention — a laptop shipped
+// with en-US renders 03/08 as the third of August to the machine and the eighth
+// of March to the watchkeeper reading it, and neither of them is told. And a
+// format that changes with the viewer makes two people looking at the same
+// incident report disagree about when it happened. Fixed format, stated once.
+//
+// Times stay UTC and keep the Z. Maritime work is done in UTC and a local-time
+// stamp on a position report is a different claim from the one the sensor made.
 export function fmtDate(iso, withTime = false) {
   if (!iso) return null;
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return String(iso);
-  const date = d.toISOString().slice(0, 10);
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const date = `${dd}/${mm}/${d.getUTCFullYear()}`;
   if (!withTime) return date;
-  return `${date} ${d.toISOString().slice(11, 16)}Z`;
+  const hh = String(d.getUTCHours()).padStart(2, "0");
+  const mi = String(d.getUTCMinutes()).padStart(2, "0");
+  return `${date} ${hh}:${mi}Z`;
 }
 
 export function fmtDateTime(iso) {
   return fmtDate(iso, true);
+}
+
+// ---------------------------------------------------------------------------
+// Evidence families — the one categorical palette in the product
+// ---------------------------------------------------------------------------
+//
+// Six families, a fixed hue each, assigned in this order and never cycled or
+// re-assigned by rank. Colour follows the family, so a filter that changes which
+// families are on screen never repaints the survivors — the blue block means
+// "motion" on every row of every screen or it means nothing.
+//
+// The previous mapping reused the interface's own semantic colours: `--amber`
+// (#9a6300, a brown) for identity and `--red` (#b0221b) for network. Two
+// problems, and the visible one was the smaller. Brown beside red is a poor
+// pairing, but red is also the product's *status* colour — it means risk, on
+// badges, on risk pills, on the graph canvas. Spending it as "category three"
+// meant a red block on a score bar and a red badge beside it were the same red
+// saying two unrelated things. Status colours stay reserved.
+//
+// This set is validated rather than chosen by eye: worst adjacent pair is
+// ΔE 9.1 under protanopia and 19.6 under normal vision (OKLab ×100, against
+// floors of 8 and 15). Three of the six sit under 3:1 contrast on the light
+// surface, which obliges a written label everywhere the colour appears — and
+// every use here has one, on the chip, in the legend, and in the breakdown
+// table. The colour reinforces the label; it never carries identity alone.
+export const FAMILY_COLOR = {
+  motion: "#2a78d6",     // blue
+  identity: "#eb6834",   // orange
+  network: "#1baf7a",    // aqua
+  paperwork: "#eda100",  // yellow
+  imagery: "#e87ba4",    // magenta
+  radio: "#008300",      // green
+};
+
+export const FAMILY_LABEL = {
+  motion: "How she moves",
+  identity: "Who she says she is",
+  network: "Who she is connected to",
+  paperwork: "What she filed",
+  imagery: "What she looks like",
+  radio: "What she transmits",
+};
+
+//: Fixed render order, so segments in a stacked bar are laid out the same way
+//: on every row and two rows can be compared by eye.
+export const FAMILY_ORDER = ["motion", "identity", "network", "paperwork",
+  "imagery", "radio"];
+
+export function familyColor(f) {
+  return FAMILY_COLOR[f] || "#8996a3";
+}
+
+export function familyLabel(f) {
+  return FAMILY_LABEL[f] || (f || "other").replace(/_/g, " ");
+}
+
+// A provenance envelope as one readable line. `origin` and `derivation` are
+// added server-side by `assistant/attribution.py`; older payloads that carry
+// only the raw ids fall back to those rather than rendering nothing, but the
+// raw id is humanised on the way out so a source never reads as a file path.
+export function provenanceLine(prov) {
+  if (!prov) return { origin: "not attributed", derivation: null };
+  const origin = prov.origin
+    || (prov.source_id ? String(prov.source_id).replace(/[_-]/g, " ")
+                       : "not attributed");
+  return { origin, derivation: prov.derivation || null };
 }
 
 // Risk banding — thresholds chosen for a high-precision, sparse corpus.

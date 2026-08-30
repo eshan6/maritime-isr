@@ -14,6 +14,7 @@ import { fmtDate, fmtDateTime, num } from "../lib/format.js";
 import {
   Attribution,
   ExportButton,
+  FindOnMap,
   NAtext,
   ProvChip,
   RiskDecomposition,
@@ -21,7 +22,9 @@ import {
   Value,
 } from "./bits.jsx";
 
-export function VesselPanel({ vesselId, onOpenGraph }) {
+// `showFindOnMap` is false when the panel IS the map's drawer — offering to
+// find her on the map while standing on the map is an action with nowhere to go.
+export function VesselPanel({ vesselId, onOpenGraph, showFindOnMap = true }) {
   const [v, setV] = useState(null);
   const [err, setErr] = useState(null);
 
@@ -173,6 +176,7 @@ export function VesselPanel({ vesselId, onOpenGraph }) {
             available for any vessel rather than only for flagged ones. */}
         <div className="btn-group">
           <ExportButton id={vesselId} primary label="Export incident report" />
+          {showFindOnMap && <FindOnMap id={vesselId} name={v?.name} />}
           <button className="btn btn-sm" onClick={() => onOpenGraph?.(vesselId)}>
             Open graph neighbourhood →
           </button>

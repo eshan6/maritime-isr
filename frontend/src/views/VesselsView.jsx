@@ -5,7 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api.js";
 import { fmtDate, riskBand } from "../lib/format.js";
-import { RiskPill, SanctionsBadge } from "../components/bits.jsx";
+import { FindOnMap, RiskPill, SanctionsBadge } from "../components/bits.jsx";
 
 const COLS = [
   { key: "name", label: "Name" },
@@ -15,6 +15,9 @@ const COLS = [
   { key: "risk_score", label: "Risk", num: true },
   { key: "sanctioned", label: "Sanctions" },
   { key: "last_seen", label: "Last seen" },
+  // Not sortable and not a field — an action. Every vessel surface in the
+  // product carries it, so "where is she" is always one click from her name.
+  { key: "_map", label: "" },
 ];
 
 export function VesselsView() {
@@ -124,6 +127,9 @@ export function VesselsView() {
                     )}
                   </td>
                   <td className="mono muted">{fmtDate(v.last_seen) || "—"}</td>
+                  <td onClick={(e) => e.stopPropagation()}>
+                    <FindOnMap id={v.id} name={v.name} compact />
+                  </td>
                 </tr>
               ))}
               {sorted.length === 0 && (
