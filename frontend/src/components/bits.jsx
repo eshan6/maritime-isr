@@ -4,7 +4,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api.js";
 import { NA, num, riskBand, riskLabel, RISK_COMPONENT_LABEL,
-         FAMILY_ORDER, familyColor, familyLabel, fmtDateTime, labelOf,
+         FAMILY_ORDER, familyColor, familyLabel, fmtDateTime,
          provenanceLine } from "../lib/format.js";
 
 export function NAtext() {
@@ -30,12 +30,12 @@ export function SanctionsBadge({ sanctioned, isFinding, tier }) {
   if (!sanctioned) return null;
   if (isFinding)
     return (
-      <span className="badge badge-finding" title={`Match tier: ${tier || "IMO"}`}>
+      <span className="badge badge-finding" title={`match tier: ${tier || "imo"}`}>
         Sanctions finding
       </span>
     );
   return (
-    <span className="badge badge-candidate" title={`Match tier: ${tier || "name"}`}>
+    <span className="badge badge-candidate" title={`match tier: ${tier || "name"}`}>
       Sanctions candidate
     </span>
   );
@@ -85,8 +85,8 @@ export function RiskPill({ score }) {
 export function Attribution({ source }) {
   if (!source) return null;
   return (
-    <span className="badge badge-neutral" title="Source of this determination">
-      Via {source}
+    <span className="badge badge-neutral" title="source of this determination">
+      via {source}
     </span>
   );
 }
@@ -97,7 +97,7 @@ export function ProvChip({ prov }) {
     .filter(Boolean)
     .join(" ");
   return (
-    <span className="mono muted t-micro" title="Provenance envelope">
+    <span className="mono muted t-micro" title="provenance envelope">
       {bits}
     </span>
   );
@@ -248,7 +248,7 @@ export function MakeupBar({ factors, score }) {
       {fs.map((f) => (
         <i key={f.factor_id}
            style={{ width: `${100 * (f.points || 0)}%`, background: familyColor(f.family) }}
-           title={`${familyLabel(f.family)}. ${labelOf(f.kind)}: `
+           title={`${familyLabel(f.family)}. ${f.kind.replace(/_/g, " ")}: `
                   + `${f.points.toFixed(3)} of ${(score || 0).toFixed(3)}.`} />
       ))}
       <i className="mkbar-rest" />
@@ -305,7 +305,7 @@ export function EvidenceList({ items }) {
             <div className="evi-src">
               Source: <span className="who">{origin}</span>
               {e.confidence != null && (
-                <span className="muted"> · Confidence {num(e.confidence, 2)}</span>
+                <span className="muted"> · confidence {num(e.confidence, 2)}</span>
               )}
             </div>
             {derivation && <div className="evi-derived">{derivation}</div>}

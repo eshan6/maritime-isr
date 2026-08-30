@@ -96,20 +96,7 @@ export function familyColor(f) {
 }
 
 export function familyLabel(f) {
-  return FAMILY_LABEL[f] || sentenceCase((f || "other").replace(/_/g, " "));
-}
-
-// Upper-cases the first letter and leaves the rest alone. Factor kinds, edge
-// types and anomaly types all arrive as snake_case enums and were being printed
-// straight into the interface, so labels and badges began in lower case.
-export function sentenceCase(s) {
-  const t = String(s || "").trim();
-  return t ? t.charAt(0).toUpperCase() + t.slice(1) : t;
-}
-
-// An enum as a label: underscores out, first letter up.
-export function labelOf(s) {
-  return sentenceCase(String(s || "").replace(/_/g, " "));
+  return FAMILY_LABEL[f] || (f || "other").replace(/_/g, " ");
 }
 
 // A provenance envelope as one readable line. `origin` and `derivation` are
@@ -136,7 +123,7 @@ export function riskBand(score) {
 }
 
 export function riskLabel(band) {
-  return { high: "High", elevated: "Elevated", low: "Low", none: "None" }[band];
+  return { high: "High", elevated: "Elevated", low: "Low", none: "-" }[band];
 }
 
 // One label table for both the component rows and the evidence list under
@@ -172,7 +159,7 @@ export const ANOMALY_META = {
 };
 
 export function anomalyLabel(t) {
-  return ANOMALY_META[t]?.label || labelOf(t) || "Anomaly";
+  return ANOMALY_META[t]?.label || t || "Anomaly";
 }
 
 // What each KIND of identity edge actually asserts. `identified-as` is the one
@@ -208,7 +195,7 @@ export function edgeTypeLabel(t, identityKind) {
     "loiter-in-zone": "loitered in zone",
     "duplicate_mmsi": "duplicate MMSI",
   };
-  return m[t] || labelOf(String(t || "").replace(/-/g, " "));
+  return m[t] || (t || "").replace(/[-_]/g, " ");
 }
 
 //: The label for one edge as the API returns it — the shape every caller with a
