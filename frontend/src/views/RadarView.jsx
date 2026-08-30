@@ -31,7 +31,7 @@ const VERDICT = {
   suppressed_static: {
     label: "Suppressed · fixed object",
     tone: "muted",
-    why: "repeat unexplained looks in the same place across many days — a mooring, terminal or platform, not a vessel",
+    why: "Repeat unexplained looks in the same place across many days. A mooring, terminal or platform, not a vessel.",
   },
   suppressed_transient: {
     label: "Suppressed · too brief",
@@ -41,7 +41,7 @@ const VERDICT = {
   suppressed_not_isolated: {
     label: "Suppressed · not isolated",
     tone: "muted",
-    why: "unspent broadcasters sat in the same neighbourhood — the contact is most likely one of them, mis-associated",
+    why: "Unspent broadcasters sat in the same neighbourhood. The contact is most likely one of them, mis-associated.",
   },
   suppressed_coverage: {
     label: "Suppressed · outside AIS reception",
@@ -89,7 +89,7 @@ export function RadarView() {
     <div className="scroll-y">
       <div className="toolbar">
         <div>
-          <div className="eyebrow">Coastal radar — dark contacts</div>
+          <div className="eyebrow">Coastal radar, dark contacts</div>
           <div className="muted t-meta">
             {candidates.length} contact{candidates.length === 1 ? "" : "s"} survived
             the cascade
@@ -110,14 +110,14 @@ export function RadarView() {
       <div className="pad" style={{ maxWidth: 900 }}>
         <ProvenanceNote />
 
-        {error && <div className="notebar">Could not load radar contacts — {error}</div>}
+        {error && <div className="notebar">Could not load radar contacts. {error}</div>}
         {!rows && !error && <div className="empty">Loading…</div>}
         {note && <div className="notebar">{note}</div>}
 
         {rows && !note && candidates.length === 0 && (
           <div className="notebar">
             No radar contact survived the cascade in this corpus. That is a result,
-            not an empty page — turn on the suppressed verdicts to see what was
+            not an empty page. Turn on the suppressed verdicts to see what was
             rejected and why.
           </div>
         )}
@@ -160,7 +160,7 @@ function ProvenanceNote() {
     >
       <b>No live coastal radar feed is connected to this system.</b> The picture
       below is modelled from the same vessel positions as the AIS view, so a
-      radar contact and an AIS track are two views of one modelled ship — which
+      radar contact and an AIS track are two views of one modelled ship. which
       is what makes the correlation measurable at all, and what means every
       figure here describes the model rather than a sensor. Treat it as a
       demonstration of the method, not as a measurement of traffic.
@@ -205,7 +205,7 @@ function ContactCard({ c, compact = false }) {
           k="AIS reception here"
           v={
             c.hearable_conf != null
-              ? `${num(100 * c.hearable_conf, 0)}% — ${
+              ? `${num(100 * c.hearable_conf, 0)}%. ${
                   c.hearable_conf >= 0.5
                     ? "we would have heard a transponder"
                     : "weak, so silence proves little"
@@ -236,7 +236,7 @@ function ContactCard({ c, compact = false }) {
           <b>Transponder went quiet here.</b> Last explained by{" "}
           <span className="mono">MMSI {c.mmsi}</span> at{" "}
           {fmtDateTime(c.went_dark_at)}, position {num(c.went_dark_lat, 4)},{" "}
-          {num(c.went_dark_lon, 4)} — radar held her continuously across the
+          {num(c.went_dark_lon, 4)}. radar held her continuously across the
           transition.
         </div>
       )}

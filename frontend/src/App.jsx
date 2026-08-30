@@ -1,12 +1,29 @@
 import { useEffect, useState } from "react";
 import { NavLink, Navigate, Route, Routes } from "react-router-dom";
 import { api } from "./api.js";
+import { useTheme } from "./lib/theme.js";
 import { MapView } from "./views/MapView.jsx";
 import { VesselsView } from "./views/VesselsView.jsx";
 import { VesselPage } from "./views/VesselPage.jsx";
 import { GraphView } from "./views/GraphView.jsx";
 import { RadarView } from "./views/RadarView.jsx";
 import { WatchView } from "./views/WatchView.jsx";
+
+//: Cycles system, light, dark. The label names what is on screen now, and the
+//: title says what the next press does, so the control is legible without
+//: pressing it.
+function ThemeToggle() {
+  const { pref, resolved, setTheme } = useTheme();
+  const next = { system: "light", light: "dark", dark: "system" }[pref];
+  const icon = { light: "\u2600", dark: "\u263E", system: "\u25D0" }[resolved === "dark" && pref === "system" ? "system" : pref];
+  return (
+    <button className="theme-toggle" onClick={() => setTheme(next)}
+            title={`Theme: ${pref}. Press for ${next}.`}>
+      <span aria-hidden="true">{icon}</span>
+      {pref === "system" ? "System" : pref === "dark" ? "Dark" : "Light"}
+    </button>
+  );
+}
 
 export function App() {
   const [health, setHealth] = useState("checking");
@@ -24,7 +41,7 @@ export function App() {
         </div>
         <NavLink to="/" end className={({ isActive }) => `navlink ${isActive ? "active" : ""}`}>Map</NavLink>
         {/* One tab where three used to be. Assistant, Findings and Alerts were
-            substantially the same facts three times over — the assistant
+            substantially the same facts three times over: the assistant
             already ranked every subject and carried the evidence, findings
             re-listed a subset of the same hulls, and alerts held the same
             detections again while being the only place any of it could be
@@ -41,6 +58,7 @@ export function App() {
             API unreachable
           </span>
         )}
+        <ThemeToggle />
       </nav>
       <div className="main">
         <Routes>

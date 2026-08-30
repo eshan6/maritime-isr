@@ -306,7 +306,7 @@ def _gap_classification(r: dict) -> Optional[str]:
         return "intentional AIS disabling (GFW assessment)"
     if v is False:
         return "gap, not assessed as intentional"
-    return "gap — classification unknown"
+    return "Gap, classification unknown"
 
 
 def _event_model(r: dict, kind: str) -> dict:
@@ -366,7 +366,7 @@ def get_track(canonical: str, *, start: Optional[str] = None,
         # A moving vessel with no AIS is expected offshore (ADR-005): terrestrial
         # reception only, so an open-ocean track lands nothing. Say so, don't
         # render an empty panel as an error.
-        note = ("no AIS positions in this window — likely offshore, "
+        note = ("No AIS positions in this window. Likely offshore, "
                 "outside terrestrial receiver coverage (ADR-005)")
     return {
         "vessel_id": canonical,
@@ -444,7 +444,7 @@ def list_tracks(*, max_vessels: int = 200, max_points: int = 140) -> dict:
     if not items:
         note = "no AIS positions (the real corpus has no free AIS)"
     elif truncated:
-        note = (f"TRUNCATED — showing {len(vids):,} of {matched:,} vessels with "
+        note = (f"Truncated. Showing {len(vids):,} of {matched:,} vessels with "
                 "positions, the ones with the most positions first. Raise "
                 "`max_vessels` to see the rest.")
     else:
@@ -521,7 +521,7 @@ def list_events(*, kinds: Optional[list[str]] = None, start: Optional[str] = Non
     if truncated:
         detail = ", ".join(f"{k} {v['returned']:,} of {v['matching']:,}"
                            for k, v in sorted(truncated.items()))
-        note = (f"TRUNCATED — showing {detail}. These are the earliest by start "
+        note = (f"Truncated. Showing {detail}. These are the earliest by start "
                 "time, not a sample of the window. Use /api/events/density for "
                 "counts over the whole corpus.")
     return {"items": out, "count": count, "by_kind": by_kind,
@@ -558,11 +558,11 @@ _RANK = (
     ("gfw_intentional_disabling", 1000,
      "GFW assessed an AIS gap on this hull as intentional disabling"),
     ("multi_registry", 400,
-     "designated by more than one sanctions registry — independent lists agree"),
+     "designated by more than one sanctions registry, independent lists agree"),
     ("imo_match", 200,
      "matched on IMO, a permanent hull number that survives renaming"),
     ("name_disagreement", 100,
-     "sails under a different name than the sanctions listing — the "
+     "sails under a different name than the sanctions listing, the "
      "identity-laundering signature an IMO match exists to catch"),
     ("flag_disagreement", 50,
      "flagged to a different state than the sanctions listing"),
@@ -847,7 +847,7 @@ def _finding_headline(e: dict) -> str:
     if e["dark_gaps"]:
         n = len(e["dark_gaps"])
         bits.append(f"had {n} AIS gap{'' if n == 1 else 's'} that Global "
-                    f"Fishing Watch assessed as intentional disabling — the "
+                    f"Fishing Watch assessed as intentional disabling, the "
                     f"transponder went quiet and GFW judged it deliberate")
     findings = [s for s in e["sanctions"] if s.get("is_finding")]
     if findings:
@@ -862,7 +862,7 @@ def _finding_headline(e: dict) -> str:
             owner = next((s.get("ofac_name") for s in findings
                           if s.get("ofac_name")), "a designated entity")
             bits.append(f"is owned or operated by {owner}, designated under "
-                        f"{regs} — the hull itself is not listed")
+                        f"{regs}, the hull itself is not listed")
         else:
             bits.append(f"matches a sanctions listing on {regs}, on {tier}")
     if any(b["signal"] == "name_disagreement" for b in e["basis"]):
@@ -887,7 +887,7 @@ def _findings_notes(items: list[dict]) -> list[str]:
     if dark:
         notes.append(
             f"{len(dark)} hull(s) carry a GFW intentional-disabling assessment. "
-            "That is GFW's finding, carried through with attribution — we did "
+            "That is GFW's finding, carried through with attribution, we did "
             "not detect it. Our own dark-vessel detection needs SAR contacts "
             "matched against AIS tracks and has not produced a result on real "
             "data (CLAUDE.md §5).")
@@ -978,7 +978,7 @@ def _window_note(window: dict, motion: dict) -> Optional[str]:
     if not window["start"]:
         return None                   # nothing landed at all; the client says so
     if not motion["motion_start"]:
-        return ("no AIS positions landed — the scrubber can move the clock but "
+        return ("No AIS positions landed. The scrubber can move the clock but "
                 "has no vessel tracks to animate (ADR-005: there is no free "
                 "real AIS).")
     span = _span_days(motion["motion_start"], motion["motion_end"])
@@ -986,7 +986,7 @@ def _window_note(window: dict, motion: dict) -> Optional[str]:
     if span is None or whole is None or whole - span < 1:
         return None
     return (f"the scrubber plays the AIS window ({motion['motion_start'][:10]} "
-            f"to {motion['motion_end'][:10]}, {span:.0f} days) — the corpus "
+            f"to {motion['motion_end'][:10]}, {span:.0f} days), the corpus "
             f"itself reaches back to {window['start'][:10]} ({whole:.0f} days), "
             f"but those earlier days hold no positions to move.")
 
@@ -1021,7 +1021,7 @@ def list_detections(*, limit: int = 5000) -> dict:
     with open_reader() as reader:
         if not reader.has("scenario_detections"):
             return {"items": [], "count": {"real": 0, "synthetic": 0},
-                    "note": "no detection table landed — no SAR scene has been "
+                    "note": "No detection table landed. No SAR scene has been "
                             "processed (Phase 1 deferred, ADR-017)"}
         rows = reader.rows(
             f"SELECT * FROM scenario_detections ORDER BY ts NULLS LAST "
@@ -1045,7 +1045,7 @@ def list_detections(*, limit: int = 5000) -> dict:
              "synthetic": sum(1 for d in items if d["is_synthetic"])}
     note = None
     if count["real"] == 0 and count["synthetic"]:
-        note = ("all contacts are synthetic — no real SAR scene has been "
+        note = ("All contacts are synthetic. No real SAR scene has been "
                 "processed. An unmatched contact is not by itself a dark "
                 "vessel: that requires demonstrated AIS reception at the "
                 "position (ADR-005).")
@@ -1116,7 +1116,7 @@ def event_density(*, res: int = 4, kinds: Optional[list[str]] = None,
              "synthetic": sum(c["synthetic"] for c in items)}
     note = None
     if missing_h3:
-        note = (f"{', '.join(sorted(set(missing_h3)))} carry no {col} — those "
+        note = (f"{', '.join(sorted(set(missing_h3)))} carry no {col}, those "
                 "rows were landed before ADR-015 and are NOT counted here. "
                 "Run `python tools/restamp_h3.py` to recompute the missing "
                 "resolutions from lat/lon.")
@@ -1338,7 +1338,7 @@ def _stats_notes(alerts: dict, length_have: int, length_total: int,
     total_alerts = alerts["real"] + alerts["synthetic"]
     notes.append(
         f"{total_alerts} alert(s) total ({alerts['real']} real, "
-        f"{alerts['synthetic']} scenario) — the queue is deliberately short and "
+        f"{alerts['synthetic']} scenario), the queue is deliberately short and "
         f"high-signal, not a busy feed.")
     if length_total:
         notes.append(
@@ -1408,7 +1408,7 @@ def list_radar_contacts(limit: int = 500, status: str | None = None) -> dict:
         rows = []
     if not rows:
         return {"count": {"real": 0, "synthetic": 0}, "items": [],
-                "note": ("no landed radar correlation — run "
+                "note": ("no landed radar correlation, run "
                          f"`{CLI} radar correlate --write`")}
     if status != "all":
         rows = [r for r in rows if r.get("status") == "dark_candidate"]
@@ -1569,7 +1569,7 @@ def _zone_note(missing: list[str]) -> Optional[str]:
     if not missing:
         return None
     return ("Not loaded: " + ", ".join(missing) + ". These are statutory "
-            "limits and this system will not derive or transcribe them — load "
+            "limits and this system will not derive or transcribe them, load "
             f"a published file with `{CLI} ingest zones --path <file>`. "
             "Until then any analysis that needs them is idle, not clean.")
 
@@ -1644,7 +1644,7 @@ def zone_vessels(zone_id: str, start: Optional[str] = None,
     censored = sum(1 for d in out if d["entry_censored"])
     note = None
     if basis.startswith("computed"):
-        note = ("Computed on demand from landed positions — this zone has no "
+        note = ("Computed on demand from landed positions, this zone has no "
                 "precomputed transitions yet, so the answer covers AIS tracks "
                 "only and does not include radar-only contacts.")
         if censored:
@@ -1652,7 +1652,7 @@ def zone_vessels(zone_id: str, start: Optional[str] = None,
                      f"track began.")
     elif censored:
         note = (f"{censored} of {len(out)} were already inside when their track "
-                f"began — the entry position is where we picked them up, not "
+                f"began, the entry position is where we picked them up, not "
                 f"where they crossed.")
     hulls = {d["mmsi"] or d["track_key"] for d in out}
     return {"zone": {"zone_id": z.zone_id, "kind": z.kind, "name": z.name,
@@ -1682,7 +1682,7 @@ def create_geofence(name: str, geometry: dict, note: str = "") -> dict:
 
     name = (name or "").strip()
     if not name:
-        raise ValueError("a geofence needs a name — it is how it is re-run")
+        raise ValueError("a geofence needs a name, it is how it is re-run")
     try:
         geom = shape(geometry)
     except Exception as e:                                       # noqa: BLE001
@@ -1692,7 +1692,7 @@ def create_geofence(name: str, geometry: dict, note: str = "") -> dict:
     if not geom.is_valid:
         geom = geom.buffer(0)
         if geom.is_empty or not geom.is_valid:
-            raise ValueError("invalid geometry — a self-crossing outline?")
+            raise ValueError("invalid geometry, a self-crossing outline?")
 
     import hashlib
     zid = "zone:geofence:" + hashlib.sha1(name.encode()).hexdigest()[:10]

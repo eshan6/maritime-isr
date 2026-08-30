@@ -55,6 +55,93 @@
   --violet-weak: #f1ecfb;
   --violet-border: #d9ccf3;
 
+  /* Evidence families. Here rather than in JS so both themes swap in one
+     place and a component can write `var(--fam-identity)` in an inline style
+     without knowing which theme is on. Fixed order, never cycled: the blue
+     block means "how she moves" on every screen or it means nothing. */
+  --fam-motion: #2a78d6;
+  --fam-identity: #eb6834;
+  --fam-network: #1baf7a;
+  --fam-paperwork: #eda100;
+  --fam-imagery: #e87ba4;
+  --fam-radio: #008300;
+  --fam-other: #8996a3;
+
+  /* Map marks. Were hardcoded in MapView, which meant the dark theme could
+     not reach them and vessels stayed light-mode blue on a dark sea. */
+  --mark-vessel: #1a5fb4;
+  --mark-alert: #b0221b;
+  --mark-selected: #0b7ea8;
+  --map-ground: #eef2f6;
+  --map-tile-opacity: 1;
+}
+
+/* ==========================================================================
+ * Dark theme
+ * ==========================================================================
+ *
+ * Not black. A true-black ground makes every panel edge a hard line and every
+ * white glyph bloom, and an operations screen is read for hours. These are
+ * dark greys with a slight cool cast, so panels separate from the ground by
+ * lightness rather than by borders alone.
+ *
+ * Declared under both scopes: the media query follows the operating system,
+ * the attribute follows the toggle in the nav bar, and the attribute wins in
+ * both directions so a person on a dark laptop can still choose light.
+ *
+ * Every value is a re-step of the same hue, never an inversion. Inverting a
+ * light palette produces mud, and the categorical family colours in
+ * particular are chosen against the surface they sit on: the light steps sit
+ * under 3:1 on this ground, so the six are re-stepped and re-validated for
+ * it (worst adjacent pair here is dE 8.4 under protanopia and 19.3 under
+ * normal vision, and all six clear 3:1). */
+:root[data-theme="dark"] {
+  --bg: #1c1f23;
+  --surface: #23272c;
+  --surface-2: #2a2f35;
+  --panel: #212429;
+  --border: #333940;
+  --border-strong: #454c55;
+
+  --ink: #e6e9ec;
+  --ink-2: #a8b1ba;
+  --ink-3: #7c8791;
+
+  --blue: #4b95e8;
+  --blue-ink: #7fb4ef;
+  --blue-weak: #1b2c40;
+
+  --amber: #d9a13a;
+  --amber-weak: #35291394;
+  --red: #e06c66;
+  --red-weak: #3a1f1e;
+  --green: #4caf83;
+  --green-weak: #16301f;
+
+  --violet: #9b85e8;
+  --violet-weak: #241d3b;
+  --violet-border: #3d3363;
+
+  --fam-motion: #3987e5;
+  --fam-identity: #d95926;
+  --fam-network: #199e70;
+  --fam-paperwork: #c98500;
+  --fam-imagery: #d55181;
+  --fam-radio: #008300;
+  --fam-other: #7c8791;
+
+  --mark-vessel: #4b95e8;
+  --mark-alert: #e06c66;
+  --mark-selected: #38c6f4;
+  --map-ground: #14171a;
+  /* Raster basemaps are drawn for a light page. Dimming and desaturating the
+     tiles is what stops the land plate glowing brighter than the vessels on
+     top of it, which is the whole point of the layer order. */
+  --map-tile-opacity: 0.62;
+
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 8px 30px rgba(0, 0, 0, 0.55);
+
   --radius: 7px;
   --radius-sm: 5px;
   --shadow: 0 1px 2px rgba(16, 33, 51, 0.06), 0 2px 8px rgba(16, 33, 51, 0.05);
@@ -732,3 +819,58 @@ p:last-child { margin-bottom: 0; }
 .btn-map:hover { background: var(--blue-weak); border-color: var(--blue);
   color: var(--blue-ink); }
 .btn-map svg { flex: 0 0 auto; }
+
+/* Follows the operating system until the operator chooses. The `:not()` guard
+   lets an explicit light choice beat a dark OS. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #1c1f23; --surface: #23272c; --surface-2: #2a2f35; --panel: #212429;
+    --border: #333940; --border-strong: #454c55;
+    --ink: #e6e9ec; --ink-2: #a8b1ba; --ink-3: #7c8791;
+    --blue: #4b95e8; --blue-ink: #7fb4ef; --blue-weak: #1b2c40;
+    --amber: #d9a13a; --amber-weak: #352913; --red: #e06c66;
+    --red-weak: #3a1f1e; --green: #4caf83; --green-weak: #16301f;
+    --violet: #9b85e8; --violet-weak: #241d3b; --violet-border: #3d3363;
+    --fam-motion: #3987e5; --fam-identity: #d95926; --fam-network: #199e70;
+    --fam-paperwork: #c98500; --fam-imagery: #d55181; --fam-radio: #008300;
+    --fam-other: #7c8791;
+    --mark-vessel: #4b95e8; --mark-alert: #e06c66; --mark-selected: #38c6f4;
+    --map-ground: #14171a; --map-tile-opacity: 0.62;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(0, 0, 0, 0.3);
+    --shadow-lg: 0 8px 30px rgba(0, 0, 0, 0.55);
+  }
+}
+
+/* The toggle itself. Sits at the end of the nav, out of the reading path. */
+.theme-toggle {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid var(--border-strong); background: var(--panel);
+  color: var(--ink-2); border-radius: var(--radius-sm);
+  padding: 4px 10px; cursor: pointer; font: inherit;
+  font-size: var(--fs-meta); margin-left: 8px;
+}
+.theme-toggle:hover { background: var(--surface); color: var(--ink); }
+
+/* ---- basemap switcher --------------------------------------------------- */
+.basemap-pick { display: flex; gap: 4px; margin-top: 8px; flex-wrap: wrap; }
+.basemap-pick button {
+  flex: 1 1 auto; border: 1px solid var(--border); background: var(--surface);
+  color: var(--ink-2); border-radius: var(--radius-sm); padding: 4px 8px;
+  cursor: pointer; font: inherit; font-size: var(--fs-micro);
+}
+.basemap-pick button:hover { color: var(--ink); }
+.basemap-pick button.on {
+  background: var(--blue-weak); border-color: var(--blue);
+  color: var(--blue-ink); font-weight: var(--w-bold);
+}
+
+/* ---- disposition state -------------------------------------------------- */
+/* A recorded decision has to be visible on the control that recorded it. The
+   buttons all looked identical after a click, and the only sign anything had
+   happened was a grey badge that read as decoration. */
+.btn.is-recorded {
+  background: var(--blue-weak); border-color: var(--blue);
+  color: var(--blue-ink); font-weight: var(--w-bold);
+}
+.evq-card.is-settled { opacity: 0.72; }
+.evq-card.is-settled:hover { opacity: 1; }

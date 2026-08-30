@@ -81,13 +81,13 @@ export function ZonePanel({ zone, onDelete }) {
         )}
       </div>
 
-      {error && <div className="notebar">Could not load — {error}</div>}
+      {error && <div className="notebar">Could not load. {error}</div>}
       {!res && !error && <div className="empty">Working…</div>}
 
       {res && (
         <>
           <div className="t-med" style={{ marginBottom: 8 }}>
-            {res.n_vessels} vessel{res.n_vessels === 1 ? "" : "s"} —{" "}
+            {res.n_vessels} vessel{res.n_vessels === 1 ? "" : "s"},{" "}
             {res.items.length} visit{res.items.length === 1 ? "" : "s"}
           </div>
           <BasisLine basis={res.basis} note={res.note} />

@@ -22,6 +22,7 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../api.js";
 import { fmtDate, fmtDateTime } from "../lib/format.js";
+import { useTheme } from "../lib/theme.js";
 import { VesselPanel } from "../components/VesselPanel.jsx";
 import { ZonePanel } from "../components/ZonePanel.jsx";
 
@@ -41,22 +42,88 @@ const SECONDS_PER_DAY = 7;
 //: corpus) honest — the clock still crosses the window while somebody watches.
 const MAX_PLAYTHROUGH_S = 120;
 
-const BASEMAP = {
-  version: 8,
-  sources: {
-    carto: {
-      type: "raster",
-      tiles: ["https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png"],
-      tileSize: 256,
-      attribution: "© OpenStreetMap contributors © CARTO",
-    },
+// ---- basemaps -------------------------------------------------------------
+//
+// **The old source stopped serving and the map filled with "API KEY REQUIRED"
+// stamped across every tile.** It pointed at `basemaps.cartocdn.com/light_all`,
+// which used to be keyless and is not any more, so the tiles that came back
+// were CARTO's watermark image. Nothing about the map itself was wrong: it is a
+// real slippy map, every mark on it is placed from a lat/lon, and the vessels
+// were plotted correctly the whole time. It was the picture UNDER them that had
+// been replaced with a notice.
+//
+// So: keyless sources only, and more than one, because a single hardcoded
+// provider is exactly how this failed. Each is served under an attribution the
+// layer carries.
+//
+// **Ocean is the default and it is not a cosmetic choice.** This is a maritime
+// picture. A street basemap draws every road inland and nothing at all at sea,
+// which is backwards for a screen where the sea is the subject: Esri's ocean
+// base carries bathymetry, so depth contours, shelf edges and channels are
+// visible, and a track running along a 200 m contour reads as what it is.
+const BASEMAPS = [
+  {
+    id: "ocean",
+    label: "Ocean",
+    hint: "Bathymetry and coastline. Best for open water.",
+    tiles: ["https://services.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}"],
+    // The reference layer is names only, on transparent tiles, so it goes over
+    // the base rather than replacing it.
+    labels: ["https://services.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Reference/MapServer/tile/{z}/{y}/{x}"],
+    attribution: "Esri, GEBCO, NOAA, National Geographic and other contributors",
+    maxzoom: 13,
   },
-  layers: [
-    { id: "bg", type: "background", paint: { "background-color": "#eef2f6" } },
-    { id: "carto", type: "raster", source: "carto", paint: { "raster-opacity": 0.85 } },
-  ],
-};
+  {
+    id: "streets",
+    label: "Streets",
+    hint: "Ports, terminals and coastal infrastructure.",
+    tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+    attribution: "© OpenStreetMap contributors",
+    maxzoom: 19,
+  },
+  {
+    id: "satellite",
+    label: "Satellite",
+    hint: "Imagery. Berths and structures are visible.",
+    tiles: ["https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"],
+    attribution: "Esri, Maxar, Earthstar Geographics",
+    maxzoom: 18,
+  },
+];
 
+//: Built per basemap rather than held as one constant, so switching provider is
+//: a style swap and not a special case. `--map-tile-opacity` is a theme token:
+//: these tiles are drawn for a light page, and on the dark theme they are
+//: dimmed so the land plate does not outshine the vessels on top of it.
+function basemapStyle(id) {
+  const b = BASEMAPS.find((x) => x.id === id) || BASEMAPS[0];
+  const css = getComputedStyle(document.documentElement);
+  const ground = css.getPropertyValue("--map-ground").trim() || "#eef2f6";
+  const opacity = parseFloat(css.getPropertyValue("--map-tile-opacity")) || 1;
+  const sources = {
+    base: { type: "raster", tiles: b.tiles, tileSize: 256,
+            maxzoom: b.maxzoom || 19, attribution: b.attribution },
+  };
+  const layers = [
+    { id: "bg", type: "background", paint: { "background-color": ground } },
+    { id: "base", type: "raster", source: "base",
+      paint: { "raster-opacity": opacity } },
+  ];
+  if (b.labels) {
+    sources.baselabels = { type: "raster", tiles: b.labels, tileSize: 256,
+                           maxzoom: b.maxzoom || 19 };
+    layers.push({ id: "baselabels", type: "raster", source: "baselabels",
+                  paint: { "raster-opacity": Math.min(1, opacity + 0.2) } });
+  }
+  return { version: 8, sources, layers };
+}
+
+//: Read from the stylesheet so the dark theme can reach them. Hardcoded, the
+//: vessels stayed light-mode blue on a dark sea.
+function themeColor(name, fallback) {
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name);
+  return (v && v.trim()) || fallback;
+}
 const VESSEL_COLOR = "#1a5fb4";
 const ALERT_COLOR = "#b0221b";
 
@@ -262,24 +329,83 @@ export function MapView() {
   // is ours to park somewhere useful (see the parking effect below); once they
   // have, it is theirs and we never move it under them.
   const [scrubbed, setScrubbed] = useState(false);
+  //: Which basemap, remembered. An operator who works in bathymetry should not
+  //: have to reselect it on every page load.
+  const [basemap, setBasemap] = useState(
+    () => localStorage.getItem("misr.basemap") || "ocean");
+  //: Set when a tile request fails, so a dead provider says so once instead of
+  //: leaving a blank sea that reads as "no data here".
+  const [tileError, setTileError] = useState(false);
+  //: The map paints from JavaScript, so a theme flip has to rebuild its style
+  //: object. CSS custom properties do not reach a MapLibre paint expression.
+  const { resolved: themeKey } = useTheme();
 
   // ---- init map once ----
   useEffect(() => {
     const m = new maplibregl.Map({
       container: mapEl.current,
-      style: BASEMAP,
+      style: basemapStyle(localStorage.getItem("misr.basemap") || "ocean"),
       bounds: [[AOI.lonMin, AOI.latMin], [AOI.lonMax, AOI.latMax]],
       fitBoundsOptions: { padding: 40 },
       attributionControl: { compact: true },
     });
     m.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
-    m.on("load", () => {
+    // **`style.load`, not `load`.** `load` does not fire until the map has
+    // completed a first render including its sources, so a basemap host that is
+    // unreachable holds it forever. Every operational layer this app draws was
+    // gated behind it, which meant an unreachable tile server did not degrade
+    // the picture, it deleted it: no vessels, no alerts, no area of interest,
+    // on a screen whose entire job is showing where things are. None of those
+    // marks need a basemap. They need the style to exist so layers can be added
+    // to it, which is what `style.load` means.
+    m.on("style.load", () => {
       addAoi(m);
       setReady(true);
+    });
+    // A basemap that will not load is a fact about the network, and the map
+    // must say so. Silently drawing an empty sea invites the reading that
+    // there is nothing there.
+    m.on("error", (e) => {
+      if (String(e?.error?.message || "").toLowerCase().includes("tile")
+          || e?.sourceId === "base") setTileError(true);
     });
     map.current = m;
     return () => m.remove();
   }, []);
+
+  // ---- basemap and theme swaps ------------------------------------------
+  //
+  // `setStyle` throws away every layer this app added, so everything is
+  // re-added on the next `styledata`. The layer effects below key off `ready`,
+  // which is why it is dropped and re-raised rather than left true: a redraw
+  // that ran against a half-built style silently lost the vessels.
+  const appliedStyle = useRef(null);
+  useEffect(() => {
+    if (!map.current || !ready) return;
+    const want = `${basemap}|${themeKey}`;
+    // **Never restyle to the style already on screen.** This effect runs once
+    // on mount, when `ready` first goes true, and an unconditional `setStyle`
+    // there threw away every layer the app had just added and rebuilt them for
+    // nothing. Worse when the rebuild could not finish: the map went blank.
+    if (appliedStyle.current === null) { appliedStyle.current = want; return; }
+    if (appliedStyle.current === want) return;
+    appliedStyle.current = want;
+    localStorage.setItem("misr.basemap", basemap);
+    setTileError(false);
+    const m = map.current;
+    setReady(false);
+    m.setStyle(basemapStyle(basemap));
+    // `style.load`, not `styledata` plus `isStyleLoaded()`. The latter is only
+    // true once every SOURCE has loaded, so a basemap whose tiles never arrive
+    // leaves it false forever, `ready` never comes back, and the vessels are
+    // never redrawn: an unreachable tile server took the whole picture with it,
+    // including the marks that do not depend on tiles at all.
+    m.once("style.load", () => {
+      addAoi(m);
+      setReady(true);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [basemap, themeKey]);
 
   // ---- load data (each layer independently; one slow/failing call must not
   //      blank the rest) ----
@@ -402,6 +528,12 @@ export function MapView() {
     if (!ready || !map.current) return;
     renderVessels(map.current, tracks, clockSec, visible.positions, (id) => setSelected(id));
   }, [ready, tracks, clockSec, visible.positions]);
+
+  // ---- the selection ring, redrawn wherever the subject is --------------
+  useEffect(() => {
+    if (!ready || !map.current) return;
+    renderSelection(map.current, selected, tracks, clockSec, data);
+  }, [ready, selected, tracks, clockSec, data]);
 
   // ---- park the playhead where the fleet actually is ----
   // The clock defaulted to the very END of the window, which is the one instant
@@ -594,7 +726,7 @@ export function MapView() {
                 className="layer-toggle"
                 key={l.id}
                 title={missing
-                  ? "Not loaded — a statutory limit this system will not derive. "
+                  ? "Not loaded. A statutory limit this system will not derive. "
                     + "Load a published file with `maritime-isr ingest zones`."
                   : l.label}
                 style={{ opacity: missing ? 0.42 : 1 }}
@@ -608,7 +740,7 @@ export function MapView() {
                 />
                 <span className="layer-swatch" style={{ background: l.color }} />
                 {l.label}
-                {missing && <span className="muted"> — not loaded</span>}
+                {missing && <span className="muted"> (not loaded)</span>}
               </label>
             );
           })}
@@ -618,7 +750,30 @@ export function MapView() {
             was in it" begins here, and the control stays in the layer box
             rather than floating, so the drawn area reads as one more layer
             rather than as a mode the map is stuck in. */}
-        <div style={{ marginTop: 10, borderTop: "1px solid var(--line,#e3e8ec)",
+        {/* Basemap. In the layer panel because it IS a layer, and the one an
+            operator changes for a real reason: bathymetry to read a track
+            against depth, imagery to see a berth. */}
+        <div style={{ marginTop: 10, borderTop: "1px solid var(--border)",
+                      paddingTop: 8 }}>
+          <div className="eyebrow">Basemap</div>
+          <div className="basemap-pick">
+            {BASEMAPS.map((b) => (
+              <button key={b.id} title={b.hint}
+                      className={basemap === b.id ? "on" : ""}
+                      onClick={() => setBasemap(b.id)}>
+                {b.label}
+              </button>
+            ))}
+          </div>
+          {tileError && (
+            <div className="muted t-micro" style={{ marginTop: 6 }}>
+              Basemap tiles failed to load. Marks are still positioned
+              correctly. Try another basemap.
+            </div>
+          )}
+        </div>
+
+        <div style={{ marginTop: 10, borderTop: "1px solid var(--border)",
                       paddingTop: 8 }}>
           {!drawing ? (
             <button className="btn btn-sm" onClick={() => setDrawing({ points: [] })}>
@@ -674,7 +829,7 @@ export function MapView() {
               {locate.basis === "ais"
                 && "This is the last position she broadcast. "}
               {locate.basis === "radar"
-                && "Nothing was broadcasting there — this is a radar contact, "
+                && "Nothing was broadcasting there. This is a radar contact, "
                    + "so it is where the array saw a target, not a reported "
                    + "position. "}
               {locate.basis === "event"
@@ -682,9 +837,9 @@ export function MapView() {
                    + `her most recent located event (${locate.kind || "event"}) `
                    + `happened, which is a proxy and not a position report. `}
               {locate.at != null && !Number.isNaN(locate.at)
-                ? <>Recorded {fmtDateTime(new Date(locate.at * 1000).toISOString())}
-                   {" "}— the clock has been moved to that moment. If she has
-                   been seen since, she is not there now.</>
+                ? <>Recorded {fmtDateTime(new Date(locate.at * 1000).toISOString())}.
+                   {" "}The clock has been moved to that moment. If she has been
+                   seen since, she is not there now.</>
                 : <>The record carries no time, so the clock has not been moved
                    and the age of this position is unknown.</>}
             </>
@@ -709,7 +864,7 @@ export function MapView() {
         <div className="notebar map-notes">
           {Object.entries(notes).filter(([, v]) => v).map(([k, v]) => (
             <div key={k} style={{ marginBottom: 4 }}>
-              <span className="note-key mono">{k}</span> — {v}
+              <span className="note-key mono">{k}</span>: {v}
             </div>
           ))}
         </div>
@@ -730,7 +885,7 @@ export function MapView() {
           {playing ? "❚❚" : "▶"}
         </button>
         <span className="clock">
-          {clockMs ? fmtDate(new Date(clockMs).toISOString(), true) : "—"}
+          {clockMs ? fmtDate(new Date(clockMs).toISOString(), true) : "-"}
         </span>
         <input
           type="range"
@@ -937,7 +1092,54 @@ function renderVessels(m, tracks, clockSec, on, onSelect) {
       properties: { vessel_id: tr.vessel_id },
     });
   }
-  upsertCircleLayer(m, "vessels", feats, VESSEL_COLOR, on, onSelect, MARK_STYLE.live);
+  upsertCircleLayer(m, "vessels", feats, themeColor("--mark-vessel", VESSEL_COLOR),
+                    on, onSelect, MARK_STYLE.live);
+}
+
+// **Which one is selected, on the map.** Clicking a vessel opened her record
+// and left every mark on screen looking identical, so the panel described a
+// hull the operator could no longer point at. On a picture holding hundreds of
+// dots that is the difference between a selection and a guess.
+//
+// Drawn as its own layer above the marks rather than by recolouring one of
+// them: colour on this map is meaning (blue is a broadcasting vessel, red is an
+// alert) and a selected vessel is still a vessel. A ring adds emphasis without
+// spending a hue, and it reads the same whichever layer the subject came from,
+// which matters because the selection can be a vessel, a radar contact or an
+// alert marker.
+function renderSelection(m, id, tracks, clockSec, data) {
+  let pos = null;
+  const tr = id && tracks.find((t) => t.vessel_id === id);
+  if (tr) pos = posAt(tr.points, clockSec) || tr.points[tr.points.length - 1]?.slice(0, 2);
+  if (!pos && id) {
+    const key = String(id).startsWith("contact:radar:")
+      ? String(id).slice("contact:radar:".length) : null;
+    const rc = key && data.radarContacts.find((c) => c.radar_track_id === key);
+    if (rc && rc.lat != null) pos = [rc.lon, rc.lat];
+  }
+  if (!pos && id) {
+    const ev = data.events.find((e) => e.vessel_id === id && e.lat != null);
+    if (ev) pos = [ev.lon, ev.lat];
+  }
+  const feats = pos
+    ? [{ type: "Feature", geometry: { type: "Point", coordinates: pos },
+         properties: {} }]
+    : [];
+  const fc = { type: "FeatureCollection", features: feats };
+  const src = m.getSource("selection");
+  if (src) { src.setData(fc); return; }
+  m.addSource("selection", { type: "geojson", data: fc });
+  m.addLayer({
+    id: "selection-halo", type: "circle", source: "selection",
+    paint: {
+      "circle-radius": 15,
+      "circle-color": themeColor("--mark-selected", "#0b7ea8"),
+      "circle-opacity": 0.16,
+      "circle-stroke-width": 2,
+      "circle-stroke-color": themeColor("--mark-selected", "#0b7ea8"),
+      "circle-stroke-opacity": 0.95,
+    },
+  });
 }
 
 function renderStatic(m, data, tracks, visible, onSelect) {
@@ -989,7 +1191,7 @@ function renderStatic(m, data, tracks, visible, onSelect) {
       properties: {
         vessel_id: a.subject,
         label: `⚑ ${String(a.anomaly_type || "").replace(/_/g, " ")} · `
-          + `${a.subject_name || ""} — ${at.basis}`,
+          + `${a.subject_name || ""}. ${at.basis}`,
       },
     });
   }
@@ -1208,7 +1410,7 @@ function DrawControls({ points, onUndo, onCancel, onSave }) {
     <div className="t-meta">
       <div className="muted" style={{ marginBottom: 6 }}>
         Click the map to place corners. {points.length} placed
-        {!enough && " — three or more makes an area"}.
+        {!enough && ". Three or more makes an area"}.
       </div>
       <input
         className="input"
@@ -1280,7 +1482,7 @@ function renderRadar(m, data, radarTracks, visible) {
       properties: {
         vessel_id: "",
         label:
-          `Radar station ${s.station_id} · ${s.name} — holds a small craft to ` +
+          `Radar station ${s.station_id} · ${s.name}. Holds a small craft to ` +
           `${Math.round(s.range_small_km)} km, a large ship to ` +
           `${Math.round(s.range_large_km)} km`,
       },
@@ -1309,7 +1511,7 @@ function renderRadar(m, data, radarTracks, visible) {
       label:
         (c.status === "dark_candidate"
           ? "Dark contact"
-          : `Suppressed — ${String(c.status || "").replace("suppressed_", "").replace(/_/g, " ")}`) +
+          : `Suppressed: ${String(c.status || "").replace("suppressed_", "").replace(/_/g, " ")}`) +
         ` · ${c.radar_track_id || ""}` +
         (c.length_m ? ` · ≈${Math.round(c.length_m)} m` : "") +
         (c.dark_minutes ? ` · ${Math.round(c.dark_minutes)} min unexplained` : "") +

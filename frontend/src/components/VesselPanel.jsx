@@ -120,7 +120,7 @@ export function VesselPanel({ vesselId, onOpenGraph, showFindOnMap = true }) {
               </dl>
               {!s.is_finding && (
                 <p className="muted t-meta" style={{ margin: "8px 0 0" }}>
-                  Name-only match — a candidate, not a confirmed finding. Names collide;
+                  Name-only match. A candidate, not a confirmed finding. Names collide;
                   only an IMO or call-sign+name match is treated as a finding.
                 </p>
               )}
@@ -134,7 +134,7 @@ export function VesselPanel({ vesselId, onOpenGraph, showFindOnMap = true }) {
         <div className="eyebrow">Identity history</div>
         {v.identity_history?.length <= 1 ? (
           <p className="section-note">
-            One identity record on file — no recorded rename or reflag. (Real GFW
+            One identity record on file, with no recorded rename or reflag. (Real GFW
             identity history averages about one record per vessel.)
           </p>
         ) : (
@@ -151,7 +151,7 @@ export function VesselPanel({ vesselId, onOpenGraph, showFindOnMap = true }) {
                     {iv.flag ? ` · ${iv.flag}` : ""}
                   </div>
                   <div className="mono muted t-meta">
-                    MMSI {iv.mmsi || "—"} · IMO {iv.imo || "—"}
+                    MMSI {iv.mmsi || "-"} · IMO {iv.imo || "-"}
                   </div>
                   <div className="tl-when">
                     {fmtDate(iv.valid_from) || "?"} →{" "}
@@ -225,7 +225,7 @@ function EventList({ title, events, kind }) {
             </div>
             {kind === "gap" && (
               <div className="event-meta">
-                {e.classification} — this is GFW's assessment, not our detection.
+                {e.classification}. This is GFW's assessment, not our detection.
               </div>
             )}
           </div>

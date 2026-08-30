@@ -227,6 +227,11 @@ class EvidenceHop(BaseModel):
     t_start: Optional[str] = None
     t_end: Optional[str] = None
     source: Optional[str] = None
+    #: The source named as an operator would name it, from
+    #: `assistant.attribution`. Declared here or Pydantic drops it: the field
+    #: was being set on the dict and silently discarded on serialisation, so
+    #: alert cards kept printing the raw module id they were meant to replace.
+    origin: Optional[str] = None
     detail: Optional[str] = None
     props: dict = {}
 

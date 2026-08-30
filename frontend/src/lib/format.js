@@ -46,57 +46,70 @@ export function fmtDateTime(iso) {
 }
 
 // ---------------------------------------------------------------------------
-// Evidence families — the one categorical palette in the product
+// Evidence families
 // ---------------------------------------------------------------------------
 //
-// Six families, a fixed hue each, assigned in this order and never cycled or
-// re-assigned by rank. Colour follows the family, so a filter that changes which
-// families are on screen never repaints the survivors — the blue block means
-// "motion" on every row of every screen or it means nothing.
+// Six families, one fixed hue each, assigned in this order and never cycled or
+// reassigned by rank. Colour follows the family, so a filter that changes which
+// families are on screen never repaints the survivors.
 //
-// The previous mapping reused the interface's own semantic colours: `--amber`
-// (#9a6300, a brown) for identity and `--red` (#b0221b) for network. Two
-// problems, and the visible one was the smaller. Brown beside red is a poor
-// pairing, but red is also the product's *status* colour — it means risk, on
-// badges, on risk pills, on the graph canvas. Spending it as "category three"
-// meant a red block on a score bar and a red badge beside it were the same red
-// saying two unrelated things. Status colours stay reserved.
+// The hues live in the stylesheet as custom properties, not as hex here. Two
+// themes need two sets of steps and a JS constant can only hold one; a
+// component writing `var(--fam-identity)` gets the right one without knowing
+// which theme is on.
 //
-// This set is validated rather than chosen by eye: worst adjacent pair is
-// ΔE 9.1 under protanopia and 19.6 under normal vision (OKLab ×100, against
-// floors of 8 and 15). Three of the six sit under 3:1 contrast on the light
-// surface, which obliges a written label everywhere the colour appears — and
-// every use here has one, on the chip, in the legend, and in the breakdown
-// table. The colour reinforces the label; it never carries identity alone.
+// The previous mapping spent the interface's own semantic colours: amber
+// (a brown) for identity and red for network. Red is the product's status
+// colour, so a red block on a score bar and a red badge beside it were the
+// same red saying two unrelated things. Status colours are reserved.
+//
+// Both sets are validated rather than chosen by eye. Light: worst adjacent
+// pair 9.1 under protanopia, 19.6 under normal vision. Dark: 8.4 and 19.3.
+// Floors are 8 and 15. Several steps fall under 3:1 against the light surface,
+// which obliges a written label everywhere the colour appears, and every use
+// has one.
 export const FAMILY_COLOR = {
-  motion: "#2a78d6",     // blue
-  identity: "#eb6834",   // orange
-  network: "#1baf7a",    // aqua
-  paperwork: "#eda100",  // yellow
-  imagery: "#e87ba4",    // magenta
-  radio: "#008300",      // green
+  motion: "var(--fam-motion)",
+  identity: "var(--fam-identity)",
+  network: "var(--fam-network)",
+  paperwork: "var(--fam-paperwork)",
+  imagery: "var(--fam-imagery)",
+  radio: "var(--fam-radio)",
 };
 
 export const FAMILY_LABEL = {
-  motion: "How she moves",
-  identity: "Who she says she is",
-  network: "Who she is connected to",
-  paperwork: "What she filed",
-  imagery: "What she looks like",
-  radio: "What she transmits",
+  motion: "Movement",
+  identity: "Declared identity",
+  network: "Connections",
+  paperwork: "Filed paperwork",
+  imagery: "Imagery",
+  radio: "Radio",
 };
 
-//: Fixed render order, so segments in a stacked bar are laid out the same way
-//: on every row and two rows can be compared by eye.
+//: Fixed render order, so stacked segments are laid out the same way on every
+//: row and two rows can be compared by eye.
 export const FAMILY_ORDER = ["motion", "identity", "network", "paperwork",
   "imagery", "radio"];
 
 export function familyColor(f) {
-  return FAMILY_COLOR[f] || "#8996a3";
+  return FAMILY_COLOR[f] || "var(--fam-other)";
 }
 
 export function familyLabel(f) {
-  return FAMILY_LABEL[f] || (f || "other").replace(/_/g, " ");
+  return FAMILY_LABEL[f] || sentenceCase((f || "other").replace(/_/g, " "));
+}
+
+// Upper-cases the first letter and leaves the rest alone. Factor kinds, edge
+// types and anomaly types all arrive as snake_case enums and were being printed
+// straight into the interface, so labels and badges began in lower case.
+export function sentenceCase(s) {
+  const t = String(s || "").trim();
+  return t ? t.charAt(0).toUpperCase() + t.slice(1) : t;
+}
+
+// An enum as a label: underscores out, first letter up.
+export function labelOf(s) {
+  return sentenceCase(String(s || "").replace(/_/g, " "));
 }
 
 // A provenance envelope as one readable line. `origin` and `derivation` are
@@ -123,7 +136,7 @@ export function riskBand(score) {
 }
 
 export function riskLabel(band) {
-  return { high: "High", elevated: "Elevated", low: "Low", none: "—" }[band];
+  return { high: "High", elevated: "Elevated", low: "Low", none: "None" }[band];
 }
 
 // One label table for both the component rows and the evidence list under
@@ -142,6 +155,15 @@ export const RISK_COMPONENT_LABEL = {
 // Anomaly type -> a plain-English label + severity hue class.
 export const ANOMALY_META = {
   dark_vessel: { label: "Dark vessel", tone: "finding" },
+  transponder_shutdown: { label: "Transponder shutdown", tone: "finding" },
+  identity_contradiction: { label: "Identity contradiction", tone: "candidate" },
+  voyage_contradiction: { label: "Voyage contradiction", tone: "candidate" },
+  paperwork_contradiction: { label: "Paperwork contradiction", tone: "candidate" },
+  notification_unmatched: { label: "Notification unmatched", tone: "neutral" },
+  arrival_without_notification: { label: "Arrival without notification", tone: "candidate" },
+  imagery_type_mismatch: { label: "Imagery type mismatch", tone: "finding" },
+  vessel_interaction: { label: "Vessel interaction", tone: "neutral" },
+  notable_activity: { label: "Notable activity", tone: "neutral" },
   dark_rendezvous: { label: "Dark rendezvous", tone: "candidate" },
   ais_spoofing: { label: "AIS spoofing", tone: "candidate" },
   loitering_sensitive: { label: "Loitering in sensitive zone", tone: "candidate" },
@@ -150,7 +172,7 @@ export const ANOMALY_META = {
 };
 
 export function anomalyLabel(t) {
-  return ANOMALY_META[t]?.label || t || "Anomaly";
+  return ANOMALY_META[t]?.label || labelOf(t) || "Anomaly";
 }
 
 // What each KIND of identity edge actually asserts. `identified-as` is the one
@@ -186,7 +208,7 @@ export function edgeTypeLabel(t, identityKind) {
     "loiter-in-zone": "loitered in zone",
     "duplicate_mmsi": "duplicate MMSI",
   };
-  return m[t] || (t || "").replace(/[-_]/g, " ");
+  return m[t] || labelOf(String(t || "").replace(/-/g, " "));
 }
 
 //: The label for one edge as the API returns it — the shape every caller with a
