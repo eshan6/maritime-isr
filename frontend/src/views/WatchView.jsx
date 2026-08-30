@@ -28,14 +28,14 @@
 //
 //   * State what a thing IS, not why it was built that way.
 //   * No em or en dashes. A sentence needing one wants to be two sentences.
-//   * Sentence case, and every label, badge and button starts upper case.
+//   * Casing is left as the data and the existing screens had it. Forcing
+//     a capital on every enum was a change nobody asked for.
 //   * A number and its unit beat a sentence describing the number.
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api } from "../api.js";
 import { anomalyLabel, edgeTypeLabel, familyColor, familyLabel, fmtDate,
-         fmtDateTime, labelOf, num, sentenceCase,
-         ANOMALY_META } from "../lib/format.js";
+         fmtDateTime, num, ANOMALY_META } from "../lib/format.js";
 import { EvidenceList, ExportButton, FamilyLegend, FindOnMap,
          MakeupBar } from "../components/bits.jsx";
 
@@ -62,7 +62,7 @@ function FactorChip({ f, total }) {
     <span className="chip"
           style={{ borderLeftColor: familyColor(f.family) }}
           title={`${familyLabel(f.family)}. Contributed ${f.points.toFixed(3)} of ${total.toFixed(3)}.`}>
-      <b>{labelOf(f.kind)}</b>
+      <b>{f.kind.replace(/_/g, " ")}</b>
       <span className="pts">{f.points.toFixed(2)}</span>
     </span>
   );
@@ -117,8 +117,8 @@ function Dispose({ alert, onDone }) {
         </button>
       ))}
       <span className="muted t-meta">
-        {current ? `Recorded: ${DISPOSITION_LABEL[current] || current}`
-                 : "Not actioned"}
+        {current ? `recorded: ${DISPOSITION_LABEL[current] || current}`
+                 : "not actioned"}
       </span>
     </div>
   );
@@ -139,8 +139,8 @@ function AlertCard({ a, onDone, showSubject = true }) {
         <strong>{anomalyLabel(a.anomaly_type)}</strong>
         {a.ts && <span className="evq-time">{fmtDateTime(a.ts)}</span>}
         <span className="muted t-meta">
-          Confidence {num(a.confidence, 2)}
-          {a.score != null ? ` · Score ${num(a.score, 2)}` : ""}
+          confidence {num(a.confidence, 2)}
+          {a.score != null ? ` · score ${num(a.score, 2)}` : ""}
         </span>
         <SynBadge on={a.is_synthetic} />
         <div className="nav-spacer" style={{ flex: 1 }} />
@@ -158,13 +158,13 @@ function AlertCard({ a, onDone, showSubject = true }) {
           {a.evidence.map((h, i) => (
             <li key={i}>
               <div className="evi-fact">
-                {sentenceCase(h.detail || edgeTypeLabel(h.edge))}
+                {h.detail || edgeTypeLabel(h.edge)}
               </div>
               {h.t_start && <div className="evi-when">{fmtDateTime(h.t_start)}</div>}
               <div className="evi-src">
                 Source: <span className="who">{h.origin || h.source || "not attributed"}</span>
                 {h.confidence != null && (
-                  <span className="muted"> · Confidence {num(h.confidence, 2)}</span>
+                  <span className="muted"> · confidence {num(h.confidence, 2)}</span>
                 )}
               </div>
             </li>
@@ -201,7 +201,7 @@ function VesselRow({ item, alerts, selected, onSelect }) {
             ? [item.identifiers.mmsi && `MMSI ${item.identifiers.mmsi}`,
                item.identifiers.imo && `IMO ${item.identifiers.imo}`,
                item.identifiers.flag].filter(Boolean).join(" · ") || item.subject_id
-            : "No broadcast identity"}
+            : "no broadcast identity"}
         </div>
         {(item.is_synthetic || alerts > 0) && (
           <div style={{ marginTop: 4, display: "flex", gap: 6, flexWrap: "wrap" }}>
@@ -282,14 +282,14 @@ function AskBox({ subjectId, suggestions }) {
           <span className={`badge ${a.outcome === "answered" ? "badge-neutral"
                             : a.outcome === "no_data" ? "badge-candidate"
                             : "badge-finding"}`}>
-            {labelOf(a.outcome)}
+            {a.outcome.replace("_", " ")}
           </span>
           <pre style={{ whiteSpace: "pre-wrap", margin: "6px 0 0", font: "inherit" }}>
             {a.text}
           </pre>
           {a.basis?.length > 0 && (
             <div className="muted t-meta" style={{ marginTop: 4 }}>
-              Read: {a.basis.join(", ")}
+              read: {a.basis.join(", ")}
             </div>
           )}
         </div>
@@ -339,14 +339,14 @@ function Subject({ id, alerts, onDisposed }) {
                                   borderLeft: `3px solid ${familyColor(f?.family)}` }}>
               <div>{line}</div>
               <div className="muted t-meta" style={{ marginTop: 4 }}>
-                {familyLabel(f?.family)} · {labelOf(f?.kind)} ·
+                {familyLabel(f?.family)} · {f?.kind.replace(/_/g, " ")} ·
                 {" "}{f?.points.toFixed(3)} points, {pct(f?.share)} of the score
                 {f?.n_evidence > 0 && (
                   <>
                     {" · "}
                     <button className="btn-link"
                             onClick={() => setOpen((o) => ({ ...o, [i]: !o[i] }))}>
-                      {open[i] ? "Hide" : "Show"} {f.n_evidence} evidence item
+                      {open[i] ? "hide" : "show"} {f.n_evidence} evidence item
                       {f.n_evidence === 1 ? "" : "s"}
                     </button>
                   </>
@@ -386,17 +386,17 @@ function Subject({ id, alerts, onDisposed }) {
         </div>
         <table className="table">
           <thead><tr>
-            <th className="no-sort">Factor</th>
-            <th className="no-sort num">Weight</th>
-            <th className="no-sort num">Confidence</th>
-            <th className="no-sort num">Alone</th>
-            <th className="no-sort num">Points</th>
-            <th className="no-sort num">Share</th>
+            <th className="no-sort">factor</th>
+            <th className="no-sort num">weight</th>
+            <th className="no-sort num">confidence</th>
+            <th className="no-sort num">alone</th>
+            <th className="no-sort num">points</th>
+            <th className="no-sort num">share</th>
           </tr></thead>
           <tbody>
             {v.arithmetic.rows.map((r) => (
               <tr key={r.factor_id}>
-                <td>{labelOf(r.kind)}</td>
+                <td>{r.kind.replace(/_/g, " ")}</td>
                 <td className="num">{r.weight.toFixed(2)}</td>
                 <td className="num">{r.confidence.toFixed(2)}</td>
                 <td className="num">{r.standalone.toFixed(2)}</td>
@@ -405,13 +405,13 @@ function Subject({ id, alerts, onDisposed }) {
               </tr>
             ))}
             <tr>
-              <td style={{ fontWeight: 600 }}>Total</td>
+              <td style={{ fontWeight: 600 }}>total</td>
               <td colSpan={3} />
               <td className="num" style={{ fontWeight: 600 }}>
                 {v.arithmetic.sum_of_points.toFixed(3)}
               </td>
               <td className="num">
-                {v.arithmetic.reconciles ? "Reconciles" : "Does not reconcile"}
+                {v.arithmetic.reconciles ? "reconciles" : "DOES NOT RECONCILE"}
               </td>
             </tr>
           </tbody>
@@ -429,12 +429,12 @@ function Subject({ id, alerts, onDisposed }) {
           <div key={r.action} style={{ marginTop: 10, opacity: r.feasible ? 1 : 0.6 }}>
             <div>
               <strong>{r.headline}</strong>{" "}
-              <span className="badge badge-neutral">{labelOf(r.performed_by)}</span>{" "}
-              {!r.feasible && <span className="badge badge-finding">Not available</span>}
+              <span className="badge badge-neutral">{r.performed_by}</span>{" "}
+              {!r.feasible && <span className="badge badge-finding">not available</span>}
             </div>
             <div className="muted-2 t-meta">{r.rationale}</div>
             {r.feasibility && <div className="muted t-meta">{r.feasibility}</div>}
-            <div className="muted t-meta">System capability: {r.system_capability}</div>
+            <div className="muted t-meta">system capability: {r.system_capability}</div>
           </div>
         ))}
       </div>
@@ -605,7 +605,7 @@ export function WatchView() {
             {(health.notes || []).map((n, i) => (
               <div key={i} className="badge badge-candidate"
                    style={{ display: "block", marginTop: 6, whiteSpace: "normal" }}>
-Queue health: {n}
+queue health: {n}
               </div>
             ))}
             <div style={{ marginTop: 10 }}>
@@ -658,11 +658,11 @@ Queue health: {n}
                   color: f.present ? "var(--ink)" : "var(--ink-3)",
                   background: "var(--surface-2)",
                   borderLeft: `3px solid ${familyColor(f.family)}` }}>
-                  {f.present ? "Present" : "Absent"}
+                  {f.present ? "present" : "absent"}
                 </span>{" "}
                 <strong>{f.label}</strong>{" "}
                 <span className="muted-2 t-meta">
-                  {sentenceCase(f.blurb)} ({f.areas.join(", ")})
+                  {f.blurb} ({f.areas.join(", ")})
                 </span>
               </div>
             ))}
@@ -675,7 +675,7 @@ Queue health: {n}
             {data.n_suppressed > 0 && (
               <>
                 <button className="btn btn-sm" onClick={() => setShowSuppressed((s) => !s)}>
-                  {showSuppressed ? "Hide" : "Show"} {data.n_suppressed} suppressed subject(s)
+                  {showSuppressed ? "hide" : "show"} {data.n_suppressed} suppressed subject(s)
                 </button>
                 {showSuppressed && (
                   <ul className="evi">
