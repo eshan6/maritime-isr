@@ -43,6 +43,10 @@ description. This is not false modesty — write for it.
   command, what a *success* looks like, and what a *failure* looks like, so he can
   report back accurately. He is your hands on the infrastructure — you cannot
   reach his machine or VM.
+- **His local clone is `maritime-isr-live/`, not `maritime-isr/`.** The repo,
+  the package and this sandbox all say `maritime-isr`; his working folder does
+  not. Any `cd` you hand him must say `cd maritime-isr-live`, or the first line
+  of the run instructions fails on a directory that does not exist.
 - **Never overclaim capability.** This is a hard rule, not a tone preference.
   Distinguish, every time, between:
   - **"built to do"** — code exists that is designed to do X, and
