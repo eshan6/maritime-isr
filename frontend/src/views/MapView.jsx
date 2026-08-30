@@ -19,9 +19,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../api.js";
-import { fmtDate } from "../lib/format.js";
+import { fmtDate, fmtDateTime } from "../lib/format.js";
 import { VesselPanel } from "../components/VesselPanel.jsx";
 import { ZonePanel } from "../components/ZonePanel.jsx";
 
@@ -198,8 +198,17 @@ export function MapView() {
   const mapEl = useRef(null);
   const map = useRef(null);
   const nav = useNavigate();
+  const [params, setParams] = useSearchParams();
   const [ready, setReady] = useState(false);
   const [selected, setSelected] = useState(null);
+  //: How the map came to be looking at this hull, when it was sent here from
+  //: somewhere else. Held so the arrival can be *explained*: flying to a
+  //: position without saying how old it is presents a stale fix as a current
+  //: one, and the hulls worth finding are disproportionately the ones that
+  //: stopped reporting — going quiet is the finding.
+  const [locate, setLocate] = useState(null);
+  //: Has the tracks request come back? Not the same as having tracks.
+  const [tracksReady, setTracksReady] = useState(false);
   // **Eighteen of twenty-four layers used to be on at first paint.** Every one
   // of them had been defaulted on for a real reason, each recorded in its own
   // session — "the footprints were the one unambiguously real thing and they
@@ -326,7 +335,12 @@ export function MapView() {
     api.alerts().then((r) => set({ alerts: r.items })).catch(() => {});
     api.tracks({ max_points: 160 })
       .then((r) => { live && setTracks(r.items || []); note("tracks", r.note); })
-      .catch(() => {});
+      .catch(() => {})
+      // Settled either way. "Still loading" and "loaded, and she is not in it"
+      // look identical from `tracks.length === 0`, and a deep link that cannot
+      // tell them apart waits forever on an empty corpus — silently, which is
+      // the failure mode this project treats as worse than an error.
+      .finally(() => { live && setTracksReady(true); });
     api.radarStations()
       .then((r) => set({ radarStations: r.items || [] }))
       .catch(() => {});
@@ -407,6 +421,91 @@ export function MapView() {
     if (span <= 0) return;
     setT(Math.min(1, Math.max(0, (at * 1000 - window_.start) / span)));
   }, [scrubbed, window_, tracks]);
+
+  // ---- "find her on the map" -------------------------------------------
+  //
+  // Arrived from a vessel card anywhere in the product with `?vessel=<id>`. The
+  // operator's next question after "why is she flagged" is "where is she", and
+  // the only previous answer was to leave the screen and hunt for one hull in a
+  // picture holding thousands.
+  //
+  // **The clock moves to her last fix, and the notice says when that was.** In
+  // the deployed product most hulls have a current position and this lands on
+  // it; the interesting ones frequently do not, because a hull that stops
+  // reporting is the thing this system exists to find. Flying to a six-hour-old
+  // position with the playhead left where it was would draw her at a place she
+  // is not, at a time she was not there, with nothing on screen to say so —
+  // which is the map inventing evidence, the failure `alertPosition` already
+  // refuses. So: go to the fix, state its age, and let the operator decide what
+  // a four-day-old position is worth.
+  useEffect(() => {
+    const want = params.get("vessel");
+    // Gated on the tracks request having SETTLED, not on the map having
+    // painted: her record and the notice are useful even where the basemap
+    // never loads, and the camera move below is the only part that needs a map.
+    if (!want || !tracksReady) return;
+
+    // The same cascade `alertPosition` walks, and for the same reason: a
+    // subject worth finding is often one AIS cannot place. An AIS track is the
+    // best answer; a radar contact is the next best and is frequently the ONLY
+    // one for exactly the hulls this system exists to flag, since a target with
+    // no transponder has no AIS track by definition; a located past event is
+    // the last resort and is labelled as the proxy it is.
+    let found = null;
+    const tr = tracks.find((t) => t.vessel_id === want);
+    const last = tr?.points?.[tr.points.length - 1];
+    if (last) {
+      found = { lon: last[0], lat: last[1], at: last[2], basis: "ais" };
+    } else {
+      const key = String(want).startsWith("contact:radar:")
+        ? String(want).slice("contact:radar:".length) : null;
+      const rc = key && data.radarContacts.find((c) => c.radar_track_id === key);
+      if (rc && rc.lat != null && rc.lon != null) {
+        const at = rc.ts ? Date.parse(rc.ts) / 1000 : null;
+        found = { lon: rc.lon, lat: rc.lat, at, basis: "radar" };
+      } else {
+        // Anything located we hold about her, most recent first.
+        const ev = data.events
+          .filter((e) => e.vessel_id === want && e.lat != null && e.lon != null)
+          .sort((a, b) => String(b.start_time || "").localeCompare(String(a.start_time || "")))[0];
+        if (ev) {
+          const at = ev.start_time ? Date.parse(ev.start_time) / 1000 : null;
+          found = { lon: ev.lon, lat: ev.lat, at, basis: "event",
+                    kind: (ev.kind || "").replace(/_/g, " ") };
+        }
+      }
+    }
+
+    if (!found) {
+      setLocate({ id: want, found: false });
+      setSelected(want);                     // her record still opens
+      setParams({}, { replace: true });
+      return;
+    }
+
+    const { lon, lat, at: tSec } = found;
+    if (window_ && tSec != null && !Number.isNaN(tSec)) {
+      const span = window_.end - window_.start;
+      if (span > 0) {
+        setT(Math.min(1, Math.max(0, (tSec * 1000 - window_.start) / span)));
+        // The playhead is the operator's once they have touched it, but they
+        // asked to be taken to this hull — that IS them moving it.
+        setScrubbed(true);
+      }
+    }
+    if (ready && map.current) {
+      map.current.easeTo({ center: [lon, lat],
+                           zoom: Math.max(map.current.getZoom(), 8.5),
+                           duration: 900 });
+    }
+    setSelected(want);
+    setLocate({ id: want, found: true, at: tSec, lon, lat,
+                basis: found.basis, kind: found.kind });
+    // Consume the parameter so a later pan does not fly back here, and so a
+    // refresh does not re-trigger a flight the operator has moved on from.
+    setParams({}, { replace: true });
+  }, [params, ready, tracks, tracksReady, data.radarContacts,
+      data.events, window_, setParams]);
 
   // ---- play/pause ----
   // Playback runs at SECONDS_PER_DAY, derived from the window's real span, so
@@ -557,6 +656,51 @@ export function MapView() {
         )}
       </div>
 
+      {/* Sent here from a vessel card. States which fix the map flew to and
+          how old it is, because "her position" and "the last position she
+          broadcast" are different claims and the gap between them is often the
+          finding. Dismissable, and it never covers the hull it is describing. */}
+      {locate && (
+        <div className="notebar map-notes" style={{ borderLeft: "3px solid var(--blue)" }}>
+          {locate.found ? (
+            <>
+              <strong>
+                {locate.basis === "ais"
+                  ? "Showing her last known position."
+                  : locate.basis === "radar"
+                    ? "Showing where radar last held her."
+                    : "Showing a proxy position."}
+              </strong>{" "}
+              {locate.basis === "ais"
+                && "This is the last position she broadcast. "}
+              {locate.basis === "radar"
+                && "Nothing was broadcasting there — this is a radar contact, "
+                   + "so it is where the array saw a target, not a reported "
+                   + "position. "}
+              {locate.basis === "event"
+                && `She has no track and no radar contact here. This is where `
+                   + `her most recent located event (${locate.kind || "event"}) `
+                   + `happened, which is a proxy and not a position report. `}
+              {locate.at != null && !Number.isNaN(locate.at)
+                ? <>Recorded {fmtDateTime(new Date(locate.at * 1000).toISOString())}
+                   {" "}— the clock has been moved to that moment. If she has
+                   been seen since, she is not there now.</>
+                : <>The record carries no time, so the clock has not been moved
+                   and the age of this position is unknown.</>}
+            </>
+          ) : (
+            <>
+              <strong>No position to show.</strong> Nothing in this corpus places
+              this subject anywhere: no AIS track, no radar contact, and no
+              located event. Her record is open on the right; the map is not
+              guessing at a pin.
+            </>
+          )}
+          <button className="btn-link" style={{ marginLeft: 8 }}
+                  onClick={() => setLocate(null)}>dismiss</button>
+        </div>
+      )}
+
       {/* What the map is NOT showing, in the operator's line of sight. Every
           one of these used to be silent: a capped event query looked like an
           empty second half of the window, and an empty SAR layer looked like a
@@ -640,6 +784,7 @@ export function MapView() {
           <div className="drawer-body">
             <VesselPanel
               vesselId={selected}
+              showFindOnMap={false}
               onOpenGraph={(id) => nav(`/graph?seed=${encodeURIComponent(id)}`)}
             />
           </div>

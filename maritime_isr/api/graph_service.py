@@ -22,6 +22,7 @@ from collections import deque
 from contextlib import contextmanager
 from typing import Iterator, Sequence
 
+from ..assistant.attribution import origin_of
 from ..config import GRAPH_DB_NAME, TRAVERSAL_MAX_NODES, cfg
 from ..graph import GraphStore
 from ..schemas.keys import IDENTITY_KINDS
@@ -593,6 +594,13 @@ def _evidence_hops(evidence: list) -> list[dict]:
             "t_start": _iso(h["t_start"]) if isinstance(h.get("t_start"), (int, float)) else h.get("t_start"),
             "t_end": _iso(h["t_end"]) if isinstance(h.get("t_end"), (int, float)) else h.get("t_end"),
             "source": h.get("source"),
+            # The same attribution the assistant's evidence carries, for the
+            # same reason. `source` is a machine id — `identity_rules`,
+            # `pans_resolver` — and an alert card printing it raw asks an
+            # operator to trust a module name. `origin` is the answer to "and
+            # who says that", which is the question they are actually asking
+            # when they read an accusation.
+            "origin": origin_of(h.get("source")),
             "detail": h.get("detail") or props.get("detail"),
             "props": props,
         })

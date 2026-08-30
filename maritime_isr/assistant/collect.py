@@ -86,6 +86,51 @@ def _prov_from_row(row: dict) -> dict:
     }
 
 
+#: What each tracked identity field is called in a sentence. The populator's
+#: column names are fine in a database and wrong in an accusation.
+_IDENTITY_FIELD_LABEL = {
+    "name": "ship name", "flag": "flag", "mmsi": "MMSI",
+    "imo": "IMO number", "call_sign": "call sign",
+}
+
+
+def _identity_change_payload(payload) -> dict:
+    """The event payload as a dict, whatever the store handed back.
+
+    `emit` writes JSON text, but a caller reading through a different path may
+    already hold the dict. Both are accepted rather than assuming one, because
+    the failure mode of assuming is a label that reads `{"field": "flag"...`.
+    """
+    if isinstance(payload, dict):
+        return payload
+    try:
+        import json
+        loaded = json.loads(payload or "{}")
+        return loaded if isinstance(loaded, dict) else {}
+    except (ValueError, TypeError):
+        return {}
+
+
+def _identity_change_label(payload) -> str:
+    """"flag changed from PAN to TON" — the fact, not the fact's category."""
+    p = _identity_change_payload(payload)
+    field = _IDENTITY_FIELD_LABEL.get(str(p.get("field") or ""),
+                                      str(p.get("field") or "").replace("_", " "))
+    old, new = p.get("old"), p.get("new")
+    if field and old and new:
+        return f"{field} changed from {old} to {new}"
+    if field:
+        return f"{field} changed on record"
+    # A payload we cannot read is reported as unreadable rather than described
+    # as a change we cannot substantiate.
+    return "an identity field changed; the record does not say which"
+
+
+def _identity_change_detail(payload) -> dict:
+    p = _identity_change_payload(payload)
+    return {"field": p.get("field"), "old": p.get("old"), "new": p.get("new")}
+
+
 def _prov_from_edge(ev: dict) -> dict:
     """The envelope an alert's evidence chain carries.
 
@@ -435,11 +480,19 @@ def collect_identity_factors(store, subjects: Sequence[str]) -> list[Factor]:
             "SELECT ts, payload FROM events WHERE subject=? AND "
             "event_type='identity_changed' ORDER BY ts", (vid,)).fetchall()
         if rows:
+            # **Say which identity changed, and to what.** Every row used to
+            # render as the same sentence — "identity changed on record" — so a
+            # hull that changed her name and her flag in the same minute
+            # produced two lines an operator could not tell apart, and nine
+            # changes read as nine copies of one fact. The payload has carried
+            # `field`, `old` and `new` since the populator wrote it; only the
+            # label was throwing them away. A list of identical strings is not
+            # evidence, it is a count wearing evidence's clothes.
             ev = [Evidence(
                 kind="identity_change",
-                label="identity changed on record",
+                label=_identity_change_label(payload),
                 ref=vid, occurred_at=iso(ts), confidence=0.9,
-                detail={"payload": payload},
+                detail=_identity_change_detail(payload),
                 provenance={"source_id": "graph", "source_ref": "events",
                             "acquired_at": iso(ts), "ingested_at": None,
                             "pipeline_version": PIPELINE_VERSION,

@@ -82,11 +82,18 @@ class Evidence:
     is_synthetic: bool = False
 
     def as_dict(self) -> dict:
+        # Attribution is added on the way out rather than at every construction
+        # site. There are a dozen places that build an Evidence and one place
+        # that serialises it, so this is the only point where "every evidence
+        # item names a source an operator could go and check" can be a
+        # guarantee rather than a convention twelve callers have to remember.
+        from .attribution import describe
         return {
             "kind": self.kind, "label": self.label, "ref": self.ref,
             "occurred_at": self.occurred_at, "lat": self.lat, "lon": self.lon,
             "confidence": self.confidence, "detail": self.detail,
-            "provenance": self.provenance, "is_synthetic": self.is_synthetic,
+            "provenance": describe(self.provenance),
+            "is_synthetic": self.is_synthetic,
         }
 
 
