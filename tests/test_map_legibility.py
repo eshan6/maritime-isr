@@ -131,7 +131,7 @@ def test_tracks_reports_the_cap_when_it_bites():
     if r["matched_vessels"] < 2:
         pytest.skip("corpus has fewer than two vessels with positions")
     assert r["truncated"] is True
-    assert r["note"] and "TRUNCATED" in r["note"]
+    assert r["note"] and "truncated" in r["note"].lower()
     # the true total is stated, not just the fact of truncation — "some are
     # missing" without "of how many" is what makes a capped layer unreadable
     assert f"{r['matched_vessels']:,}" in r["note"]

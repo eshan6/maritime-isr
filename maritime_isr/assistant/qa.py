@@ -253,7 +253,7 @@ UNSUPPORTED: tuple[tuple[tuple[str, ...], str], ...] = (
      "No imagery is held for any vessel. Automatic electro-optical capture, "
      "tagging and classification is Area 5 of the build and is not "
      "implemented. Note this is different from satellite *coverage*, which the "
-     "system does compute — ask whether a satellite was overhead."),
+     "system does compute, ask whether a satellite was overhead."),
 
 )
 
@@ -398,7 +398,7 @@ class GroundedQA:
             return self._nothing(
                 v, "ownership",
                 "no ownership relationship is recorded for this subject",
-                extra=("Ownership coverage in this corpus is thin — the graph "
+                extra=("Ownership coverage in this corpus is thin, the graph "
                        "holds a chain for only a small fraction of hulls."))
         if fs:
             return self._from_factors(v, fs, ["object graph (ownership chain)"])
@@ -413,7 +413,7 @@ class GroundedQA:
             return Answer(
                 question="", outcome="answered", intent="identity",
                 text=("This target has no broadcast identity. It is "
-                      f"{v.display_name} — a position history from a sensor "
+                      f"{v.display_name}, a position history from a sensor "
                       "and nothing else. No name, MMSI, IMO or flag is known, "
                       "and that absence is what makes it a finding rather "
                       "than a gap in the record."),
@@ -457,7 +457,7 @@ class GroundedQA:
         return Answer(
             question="", outcome="answered", intent="position",
             text=(f"Last placed at {position_phrase(v.position)}. "
-                  f"Basis: {basis}. This is where she was, not where she is — "
+                  f"Basis: {basis}. This is where she was, not where she is, "
                   f"nothing in this system tracks a vessel in real time."),
             basis=["ais_position" if "AIS" in basis else "factor evidence"])
 
@@ -482,7 +482,7 @@ class GroundedQA:
                 "no close-quarters meeting with a silent party is recorded "
                 "for this subject",
                 extra=("Meetings inside a berth or a designated anchorage are "
-                       "deliberately not reported — alongside a terminal, that "
+                       "deliberately not reported, alongside a terminal, that "
                        "describes every ship in the port."))
         return self._from_factors(v, fs, ["object graph (encounters)"])
 
@@ -511,8 +511,8 @@ class GroundedQA:
             return self._nothing(
                 v, "zones",
                 "no watched-area finding is recorded for this subject",
-                extra=("The four statutory limits — EEZ, contiguous zone, "
-                       "territorial sea and the maritime boundary — are "
+                extra=("The four statutory limits, EEZ, contiguous zone, "
+                       "territorial sea and the maritime boundary, are "
                        "deliberately not held (ADR-030), so no finding can "
                        "reference them."))
         text = " ".join(narrate_factor(f, name=v.display_name) for f in fs)
@@ -561,7 +561,7 @@ class GroundedQA:
                 if v.is_synthetic else
                 "These confidences come from the detectors and registries "
                 "named in the evidence, not from a measured real-world hit "
-                "rate — this system has never been scored on operational data.")
+                "rate, this system has never been scored on operational data.")
         return Answer(question="", outcome="answered", intent="confidence",
                       text="\n".join(f"- {p}" for p in parts) + "\n" + tail,
                       basis=["factor set"], confidence=v.score)
@@ -599,7 +599,7 @@ class GroundedQA:
             for e in f.evidence[:6]:
                 when = f" [{e.occurred_at[:19]}]" if e.occurred_at else ""
                 src = e.provenance.get("source_id") or "unattributed"
-                lines.append(f"  - {e.label}{when} — source {src}")
+                lines.append(f"  - {e.label}{when}. Source: {src}")
             if len(f.evidence) > 6:
                 lines.append(f"  - ... and {len(f.evidence) - 6} more")
         return Answer(question="", outcome="answered", intent="evidence",
@@ -617,8 +617,8 @@ class GroundedQA:
         total = sum(f.points or 0.0 for f in rows)
         return Answer(
             question="", outcome="answered", intent="score",
-            text=("The score combines independent factors as a noisy-OR — "
-                  "1 minus the product of (1 - weight x confidence) — and then "
+            text=("The score combines independent factors as a noisy-OR, "
+                  "1 minus the product of (1 - weight x confidence), and then "
                   "allocates the result back to each factor in log space, so "
                   "the parts sum exactly to the whole.\n"
                   + "\n".join(lines)
@@ -666,6 +666,6 @@ def family_gaps(voi: VesselOfInterest) -> list[str]:
     completeness.
     """
     present = {f.family for f in voi.factors}
-    return [f"{meta['label']} — {meta['blurb']} (nothing held; "
+    return [f"{meta['label']}, {meta['blurb']} (nothing held; "
             f"{', '.join(meta['areas'])})"
             for name, meta in FAMILIES.items() if name not in present]

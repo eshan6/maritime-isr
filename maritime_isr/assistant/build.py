@@ -96,7 +96,7 @@ def build_list(*, synthetic: Optional[bool] = None, limit: int = 50,
 
     with gsvc.open_graph() as store:
         if store is None:
-            return _empty("no object graph has been built — "
+            return _empty("No object graph has been built. "
                           "run the pipeline first")
         with open_reader() as reader:
             factors = _collect.collect_all(store, reader, at=at)
@@ -357,7 +357,7 @@ def workload(*, at: Optional[float] = None) -> dict:
         "caveat": (
             "Measured on the corpus named above, in this sandbox. It is a "
             "statement about how much this system shortens a queue, not about "
-            "whether the things in the queue are the right things — precision "
+            "whether the things in the queue are the right things, precision "
             "and recall are measured separately, against scenario truth, and "
             "neither has ever been measured on an operational feed."),
         "pipeline_version": PIPELINE_VERSION,
@@ -368,13 +368,13 @@ def _workload_sentence(n_tracks: int, n_alerts: int, n_subjects: int,
                        synthetic: bool) -> str:
     if not n_subjects:
         return ("Nothing reached the list, so no reduction can be stated. "
-                "An empty queue is a result, not a failure — but check the "
+                "An empty queue is a result, not a failure, but check the "
                 "detectors fired at all before reading it as one.")
     label = ("on the synthetic scenario corpus" if synthetic
              else "on the landed corpus")
     return (f"{n_tracks:,} tracked targets and {n_alerts:,} raw detector alerts "
             f"{label} resolve to {n_subjects} subject"
-            f"{'' if n_subjects == 1 else 's'} an operator is asked to open — "
+            f"{'' if n_subjects == 1 else 's'} an operator is asked to open, "
             f"about 1 in {max(1, round(n_tracks / n_subjects)):,} of the "
             f"targets in the picture.")
 
@@ -441,7 +441,7 @@ def _notes(items: Sequence[VesselOfInterest],
         notes.append(
             f"{len(suppressed)} further subject(s) carried a signal and were "
             f"kept off this list as too weak to be worth opening. Each one "
-            f"records its reason — 'why is this NOT flagged' is answerable "
+            f"records its reason, 'why is this NOT flagged' is answerable "
             f"from this response, not only from a terminal.")
     families = {f.family for v in items for f in v.factors}
     missing = [name for name in ("paperwork", "imagery", "radio")
@@ -450,7 +450,7 @@ def _notes(items: Sequence[VesselOfInterest],
         notes.append(
             "No factor on this list comes from " + ", ".join(missing)
             + ". Those are Areas 4, 5 and 6 of the Section-3 build and are not "
-              "implemented — the absence is a build state, not a finding that "
+              "implemented, the absence is a build state, not a finding that "
               "the paperwork, the imagery and the radio traffic were clean.")
     unregistered = [k for k in FACTOR_KINDS
                     if k not in {f.kind for v in items for f in v.factors}]

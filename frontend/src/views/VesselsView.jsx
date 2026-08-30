@@ -113,9 +113,9 @@ export function VesselsView() {
                   <td className="t-med">
                     {v.name || <span className="na">Unnamed</span>}
                   </td>
-                  <td className="mono">{v.mmsi || "—"}</td>
-                  <td>{v.flag || "—"}</td>
-                  <td>{v.vessel_type || <span className="na">—</span>}</td>
+                  <td className="mono">{v.mmsi || "-"}</td>
+                  <td>{v.flag || "-"}</td>
+                  <td>{v.vessel_type || <span className="na">-</span>}</td>
                   <td className="num">
                     <RiskPill score={v.risk_score} />
                   </td>
@@ -123,10 +123,10 @@ export function VesselsView() {
                     {v.sanctioned ? (
                       <SanctionsBadge sanctioned isFinding={v.sanctions_is_finding} />
                     ) : (
-                      <span className="muted">—</span>
+                      <span className="muted">-</span>
                     )}
                   </td>
-                  <td className="mono muted">{fmtDate(v.last_seen) || "—"}</td>
+                  <td className="mono muted">{fmtDate(v.last_seen) || "-"}</td>
                   <td onClick={(e) => e.stopPropagation()}>
                     <FindOnMap id={v.id} name={v.name} compact />
                   </td>

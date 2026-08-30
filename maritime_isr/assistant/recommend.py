@@ -122,7 +122,7 @@ ACTIONS: dict[str, dict] = {
     "dispatch_patrol": dict(
         base_priority=70, performed_by="operator",
         headline="Consider tasking a surface unit",
-        capability="Outside this system entirely — an operational decision "
+        capability="Outside this system entirely. An operational decision "
                    "for the control room, offered as context, not advice."),
     "escalate": dict(
         base_priority=80, performed_by="operator",
@@ -146,7 +146,7 @@ ACTIONS: dict[str, dict] = {
         base_priority=65, performed_by="system",
         headline="Check whether a satellite was overhead during the silence",
         capability="Built and running (ADR-026). It answers whether an image "
-                   "exists whose footprint contained her — it does not mean "
+                   "exists whose footprint contained her. It does not mean "
                    "anybody has looked at it."),
     "query_zone_history": dict(
         base_priority=45, performed_by="system",

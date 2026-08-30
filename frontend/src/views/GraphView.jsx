@@ -95,13 +95,13 @@ const INTERACTIVE_MAX_ELEMENTS = 600;
 //: are from the fixture graph and are the argument, not decoration.
 const CONTEXT_LAYERS = [
   ["flag", "flag_state", "flag",
-   "228 edges. One node, flag:IND, joins 156 vessels — a single star that "
+   "228 edges. One node, flag:IND, joins 156 vessels: a single star that "
    + "dominates the layout."],
   ["port", "port", "port",
    "313 edges. Ports are hubs: nine anchorages carry most of them, and every "
    + "hull touches several."],
   ["identity", "identity", "identity",
-   "629 edges to 603 leaf nodes — 67% of the graph is an identity record on a "
+   "629 edges to 603 leaf nodes. 67% of the graph is an identity record on a "
    + "stick, and a name change is read on the vessel, not in the web."],
   ["gap", "ais_gap", "gap",
    "14 edges. Each one is a reported AIS gap hanging off a single hull, so it "
@@ -757,7 +757,7 @@ export function GraphView() {
       fitView(cy);
       syncScreenScale(cy);
       setNodeCount(cy.nodes().length);
-      setStatus(nb.truncated ? "traversal budget reached — partial neighbourhood shown" : "");
+      setStatus(nb.truncated ? "Traversal budget reached. Partial neighbourhood shown." : "");
     } catch (e) {
       if (runRef.current !== myRun) return;
       if (!added) {
@@ -779,7 +779,7 @@ export function GraphView() {
           setNodeCount(cy.nodes().length);
         }
       }
-      setStatus(`could not draw that neighbourhood — ${e?.message || e}`);
+      setStatus(`Could not draw that neighbourhood. ${e?.message || e}`);
     }
   }
 
@@ -800,7 +800,7 @@ export function GraphView() {
       </div>
 
       <div className="layerbox graph-help" style={{ width: 264 }}>
-        <h4>Graph — ownership network</h4>
+        <h4>Ownership network</h4>
         <select
           className="select"
           style={{ width: "100%" }}
@@ -834,7 +834,7 @@ export function GraphView() {
                 <> of <b>{(web.matched_nodes ?? web.total_nodes).toLocaleString()}</b>
                   {" "}·{" "}<b>{(web.matched_edges ?? web.total_edges).toLocaleString()}</b>{" "}
                   <span title="The server returns the most-connected core up to a cap. A partial picture that looks whole is worse than no picture, so the numbers say which this is.">
-                    (partial — the most-connected core)
+                    (Partial: the most-connected core)
                   </span>
                 </>
               )}
@@ -846,19 +846,19 @@ export function GraphView() {
             {web.total_nodes > (web.matched_nodes ?? web.total_nodes) && (
               <div style={{ marginTop: 4 }}>
                 <b>{(web.total_nodes - web.matched_nodes).toLocaleString()}</b>{" "}
-                hidden — context only. Switch a layer on below.
+                hidden. Context only, switch a layer on below.
               </div>
             )}
             {web.focus_basis && (
               <div
                 style={{ marginTop: 4 }}
-                title="A camera position, not a finding — the best-connected node, not the most suspicious one."
+                title="A camera position, not a finding. The best-connected node, not the most suspicious one."
               >
                 Centred on <b>{focusLabel(web)}</b> (most connected).
               </div>
             )}
             {/* An interaction that stops existing without saying so reads as a
-                broken feature — which is exactly how it was reported. */}
+                broken feature. which is exactly how it was reported. */}
             {web.nodes.length + web.edges.length > INTERACTIVE_MAX_ELEMENTS && (
               <div
                 style={{ marginTop: 4 }}
@@ -892,8 +892,8 @@ export function GraphView() {
         )}
         {loadError && (
           <p className="graph-note" style={{ color: "var(--red)" }}
-             title="This is a fault, not an empty graph — nothing is being hidden deliberately.">
-            Could not draw the network — {loadError}
+             title="This is a fault, not an empty graph. Nothing is being hidden deliberately.">
+            Could not draw the network. {loadError}
           </p>
         )}
         {status && <p className="graph-note muted">{status}</p>}
@@ -908,11 +908,11 @@ export function GraphView() {
           ))}
           {/* Context is a CONTROL, not a key. These three families are 88% of
               the edges and are what turned the view into a hairball, so they
-              are off by default — but "these forty hulls share a flag" is a
+              are off by default, but "these forty hulls share a flag" is a
               real question, and switching one back on is how you ask it.
               Each toggle refetches: it is a different graph, not a filter over
               the one on screen, so the layout is entitled to change. */}
-          <div className="legend-group">Context — off by default</div>
+          <div className="legend-group">Context, off by default</div>
           {CONTEXT_LAYERS.map(([key, nodeKind, lbl, why]) => (
             <label className="legendline" key={key}
                    title={why}
@@ -959,7 +959,7 @@ export function GraphView() {
 
       {/* An empty canvas needs to say WHICH kind of empty it is. "No edges in
           the graph at all" and "you have not picked a vessel yet" look
-          identical on screen and mean completely different things — the first
+          identical on screen and mean completely different things. the first
           is a fact about the corpus (GFW ownership is ~1.3% populated here),
           the second is a prompt. */}
       {nodeCount === 0 && !status && !busy && (
@@ -1111,7 +1111,7 @@ function DetailCard({ info, onClose }) {
   const rows = isNode
     ? Object.entries(d.props || {}).filter(([, v]) => v !== null && v !== "" && v !== undefined)
     : [["confidence", num(d.confidence, 3)],
-       ["from", fmtDate(d.t_start) || "—"],
+       ["from", fmtDate(d.t_start) || "-"],
        ["to", d.t_end ? fmtDate(d.t_end) : "current"]];
   return (
     <div className="graph-detail card">

@@ -260,9 +260,9 @@ def _edge_label(ev: dict, props: dict) -> str:
     edge = str(ev.get("edge") or "relationship").replace("_", " ")
     src, dst = ev.get("src"), ev.get("dst")
     if props.get("zone"):
-        return f"{edge} — {props['zone']}"
+        return f"{edge}: {props['zone']}"
     if props.get("hours") is not None:
-        return f"{edge} — {props['hours']} h"
+        return f"{edge}: {props['hours']} h"
     if src and dst:
         return f"{edge}: {src} → {dst}"
     return edge
@@ -302,7 +302,7 @@ def collect_sanctions_factors(reader: Reader) -> list[Factor]:
             kind="list_entry",
             label=f"{r.get('registry') or 'OFAC'} designation "
                   f"{r.get('ofac_name') or '(unnamed)'}"
-                  + (f" — programme {r['ofac_program']}"
+                  + (f", programme {r['ofac_program']}"
                      if r.get("ofac_program") else ""),
             ref=str(r.get("ofac_ent_num") or ""),
             occurred_at=as_iso(r.get("sanctions_as_of")),
@@ -544,7 +544,7 @@ def collect_gap_factors(reader: Reader) -> list[Factor]:
                 kind="ais_gap",
                 label=("Global Fishing Watch assessed this AIS gap as "
                        "intentional disabling"
-                       + (f" — {hours:.0f} h" if hours else "")),
+                       + (f", {hours:.0f} h" if hours else "")),
                 ref=str(g.get("event_id") or ""),
                 occurred_at=as_iso(g.get("start_time")),
                 lat=_num(g.get("gap_off_lat")), lon=_num(g.get("gap_off_lon")),
@@ -788,7 +788,7 @@ def subject_meta(store, reader: Reader, subject_ids: Sequence[str],
                            "flag": None, "vessel_class": None,
                            "length_m": None,
                            "track_key": key,
-                           "note": "no broadcast identity — this target has "
+                           "note": "No broadcast identity. This target has "
                                    "not been named by any sensor"}
             pos = _position_from_factors(factors_by_subject.get(sid, []))
         out[sid] = SubjectMeta(sid, ntype, name, identifiers, pos, syn)

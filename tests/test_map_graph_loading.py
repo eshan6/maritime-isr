@@ -128,7 +128,7 @@ def test_the_note_says_it_plainly_when_there_is_no_ais_at_all():
         {"start": "2012-01-04T06:18:14+00:00", "end": "2026-07-25T22:53:53+00:00"},
         {"motion_start": None, "motion_end": None},
     )
-    assert note and "no AIS positions" in note
+    assert note and "no ais positions" in note.lower()
 
 
 def test_corpus_window_is_cheaper_than_the_full_stats_sweep():

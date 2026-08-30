@@ -35,7 +35,7 @@ __all__ = ["FAMILIES", "FACTOR_KINDS", "spec", "weight_of", "family_of",
 FAMILIES: dict[str, dict] = {
     "motion": dict(
         label="Motion and behaviour",
-        blurb="what the vessel is doing, from its track — radar or AIS alike",
+        blurb="what the vessel is doing, from its track, radar or AIS alike",
         areas=("Area 2 (predictive AIS)", "Area 3 (radar classification)")),
     "identity": dict(
         label="Declared identity",
@@ -187,7 +187,7 @@ FACTOR_KINDS: dict[str, FactorSpec] = dict([
     _s("notable_activity", family="motion", area="Area 2 (predictive AIS)",
        weight=0.5,
        label="Unusual activity",
-       blurb="motion that matches a behaviour worth a second look — a survey "
+       blurb="motion that matches a behaviour worth a second look, a survey "
              "pattern, erratic manoeuvring, or drifting",
        actions=("cue_eo_camera", "call_vhf", "compare_own_history",
                 "query_zone_history", "monitor")),
@@ -196,7 +196,7 @@ FACTOR_KINDS: dict[str, FactorSpec] = dict([
        area="Area 3 (radar classification)",
        weight=0.6,
        label="Interaction with another vessel",
-       blurb="behaviour in relation to another track — a transfer, one vessel "
+       blurb="behaviour in relation to another track, a transfer, one vessel "
              "shadowing another, or two keeping formation",
        actions=("cue_eo_camera", "call_vhf", "compare_own_history",
                 "dispatch_patrol", "monitor")),
@@ -207,7 +207,7 @@ FACTOR_KINDS: dict[str, FactorSpec] = dict([
        weight=0.75,
        label="Declared identity does not hold together",
        blurb="the identity this hull broadcasts contradicts itself or the "
-             "registry — a failed IMO check digit, an MMSI country prefix "
+             "registry, a failed IMO check digit, an MMSI country prefix "
              "that disagrees with the declared flag, or a name or call sign "
              "the registry does not carry",
        actions=("check_registry", "call_vhf", "compare_own_history",
@@ -226,7 +226,7 @@ FACTOR_KINDS: dict[str, FactorSpec] = dict([
        weight=0.70,
        label="Declared voyage contradicts her own track",
        blurb="what she broadcast about this voyage does not match what she "
-             "did — an arrival time no hull could make from where she was, or "
+             "did, an arrival time no hull could make from where she was, or "
              "a destination she never once steered towards",
        actions=("call_vhf", "check_arrival_notification",
                 "compare_own_history", "escalate"),
@@ -237,7 +237,7 @@ FACTOR_KINDS: dict[str, FactorSpec] = dict([
        weight=0.75,
        label="Paperwork contradicts her track",
        blurb="what her arrival notification declares is disproved by her own "
-             "AIS — a last port she was never near, or an arrival time she "
+             "AIS, a last port she was never near, or an arrival time she "
              "missed by days rather than hours",
        actions=("check_arrival_notification", "call_vhf",
                 "compare_own_history", "escalate"),
@@ -255,7 +255,7 @@ FACTOR_KINDS: dict[str, FactorSpec] = dict([
        weight=0.5,
        label="Arrived with no notification filed",
        blurb="she berthed and no arrival notification was ever received for "
-             "her — the same gap as an unmatched form, from the other side",
+             "her, the same gap as an unmatched form, from the other side",
        actions=("check_arrival_notification", "call_vhf", "monitor"),
        repeats=REPEAT_OCCURRENCES),
     # ---- imagery: Area 5, and the family stops being empty ---------------
@@ -274,7 +274,7 @@ FACTOR_KINDS: dict[str, FactorSpec] = dict([
        weight=0.70,
        label="The camera disagrees with her transponder",
        blurb="an image taken from a coastal camera shows a different kind of "
-             "ship from the one she broadcasts she is — and a hull does not "
+             "ship from the one she broadcasts she is, and a hull does not "
              "change shape between messages",
        actions=("cue_eo_camera", "call_vhf", "check_registry",
                 "compare_own_history", "escalate"),
@@ -288,7 +288,7 @@ FACTOR_KINDS: dict[str, FactorSpec] = dict([
        weight=0.9,
        label="Identity change then dark behaviour",
        blurb="a rename, reflag or MMSI swap followed within days by going "
-             "dark — the laundering sequence",
+             "dark, the laundering sequence",
        actions=("check_registry", "compare_own_history", "escalate")),
     _s("identity_change", family="identity", area="Phase 4 graph",
        weight=0.35,
@@ -339,7 +339,7 @@ def spec(kind: str) -> FactorSpec:
     except KeyError:
         raise KeyError(
             f"unregistered factor kind {kind!r}. Register it in "
-            f"assistant/catalog.py — a kind with no entry has no weight, no "
+            f"assistant/catalog.py, a kind with no entry has no weight, no "
             f"family and no proposed action, so it would score as nothing and "
             f"narrate as nothing while still appearing to work."
         ) from None

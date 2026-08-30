@@ -497,7 +497,10 @@ def test_a_truncated_event_response_says_so(client, H):
     if not d["items"]:
         pytest.skip("no events in this corpus")
     assert d["truncated"], "a 1-row page over a real table must report truncation"
-    assert "TRUNCATED" in (d["note"] or "")
+    # Case-insensitive: this asserts that truncation is ANNOUNCED, not how the
+    # sentence is capitalised. Keyed to the exact casing it broke on a copy edit
+    # that changed nothing about the behaviour under test.
+    assert "truncated" in (d["note"] or "").lower()
     for kind, t in d["truncated"].items():
         assert t["matching"] > t["returned"], kind
 

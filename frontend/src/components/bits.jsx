@@ -4,7 +4,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api.js";
 import { NA, num, riskBand, riskLabel, RISK_COMPONENT_LABEL,
-         FAMILY_ORDER, familyColor, familyLabel, fmtDateTime,
+         FAMILY_ORDER, familyColor, familyLabel, fmtDateTime, labelOf,
          provenanceLine } from "../lib/format.js";
 
 export function NAtext() {
@@ -30,12 +30,12 @@ export function SanctionsBadge({ sanctioned, isFinding, tier }) {
   if (!sanctioned) return null;
   if (isFinding)
     return (
-      <span className="badge badge-finding" title={`match tier: ${tier || "imo"}`}>
+      <span className="badge badge-finding" title={`Match tier: ${tier || "IMO"}`}>
         Sanctions finding
       </span>
     );
   return (
-    <span className="badge badge-candidate" title={`match tier: ${tier || "name"}`}>
+    <span className="badge badge-candidate" title={`Match tier: ${tier || "name"}`}>
       Sanctions candidate
     </span>
   );
@@ -50,7 +50,7 @@ export function ExportButton({ id, primary = false, label = "Export report" }) {
     <button
       className={`btn btn-sm ${primary ? "btn-primary" : ""}`}
       disabled={state === "working"}
-      title="Download a self-contained incident report — opens in any browser, prints to PDF"
+      title="Download a self-contained incident report. Opens in any browser and prints to PDF."
       onClick={async () => {
         setState("working");
         try {
@@ -74,7 +74,7 @@ export function RiskPill({ score }) {
   return (
     <span className={`risk-pill risk-${band}`}>
       <span className="risk-dot" />
-      {score === null || score === undefined ? "—" : num(score, 2)}
+      {score === null || score === undefined ? "-" : num(score, 2)}
       <span className="risk-band">{riskLabel(band)}</span>
     </span>
   );
@@ -85,8 +85,8 @@ export function RiskPill({ score }) {
 export function Attribution({ source }) {
   if (!source) return null;
   return (
-    <span className="badge badge-neutral" title="source of this determination">
-      via {source}
+    <span className="badge badge-neutral" title="Source of this determination">
+      Via {source}
     </span>
   );
 }
@@ -97,7 +97,7 @@ export function ProvChip({ prov }) {
     .filter(Boolean)
     .join(" ");
   return (
-    <span className="mono muted t-micro" title="provenance envelope">
+    <span className="mono muted t-micro" title="Provenance envelope">
       {bits}
     </span>
   );
@@ -135,7 +135,7 @@ export function RiskDecomposition({ risk }) {
     <div>
       <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 14 }}>
         <span className="t-hero">{num(risk.risk_score, 3)}</span>
-        <span className="muted t-meta">composite risk (0–1), decomposed below</span>
+        <span className="muted t-meta">Composite risk, 0 to 1, broken down below</span>
       </div>
 
       <div className="risk-decomp">
@@ -181,9 +181,9 @@ export function RiskDecomposition({ risk }) {
       )}
 
       <p className="muted t-meta" style={{ marginTop: 12, marginBottom: 0 }}>
-        The bar is the component on its own 0–1 scale; the figure beside it is
-        what that component contributed after its weight. The score is their
-        sum — never a bare number.
+        Each bar is that component on its own 0 to 1 scale. The figure beside
+        it is what the component contributed after its weight. The score is
+        their sum.
       </p>
     </div>
   );
@@ -211,7 +211,7 @@ export function FindOnMap({ id, name, compact = false }) {
   return (
     <button
       className="btn-map"
-      title={`Show ${name || "this vessel"} on the map — her live position, or her last known one if she is not currently reporting`}
+      title={`Show ${name || "this vessel"} on the map. Live position, or last known position if she is not currently reporting.`}
       onClick={(e) => {
         e.stopPropagation();   // rows are clickable; this is not a row click
         nav(`/?vessel=${encodeURIComponent(id)}`);
@@ -248,8 +248,8 @@ export function MakeupBar({ factors, score }) {
       {fs.map((f) => (
         <i key={f.factor_id}
            style={{ width: `${100 * (f.points || 0)}%`, background: familyColor(f.family) }}
-           title={`${familyLabel(f.family)} — ${f.kind.replace(/_/g, " ")}: `
-                  + `${f.points.toFixed(3)} of ${(score || 0).toFixed(3)}`} />
+           title={`${familyLabel(f.family)}. ${labelOf(f.kind)}: `
+                  + `${f.points.toFixed(3)} of ${(score || 0).toFixed(3)}.`} />
       ))}
       <i className="mkbar-rest" />
     </span>
@@ -263,9 +263,8 @@ export function FamilyLegend({ families }) {
   return (
     <div>
       <div className="muted t-meta">
-        The bar is the score out of 1, split into the factors that built it.
-        Colour is the kind of evidence a factor came from; length is the points
-        it contributed. A short bar is a low score, not a small chart.
+        Score out of 1, split into the factors that built it. Colour is the
+        evidence family. Length is the points contributed.
       </div>
       <div className="legend">
         {shown.map((f) => (
@@ -306,7 +305,7 @@ export function EvidenceList({ items }) {
             <div className="evi-src">
               Source: <span className="who">{origin}</span>
               {e.confidence != null && (
-                <span className="muted"> · confidence {num(e.confidence, 2)}</span>
+                <span className="muted"> · Confidence {num(e.confidence, 2)}</span>
               )}
             </div>
             {derivation && <div className="evi-derived">{derivation}</div>}

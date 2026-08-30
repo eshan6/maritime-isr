@@ -110,7 +110,7 @@ def narrate_factor(f: Factor, *, name: str) -> str:
         where = _fmt_pos(d.get("lat"), d.get("lon"))
         return (f"{name} held close quarters with another target"
                 + (f" at {where}" if where else "")
-                + ", and one of the two was unexplained at the time — nothing "
+                + ", and one of the two was unexplained at the time, nothing "
                   "was broadcasting for it. That is the signature of a "
                   f"ship-to-ship transfer. {conf.capitalize()}.{again}")
 
@@ -144,7 +144,7 @@ def narrate_factor(f: Factor, *, name: str) -> str:
     if f.kind == "vessel_interaction":
         kind = str(d.get("kind") or "interaction").replace("_", " ")
         h = _hours(d.get("hours"))
-        cross = (" This one pairs a named hull with an unidentified contact — "
+        cross = (" This one pairs a named hull with an unidentified contact, "
                  "the kind of event no single sensor can see."
                  if d.get("cross_sensor") else "")
         follower = d.get("follower")
@@ -174,7 +174,7 @@ def narrate_factor(f: Factor, *, name: str) -> str:
     if f.kind == "identity_contradiction":
         statements = d.get("statements") or []
         n_c = int(d.get("n_contradictions") or len(statements) or 1)
-        lead = (f"{name} declares an identity that does not hold together — "
+        lead = (f"{name} declares an identity that does not hold together, "
                 f"{n_c} contradiction{'' if n_c == 1 else 's'}.")
         return (lead + " " + " ".join(str(s) for s in statements[:3])
                 + f" {conf.capitalize()}.")
@@ -183,7 +183,7 @@ def narrate_factor(f: Factor, *, name: str) -> str:
         statements = d.get("statements") or []
         dest = d.get("declared_destination")
         lead = (f"{name} broadcast a voyage her own track contradicts"
-                + (f" — she declared {dest}." if dest else "."))
+                + (f", she declared {dest}." if dest else "."))
         return (lead + " " + " ".join(str(x) for x in statements[:2])
                 + f" {conf.capitalize()}.")
 
@@ -260,7 +260,7 @@ def narrate_factor(f: Factor, *, name: str) -> str:
         n_gaps = int(d.get("n_gaps") or 1)
         return (f"Global Fishing Watch assessed "
                 f"{n_gaps} AIS gap{'' if n_gaps == 1 else 's'} on this hull as "
-                f"deliberate disabling — the transponder went quiet and they "
+                f"deliberate disabling, the transponder went quiet and they "
                 f"judged it intentional. That is their assessment, carried "
                 f"here with attribution; this system did not compute it.")
 
@@ -278,7 +278,7 @@ def narrate_factor(f: Factor, *, name: str) -> str:
                     f"same time. One of them is not who it says it is. "
                     f"{conf.capitalize()}.{again}")
         return (f"{name} reported a position jump no ship could physically "
-                f"make{on_mmsi} — the track teleports. "
+                f"make{on_mmsi}, the track teleports. "
                 f"{conf.capitalize()}.{again}")
 
     if f.kind == "identity_then_anomaly":
@@ -286,8 +286,8 @@ def narrate_factor(f: Factor, *, name: str) -> str:
         follow = str(d.get("followed_by") or "dark behaviour").replace("_", " ")
         when = (f"within {days:.0f} days" if days and days >= 1
                 else "on the same day")
-        return (f"{name} changed identity — a rename, a reflag or an MMSI swap "
-                f"— and {when} afterwards showed {follow}. That sequence is the "
+        return (f"{name} changed identity, a rename, a reflag or an MMSI swap "
+                f"and {when} afterwards showed {follow}. That sequence is the "
                 f"identity-laundering pattern. {conf.capitalize()}.{again}")
 
     if f.kind == "identity_change":
@@ -341,7 +341,7 @@ def narrate_factor(f: Factor, *, name: str) -> str:
     # and forgetting its sentence degrades to something true and dull rather
     # than to a KeyError in front of an operator.
     s = spec(f.kind)
-    return f"{name}: {s.label.lower()} — {s.blurb}. {confidence_word(f.confidence).capitalize()}."
+    return f"{name}: {s.label.lower()}, {s.blurb}. {confidence_word(f.confidence).capitalize()}."
 
 
 # --------------------------------------------------------------------------
@@ -362,7 +362,7 @@ def narrate_subject(*, name: str, subject_kind: str, score: float,
     ordered = sorted(factors, key=lambda f: -(f.points or 0.0))
     lines = [narrate_factor(f, name=name) for f in ordered]
 
-    lead = ("This is an unidentified target — nothing has broadcast an "
+    lead = ("Unidentified target. Nothing has broadcast an "
             "identity for it." if subject_kind != "vessel" else "")
 
     if ordered:
@@ -392,6 +392,6 @@ def narrate_subject(*, name: str, subject_kind: str, score: float,
     if lead:
         head = lead + " " + head
     if is_synthetic:
-        head += (" SCENARIO DATA — every figure here is measured on the "
+        head += (" SCENARIO DATA. Every figure here is measured on the "
                  "synthetic corpus and says nothing about any real vessel.")
     return head, lines

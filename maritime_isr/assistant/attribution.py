@@ -48,18 +48,18 @@ UNATTRIBUTED = "not attributed"
 #: modules, this system stated as itself rather than hidden behind a module path.
 SOURCE_ORIGIN: dict[str, str] = {
     # ---- outside bodies and published datasets -------------------------
-    "ofac": "US Treasury OFAC — Specially Designated Nationals list",
-    "ofac-vessel-match": "US Treasury OFAC — Specially Designated Nationals list",
-    "ofac_vessel_match": "US Treasury OFAC — Specially Designated Nationals list",
+    "ofac": "US Treasury OFAC, Specially Designated Nationals list",
+    "ofac-vessel-match": "US Treasury OFAC, Specially Designated Nationals list",
+    "ofac_vessel_match": "US Treasury OFAC, Specially Designated Nationals list",
     "un": "UN Security Council Consolidated List",
     "eu": "EU Consolidated Financial Sanctions List",
     "gfw": "Global Fishing Watch",
-    "gfw_vessel_identity": "Global Fishing Watch — vessel identity records",
-    "gfw_encounters": "Global Fishing Watch — encounters",
-    "gfw_port_visits": "Global Fishing Watch — port visits",
-    "gfw_loitering": "Global Fishing Watch — loitering events",
-    "gfw-gaps": "Global Fishing Watch — AIS gap assessments",
-    "gfw_gaps": "Global Fishing Watch — AIS gap assessments",
+    "gfw_vessel_identity": "Global Fishing Watch, vessel identity records",
+    "gfw_encounters": "Global Fishing Watch, encounters",
+    "gfw_port_visits": "Global Fishing Watch, port visits",
+    "gfw_loitering": "Global Fishing Watch, loitering events",
+    "gfw-gaps": "Global Fishing Watch, AIS gap assessments",
+    "gfw_gaps": "Global Fishing Watch, AIS gap assessments",
     "ais": "AIS broadcast (terrestrial receivers)",
     "ais_position": "AIS position reports",
     "ais_voyage": "AIS voyage declarations (message 5)",
@@ -88,7 +88,7 @@ SOURCE_ORIGIN: dict[str, str] = {
     #
     # Never disguised. A generated hull's evidence says it was generated, in the
     # same field an operator reads for a real one (ADR-019, CLAUDE.md §4.6).
-    "synthetic-scenario": "Generated scenario corpus — not a real observation",
+    "synthetic-scenario": "Generated scenario corpus, not a real observation",
 }
 
 #: `source_ref` values that are internal storage rather than an external
