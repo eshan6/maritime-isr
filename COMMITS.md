@@ -1395,3 +1395,71 @@ did not happen.
 land — check `world.declared_class_overrides` is keyed by entity id before
 touching any threshold. A count above 2, or any alert on a hull outside group O,
 means the share rule is not holding and the merchant fleet is next.
+
+---
+
+## The operator surface: one screen, named sources, and a dark theme (ADR-038)
+
+`frontend/src/views/WatchView.jsx` (new), `frontend/src/lib/theme.js` (new),
+`maritime_isr/assistant/attribution.py` (new), `frontend/src/App.jsx`,
+`frontend/src/theme.css`, `frontend/src/views/MapView.jsx`,
+`frontend/src/components/bits.jsx`, `frontend/src/lib/format.js`,
+`maritime_isr/api/{models,graph_service,report,service}.py`,
+`maritime_isr/assistant/{collect,model}.py`
+
+Four merges, from a review of the running app.
+
+**One tab where three were.** Assistant, Findings and Alerts showed
+substantially the same facts three times over, with the only irreplaceable
+capability (recording a disposition) buried in the last. `Watch` reads by vessel
+or by event; the disposition controls are on the alert in both. No
+real-versus-synthetic filter or section, by instruction; the per-row SCENARIO
+tag stays. The three old paths redirect rather than 404.
+
+**Attribution.** `source graph / events` named a SQLite table in this
+repository. `origin` is now the outside body a fact came from and `derivation`
+what this system then did to it, attached in `Evidence.as_dict` so it holds for
+every collector. Identity-change evidence says what changed rather than
+repeating one sentence per change.
+
+**A working basemap.** The CARTO endpoint stopped being keyless and returned its
+watermark on every tile. Three keyless sources, Ocean by default for bathymetry.
+Nothing about the map was wrong: the marks were always placed from a lat/lon.
+
+**Dark theme**, three states off one set of CSS custom properties, with the six
+family colours re-stepped for the dark surface and revalidated.
+
+**Selection is visible on the map**, as a ring above the marks rather than a
+recolour, because colour there is meaning and a selected vessel is still a
+vessel.
+
+**Dates are DD/MM/YYYY everywhere**, including the exported report.
+
+Defects surfaced along the way, three of them worse than the thing being fixed:
+a misplaced brace that emptied the light theme of `--font` and the whole type
+scale; every map layer gated on MapLibre's `load` so an unreachable tile host
+deleted the picture instead of degrading it; `EvidenceHop` missing its `origin`
+field so Pydantic silently dropped the attribution; and a swallowed `/tracks`
+failure that printed "no AIS tracks in this window" whether the request failed
+or the sea was empty.
+
+**Reverted after review:** forcing a capital on every enum. Casing is left as
+the data and the existing screens had it.
+
+Verify:
+
+```
+python -m maritime_isr.api
+```
+
+*Success:* five tabs (Map, Watch, Radar, Vessels, Graph); the theme button at
+the end of the nav cycles System, Light and Dark and the type stays sans-serif
+in all three; `/watch` shows a By vessel / By event switch and the disposition
+buttons mark the choice they recorded; evidence names a body rather than a
+module path; the map draws vessels and the AOI with the basemap picker set to
+any of the three.
+*Failure:* serif type anywhere means a CSS block boundary moved, and the first
+thing to check is whether `--font` still resolves on `:root` rather than inside
+a theme block. An empty map with "no AIS tracks in this window" means the tracks
+request returned nothing; "could not load tracks" means it failed and the
+message names why.

@@ -63,9 +63,23 @@ library source, which is authoritative for request/response models.
 | EU consolidated sanctions | sanctioned entities/vessels | ✅ Yes | Public download (see note) |
 | WPI world port index | port locations/attributes | ✅ Yes | NGA public download |
 | Sentinel-1 scene catalog (metadata) | footprints + acquisition times | ✅ Yes | Copernicus Data Space OData/STAC, no login for search |
+| **Basemap tiles** (the picture *under* the marks) | coastline, bathymetry, imagery | ✅ Yes, keyless | Esri ArcGIS Online ocean base + reference, Esri world imagery, OpenStreetMap standard tiles. See the note below. |
 
 Legend: ✅ obtainable · ⚠️ obtainable with a caveat that changes the design ·
 🔴 blocked / not obtainable.
+
+**Basemap tiles are a dependency that expired once and will again.** The map
+pointed at `basemaps.cartocdn.com`, which used to serve without a key and
+stopped; every tile then came back stamped "API KEY REQUIRED" and the map looked
+broken. Nothing about the map was wrong, and no mark on it was ever positioned
+by a tile: every vessel, contact and footprint is placed from its own lat/lon.
+Two consequences were designed in afterwards. There is **more than one keyless
+provider**, selectable in the layer panel, because a single hardcoded one is
+exactly how this failed. And the operational layers do **not** wait on the
+basemap: they are gated on the map style rather than on its sources, so an
+unreachable tile host degrades the picture instead of deleting it, and the panel
+says the tiles failed rather than leaving an empty sea to be misread as an empty
+ocean.
 
 ---
 

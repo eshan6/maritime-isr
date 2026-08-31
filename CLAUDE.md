@@ -245,6 +245,12 @@ eo/        the electro-optical loop (ADR-037): `cue.py` is the scheduler and
 coastline.py  distance from land, from the shared 1 km mask (ADR-035). NOT
            bathymetry: operating depth is absent and must not be approximated.
 assistant/ the MDA assistant (ADR-031): the ranked Vessel of Interest object —
+           `attribution.py` answers "and who says that?" (ADR-038): `origin` is
+           the outside body a fact came from, `derivation` is what this system
+           then did to it. Attached at serialisation, so naming a source an
+           operator could check is a guarantee and not a convention every
+           collector has to remember. This system's own storage is never a
+           source: `graph / events` names a table in this repository.
            factor catalog, decomposable score, plain-language narration,
            recommended next actions, grounded Q&A. ASSEMBLES, never detects:
            a collector that started detecting would be a second, uncalibrated
@@ -256,7 +262,12 @@ graph/     ontology, edge store, event engine, confidence decay
 rules/     anomaly library, risk scoring
 eval/      the permanent evaluation harness
 api/       FastAPI serving layer
-ui/        React + MapLibre (Vercel-deployable)
+ui/        React + MapLibre (Vercel-deployable). Five tabs: Map, Watch,
+           Radar, Vessels, Graph. `Watch` is the one screen an officer works,
+           read by vessel or by event, and it replaced the three near-duplicate
+           Assistant / Findings / Alerts tabs (ADR-038). Light and dark themes
+           come off one set of CSS custom properties; nothing hardcodes a
+           colour, including the map marks.
 inspect/   throwaway inspection dashboards (ugly on purpose)
 infra/     cron entries, VM setup scripts, R2 config
 schemas/   canonical schemas (versioned) + the shared H3 helper

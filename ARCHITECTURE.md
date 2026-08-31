@@ -247,6 +247,14 @@ Two things the serving layer must never do, both enforced by tests:
   identity match between them. Both the findings API and the exported report
   carry that attribution as a field, not as prose someone might drop.
 
+  `assistant/attribution.py` is where that becomes mechanical rather than
+  careful (ADR-038). It turns the envelope's machine ids into `origin`, the
+  body a fact came from, and `derivation`, what this system then did to it, and
+  it is applied in `Evidence.as_dict` rather than at each construction site.
+  A response model that omits the field deletes it silently: `EvidenceHop`
+  lacked `origin` for a release and Pydantic dropped the attribution on every
+  alert card without erroring.
+
 **Cheap endpoints exist because request order is a feature.** A browser opens
 about six connections per origin, so an eighth request waits. The map's time
 scrubber took its window from `/api/stats`, which scans every event table,
