@@ -1531,3 +1531,63 @@ not park on the busiest instant — check that `busiestInstant` is being handed
 failed; the note says so and names the reason. Trails that jump across open
 water mean `breaks` is not reaching the client — `tr.breaks || []` silently
 treats a missing field as "she never stopped talking".
+
+---
+
+## The map opens on the sea: a dark canvas, one layer, and names (ADR-040)
+
+Four asks, three defects underneath them.
+
+**Dark map when the app is dark.** The basemap follows the theme. `canvas`
+(Esri Light Gray / Dark Gray) is the new default and the one entry with both
+variants; dimming is per-source now, because turning a light raster down to 62%
+is a light map wearing a filter, not a dark map. `--map-ground` is what shows
+wherever a tile has not arrived, which on a blocked link is everywhere.
+
+**The two text panels are folded into a chip.** They covered a third of the
+sea. Nothing is deleted: the chip names a count and opens to the full text, and
+the count is derived from the list it renders.
+
+**The map opens on one layer — where the ships are.** No trails, no
+projections, no event pins, no density, no footprints, no areas. **Clicking a
+vessel draws her trail and her projection regardless of the fleet-wide
+switches**, because the click *is* the request.
+
+**Names beside the marks past zoom 8.5**, decluttered in screen space, showing
+her declared name or her MMSI labelled as one — never this system's own row id.
+DOM markers rather than a symbol layer, so the names do not sit behind a third
+external host on a screen already watching tiles fail.
+
+**Pink for travelled, yellow for predicted.**
+
+**Three defects:**
+
+* **Picking a basemap did nothing until you picked it twice.** A "this is the
+  mount run, record and return" branch that the mount run never reached, so it
+  ate the operator's first click instead.
+* **Switching basemap emptied the map, permanently, with no error.** MapLibre
+  diffs an incoming style by default — a diff strips every source this app
+  added and never fires `style.load`. And with `diff: false` forcing a reload,
+  the gate still failed: `ready` went true → false → true inside one React
+  batch, so React compared the ends, saw no change and re-ran nothing. A
+  boolean cannot express "this happened again"; it is a monotonic `styleEpoch`
+  now. Both were hidden behind the swallowed click.
+* A first pass at label decluttering estimated the text box at 6.1 px per
+  character against a real 6.6-7.55, so two boxes each decided they fit.
+
+Verify:
+
+```
+python -m maritime_isr.api
+```
+
+*Success:* the Map opens dark on a dark system, showing vessel marks and
+nothing else; one collapsed chip sits above the scrubber where two panels used
+to be. Zoom past 8.5 and names appear beside the marks, none overlapping.
+Click a vessel: a pink line appears behind her and a dashed yellow one ahead,
+with faint cone rings widening along it. Switch basemap (Canvas / Ocean /
+Streets / Satellite) — the vessels must still be there after every switch.
+*Failure:* vessels disappearing after a basemap or theme switch means the style
+gate has regressed to a boolean. Names overlapping means `LABEL_CHAR_PX` is
+under-estimating the box again. A basemap button that highlights without the
+map changing means the swap effect is swallowing the first click.

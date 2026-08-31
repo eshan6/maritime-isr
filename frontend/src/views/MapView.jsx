@@ -99,6 +99,30 @@ const PREDICTION_REFRESH_S = 1800;
 //: that the cone is still narrower than the gap to the next ship.
 const PREDICTION_LEAD_HOURS = 3;
 
+//: Zoom at which vessel names appear beside their marks.
+//:
+//: 8.5 is about 150 km across the viewport on a laptop — close enough that the
+//: handful of hulls on screen can each carry a name without the labels
+//: colliding, and far enough out that it is still a picture of an area rather
+//: than of one ship. Below it the names are suppressed entirely: ninety-two
+//: overlapping labels is not more information than none, it is less.
+const LABEL_MIN_ZOOM = 8.5;
+
+//: Ceiling on how many names are drawn at once, whatever the zoom. A viewport
+//: over a crowded anchorage can hold dozens of hulls at any zoom, and the
+//: labels are DOM nodes: the cap is what keeps a pan into Kandla from putting
+//: two hundred of them on the page. Reported on screen when it bites, because a
+//: label layer that silently shows some of the fleet is a layer that quietly
+//: answers "who is that" wrong.
+const LABEL_MAX = 40;
+
+//: The size of a drawn name, for the collision test. Measured in the browser
+//: against this corpus (names render 6.6-7.55 px per character at 11px medium,
+//: 16.5 px tall), rounded UP: a box estimated too small lets two labels each
+//: decide they fit and puts the collision straight back.
+const LABEL_CHAR_PX = 7.7;
+const LABEL_H_PX = 17;
+
 //: How much of the travelled trail is drawn at full strength. The trail fades
 //: back toward the start of the session so the recent movement reads first;
 //: without it a trawler working one ground for four days draws a solid scribble
@@ -119,22 +143,56 @@ const TRAIL_FADE = 0.55;
 // provider is exactly how this failed. Each is served under an attribution the
 // layer carries.
 //
-// **Ocean is the default and it is not a cosmetic choice.** This is a maritime
-// picture. A street basemap draws every road inland and nothing at all at sea,
-// which is backwards for a screen where the sea is the subject: Esri's ocean
-// base carries bathymetry, so depth contours, shelf edges and channels are
-// visible, and a track running along a 200 m contour reads as what it is.
+// **The default basemap follows the theme, and that is the point of it.**
+// Setting the app to dark used to leave the map a bright plate of land with the
+// tiles turned down to 62% — a light map wearing a filter, which is how it read.
+// A dark screen wants a basemap that was *drawn* dark: near-black water, dark
+// grey land, restrained labels, so the marks on top are the brightest thing on
+// screen. That is the whole reason an operations map goes dark in the first
+// place, and dimming a light raster gets you a muddy plate instead.
+//
+// So a basemap may carry `tiles` as one array (theme-independent, e.g. imagery)
+// or as `{light, dark}`. `canvas` is the default and is the only entry with
+// both — Esri's Light Gray / Dark Gray canvases, which are the same cartography
+// in two values.
+//
+// **Keyless sources only, and more than one**, because a single hardcoded
+// provider is exactly how this failed before: the map once pointed at
+// `basemaps.cartocdn.com/light_all`, which stopped being keyless, and every
+// tile came back stamped "API KEY REQUIRED". Nothing about the map was wrong
+// then and nothing is now — every mark is placed from a lat/lon whether or not
+// a tile arrives. Each source is served under the attribution its layer carries.
 const BASEMAPS = [
+  {
+    id: "canvas",
+    label: "Canvas",
+    hint: "Dark or light with the theme. Least ink under the traffic.",
+    tiles: {
+      light: ["https://services.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}"],
+      dark: ["https://services.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}"],
+    },
+    // Names only, on transparent tiles, so they go over the base rather than
+    // replacing it — and they are drawn for their own value, which is why the
+    // reference layer has to switch with the base.
+    labels: {
+      light: ["https://services.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}"],
+      dark: ["https://services.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}"],
+    },
+    attribution: "Esri, HERE, Garmin, OpenStreetMap contributors",
+    maxzoom: 16,
+    // Already dark where it needs to be. Dimming it further would push the land
+    // into the background colour and lose the coastline entirely.
+    dimInDark: false,
+  },
   {
     id: "ocean",
     label: "Ocean",
-    hint: "Bathymetry and coastline. Best for open water.",
+    hint: "Bathymetry and coastline. Depth contours and shelf edges.",
     tiles: ["https://services.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}"],
-    // The reference layer is names only, on transparent tiles, so it goes over
-    // the base rather than replacing it.
     labels: ["https://services.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Reference/MapServer/tile/{z}/{y}/{x}"],
     attribution: "Esri, GEBCO, NOAA, National Geographic and other contributors",
     maxzoom: 13,
+    dimInDark: true,
   },
   {
     id: "streets",
@@ -143,6 +201,7 @@ const BASEMAPS = [
     tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
     attribution: "© OpenStreetMap contributors",
     maxzoom: 19,
+    dimInDark: true,
   },
   {
     id: "satellite",
@@ -151,20 +210,43 @@ const BASEMAPS = [
     tiles: ["https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"],
     attribution: "Esri, Maxar, Earthstar Geographics",
     maxzoom: 18,
+    // Imagery of the real world is already dark over water at night-time
+    // palettes and dimming it makes a berth unreadable.
+    dimInDark: false,
   },
 ];
 
-//: Built per basemap rather than held as one constant, so switching provider is
-//: a style swap and not a special case. `--map-tile-opacity` is a theme token:
-//: these tiles are drawn for a light page, and on the dark theme they are
-//: dimmed so the land plate does not outshine the vessels on top of it.
-function basemapStyle(id) {
+const DEFAULT_BASEMAP = "canvas";
+
+//: Pick the theme's variant of a field that may be one array or `{light, dark}`.
+function forTheme(v, themeKey) {
+  if (!v) return null;
+  return Array.isArray(v) ? v : (v[themeKey] || v.light || null);
+}
+
+//: Built per basemap and per theme rather than held as one constant, so
+//: switching either is a style swap and not a special case.
+//:
+//: `--map-ground` is the colour under the tiles and it matters more than it
+//: looks: it is what the operator sees wherever a tile has not arrived, which
+//: on a slow link is most of the screen for the first second and on a blocked
+//: one is all of it, forever. It has to be the right value for the theme on its
+//: own, with no tile on top.
+//:
+//: `--map-tile-opacity` dims a basemap that was drawn for a light page. It is
+//: applied only to sources that say they need it (`dimInDark`): dimming a
+//: basemap that is already dark washes the land into the background and takes
+//: the coastline with it.
+function basemapStyle(id, themeKey) {
   const b = BASEMAPS.find((x) => x.id === id) || BASEMAPS[0];
   const css = getComputedStyle(document.documentElement);
   const ground = css.getPropertyValue("--map-ground").trim() || "#eef2f6";
-  const opacity = parseFloat(css.getPropertyValue("--map-tile-opacity")) || 1;
+  const dim = parseFloat(css.getPropertyValue("--map-tile-opacity"));
+  const opacity = b.dimInDark && Number.isFinite(dim) ? dim : 1;
+  const tiles = forTheme(b.tiles, themeKey);
+  const labels = forTheme(b.labels, themeKey);
   const sources = {
-    base: { type: "raster", tiles: b.tiles, tileSize: 256,
+    base: { type: "raster", tiles, tileSize: 256,
             maxzoom: b.maxzoom || 19, attribution: b.attribution },
   };
   const layers = [
@@ -172,8 +254,8 @@ function basemapStyle(id) {
     { id: "base", type: "raster", source: "base",
       paint: { "raster-opacity": opacity } },
   ];
-  if (b.labels) {
-    sources.baselabels = { type: "raster", tiles: b.labels, tileSize: 256,
+  if (labels) {
+    sources.baselabels = { type: "raster", tiles: labels, tileSize: 256,
                            maxzoom: b.maxzoom || 19 };
     layers.push({ id: "baselabels", type: "raster", source: "baselabels",
                   paint: { "raster-opacity": Math.min(1, opacity + 0.2) } });
@@ -224,14 +306,14 @@ const LAYER_GROUPS = [
   {
     id: "live",
     title: "Live traffic",
-    hint: "Only vessels broadcasting at the time on the clock. Everything here "
-      + "moves with the timeline: the trail grows behind her, the projection "
-      + "reaches ahead of her.",
+    hint: "Only vessels broadcasting at the time on the clock. Click one to see "
+      + "her own track and projection; the switches below draw them for the "
+      + "whole fleet at once.",
     layers: [
       { id: "positions", label: "Vessels broadcasting now", color: VESSEL_COLOR },
-      { id: "trails", label: "Track travelled this session", color: TRAIL_COLOR },
-      { id: "predicted", label: "Predicted track (3 h ahead)", color: PREDICT_COLOR },
-      { id: "cone", label: "Uncertainty cone (selected vessel)", color: PREDICT_COLOR },
+      { id: "trails", label: "Travelled track, every vessel", color: TRAIL_COLOR },
+      { id: "predicted", label: "Predicted track, every vessel", color: PREDICT_COLOR },
+      { id: "cone", label: "Uncertainty cone", color: PREDICT_COLOR },
     ],
   },
   {
@@ -344,7 +426,20 @@ export function MapView() {
   const map = useRef(null);
   const nav = useNavigate();
   const [params, setParams] = useSearchParams();
-  const [ready, setReady] = useState(false);
+  // **A COUNTER, not a boolean, and the difference is a bug that emptied the
+  // map.** Every layer effect here is gated on "the style is up"; the swap
+  // effect used to drop that flag to false, call `setStyle`, and raise it again
+  // from `style.load`. React batches state updates, and MapLibre parses an
+  // inline style fast enough that both updates land in one batch — so `ready`
+  // went true → false → true, React compared the ends, saw no change, and
+  // re-ran nothing. Switching basemap therefore threw away every source this
+  // app had added (a full `setStyle` does) and never rebuilt one: no vessels,
+  // no marks, no error, permanently.
+  //
+  // A number that only ever goes up cannot be collapsed by batching. Each
+  // completed style load is a new epoch and every dependent effect re-runs.
+  const [styleEpoch, setStyleEpoch] = useState(0);
+  const ready = styleEpoch > 0;
   const [selected, setSelected] = useState(null);
   //: How the map came to be looking at this hull, when it was sent here from
   //: somewhere else. Held so the arrival can be *explained*: flying to a
@@ -369,21 +464,34 @@ export function MapView() {
   // layers it summarises), what has been flagged, the real satellite coverage,
   // and the operator's own drawn areas. Everything else is one click away in
   // its group, and the groups say what they hold.
+  // **The map opens on one layer: where the ships are.** Nothing else — no
+  // trails, no projections, no event pins, no density, no footprints, no
+  // areas.
+  //
+  // Every previous opening set was assembled by adding one more well-argued
+  // default to the last one, and each addition was individually right: the
+  // footprints were the only unambiguously real thing, a radar contact without
+  // its coverage ring invites a misreading, density summarises four event
+  // layers better than they do. Nobody ever added the reasons up, and a map
+  // that opens with everything shouting is a map that opens illegible.
+  //
+  // The floor is now the question the screen exists to answer — *what is out
+  // there right now* — and everything else is one click away in a group that
+  // says what it holds. The three per-vessel layers below (trail, projection,
+  // cone) are the "for every vessel at once" switches; a SELECTED vessel gets
+  // hers drawn whatever they say, because asking about one hull is exactly
+  // when her past and her predicted track are worth the ink.
   const [visible, setVisible] = useState({
-    // The three live layers open together on purpose. They are one picture of
-    // one vessel — been here, is here, going there — and an operator who has
-    // to switch two of them on to see the third has been handed a puzzle
-    // rather than a map. The old whole-corpus `tracks` mat, which is what the
-    // clutter budget was being spent on, is gone entirely.
-    positions: true, trails: true, predicted: true, cone: true, density: true,
+    positions: true, trails: false, predicted: false, cone: false,
+    density: false,
     encounter: false, loitering: false, port_visit: false, gap: false,
-    alerts: true,
-    detections: false, scenes: true, ports: false,
+    alerts: false,
+    detections: false, scenes: false, ports: false,
     radar_coverage: false, radar_tracks: false, radar_contacts: false,
     z_eez: false, z_contiguous_zone: false, z_territorial_sea: false,
     z_imbl: false, z_shipping_lane: false, z_sensitive_area: false,
     z_port_limit: false, z_anchorage: false, z_oil_terminal: false,
-    z_geofence: true,
+    z_geofence: false,
   });
   // Which key groups are expanded. `live` and `history` open, because those are
   // the two an operator reads the map through; the other two are available
@@ -423,21 +531,49 @@ export function MapView() {
   // have, it is theirs and we never move it under them.
   const [scrubbed, setScrubbed] = useState(false);
   //: Which basemap, remembered. An operator who works in bathymetry should not
-  //: have to reselect it on every page load.
+  //: have to reselect it on every page load. The DEFAULT is now the canvas,
+  //: which is the one entry that follows the theme — so a dark app opens a dark
+  //: map without the operator having to know that is a setting.
   const [basemap, setBasemap] = useState(
-    () => localStorage.getItem("misr.basemap") || "ocean");
+    () => localStorage.getItem("misr.basemap") || DEFAULT_BASEMAP);
   //: Set when a tile request fails, so a dead provider says so once instead of
   //: leaving a blank sea that reads as "no data here".
   const [tileError, setTileError] = useState(false);
+  //: Current zoom, mirrored into React so the name labels can switch on at
+  //: LABEL_MIN_ZOOM. MapLibre holds the authoritative value; this is a copy
+  //: that re-renders, and it is updated on `zoom` rather than `zoomend` so the
+  //: names appear during the gesture rather than after it.
+  const [zoom, setZoom] = useState(0);
+  //: Bumped on `moveend`. The label set depends on the viewport, which is not
+  //: React state; this is the signal that it changed.
+  const [viewTick, setViewTick] = useState(0);
+  //: How many names the cap withheld at the current view, so it can say so.
+  const [labelsHidden, setLabelsHidden] = useState(0);
+  //: Is the disclosure chip expanded? Closed on arrival: the notes are a
+  //: reference an operator opens when a layer looks wrong, not a preamble they
+  //: have to read past to reach the map.
+  const [notesOpen, setNotesOpen] = useState(false);
+  //: Live DOM markers, keyed by vessel id, reused across renders rather than
+  //: torn down and rebuilt — recreating forty nodes on every clock tick is what
+  //: would make this layer cost more than it is worth.
+  const labelMarkers = useRef(new Map());
   //: The map paints from JavaScript, so a theme flip has to rebuild its style
   //: object. CSS custom properties do not reach a MapLibre paint expression.
   const { resolved: themeKey } = useTheme();
 
   // ---- init map once ----
   useEffect(() => {
+    const initialBasemap = localStorage.getItem("misr.basemap") || DEFAULT_BASEMAP;
+    // The baseline the swap effect compares against. Recorded here, where the
+    // style is actually built, so the two can never disagree about what is on
+    // screen.
+    appliedStyle.current = `${initialBasemap}|${themeKey}`;
     const m = new maplibregl.Map({
       container: mapEl.current,
-      style: basemapStyle(localStorage.getItem("misr.basemap") || "ocean"),
+      // `themeKey` from the first render. If the system preference resolves
+      // later, the swap effect below rebuilds the style — it compares against
+      // `basemap|themeKey` and this mount records that pair.
+      style: basemapStyle(initialBasemap, themeKey),
       bounds: [[AOI.lonMin, AOI.latMin], [AOI.lonMax, AOI.latMax]],
       fitBoundsOptions: { padding: 40 },
       attributionControl: { compact: true },
@@ -451,9 +587,21 @@ export function MapView() {
     // on a screen whose entire job is showing where things are. None of those
     // marks need a basemap. They need the style to exist so layers can be added
     // to it, which is what `style.load` means.
+    // The label layer keys off zoom and off which vessels are in the viewport.
+    //
+    // Zoom is mirrored live, because the names appearing as you push in is the
+    // interaction. **The viewport is only re-read on `moveend`**, deliberately:
+    // `move` fires every frame of every pan and flyTo, and a React state
+    // update per frame to rebuild a marker list would make the pan itself
+    // stutter. Existing labels stay glued to their vessels during the gesture —
+    // a MapLibre marker is anchored to a lng/lat, not to a pixel — so the only
+    // thing that waits for the gesture to finish is which hulls are eligible.
+    const onZoom = () => setZoom(m.getZoom());
+    m.on("zoom", onZoom);
+    m.on("moveend", () => setViewTick((n) => n + 1));
     m.on("style.load", () => {
       addAoi(m);
-      setReady(true);
+      setStyleEpoch((n) => n + 1);
     });
     // A basemap that will not load is a fact about the network, and the map
     // must say so. Silently drawing an empty sea invites the reading that
@@ -472,22 +620,40 @@ export function MapView() {
   // re-added on the next `styledata`. The layer effects below key off `ready`,
   // which is why it is dropped and re-raised rather than left true: a redraw
   // that ran against a half-built style silently lost the vessels.
+  // **Seeded by the init effect with the pair the map was actually built from,
+  // not left null for this effect to consume.** The old shape was "if the ref
+  // is still null, this is the mount run, so record and return" — and it was
+  // wrong, because the mount run never reached that line: the `!ready` guard
+  // above it returned first, `ready` was not in the dependency list, so the
+  // effect's *next* run was the operator's first basemap click. That click hit
+  // the null branch and was swallowed. Picking a basemap did nothing until you
+  // picked it twice.
+  //
+  // Seeding removes the branch entirely: there is a baseline from the moment
+  // the map exists, and every run is the same comparison.
   const appliedStyle = useRef(null);
   useEffect(() => {
     if (!map.current || !ready) return;
     const want = `${basemap}|${themeKey}`;
-    // **Never restyle to the style already on screen.** This effect runs once
-    // on mount, when `ready` first goes true, and an unconditional `setStyle`
-    // there threw away every layer the app had just added and rebuilt them for
-    // nothing. Worse when the rebuild could not finish: the map went blank.
-    if (appliedStyle.current === null) { appliedStyle.current = want; return; }
+    // **Never restyle to the style already on screen.** `setStyle` throws away
+    // every layer this app added; doing it for a style that is already up
+    // rebuilds them for nothing, and blanks the map when the rebuild cannot
+    // finish.
     if (appliedStyle.current === want) return;
     appliedStyle.current = want;
     localStorage.setItem("misr.basemap", basemap);
     setTileError(false);
     const m = map.current;
-    setReady(false);
-    m.setStyle(basemapStyle(basemap));
+    // **`diff: false`, and it is load-bearing.** MapLibre's default is to DIFF
+    // the incoming style against the live one and apply the difference — and a
+    // basemap swap here is perfectly diffable, because both styles carry the
+    // same source ids with different tile URLs. Two consequences, both silent:
+    // the diff strips every source and layer this app added (they are not in
+    // the incoming style), and **`style.load` never fires** for a diffed
+    // update. So `ready` never came back, the layer effects never re-ran, and
+    // switching basemap emptied the map of vessels, permanently, with no error
+    // anywhere. A full reload is what the rest of this code already assumes.
+    m.setStyle(basemapStyle(basemap, themeKey), { diff: false });
     // `style.load`, not `styledata` plus `isStyleLoaded()`. The latter is only
     // true once every SOURCE has loaded, so a basemap whose tiles never arrive
     // leaves it false forever, `ready` never comes back, and the vessels are
@@ -495,10 +661,14 @@ export function MapView() {
     // including the marks that do not depend on tiles at all.
     m.once("style.load", () => {
       addAoi(m);
-      setReady(true);
+      setStyleEpoch((n) => n + 1);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [basemap, themeKey]);
+    // `ready` IS a dependency, and its absence is half of why the swallowed
+    // click above went unnoticed: without it, a basemap or theme change made
+    // while the map was still building was dropped and never reconsidered.
+    // With the ref seeded, re-running on `ready` is free when nothing changed.
+  }, [basemap, themeKey, styleEpoch]);
 
   // ---- load data (each layer independently; one slow/failing call must not
   //      blank the rest) ----
@@ -581,6 +751,41 @@ export function MapView() {
     return () => { live = false; };
   }, []);
 
+  // Every disclosure the map owes the operator, as one list the chip renders.
+  //
+  // The API notes (truncation, empty layers, which window is being played) plus
+  // the two this client owns: what the projection layer actually is, and how
+  // many vessel names the label cap withheld. Gathering them here is what lets
+  // the chip say "4 notes" — a count nobody has to maintain by hand, and one
+  // that cannot drift from what is inside it.
+  const mapNotes = useMemo(() => {
+    const out = Object.entries(notes)
+      .filter(([, v]) => v)
+      .map(([key, text]) => ({ key, text }));
+    if (predictions) {
+      out.push({
+        key: "predicted track",
+        text: predictions.failed
+          ? `Projections unavailable: ${predictions.failed}. The vessels and `
+            + "their trails are unaffected."
+          : `${predictions.items.length} projection`
+            + `${predictions.items.length === 1 ? "" : "s"}, `
+            + `${PREDICTION_LEAD_HOURS} h ahead. ${predictions.basis} `
+            + `${predictions.caveat}`
+              + (predictions.note ? ` ${predictions.note}` : ""),
+      });
+    }
+    if (labelsHidden > 0) {
+      out.push({
+        key: "vessel names",
+        text: `${labelsHidden} name${labelsHidden === 1 ? " is" : "s are"} not `
+          + "drawn at this view: the mark is there but its name would have "
+          + "landed on top of another one. Zoom in to separate them.",
+      });
+    }
+    return out;
+  }, [notes, predictions, labelsHidden]);
+
   // Reloaded on demand rather than only at mount, because drawing or deleting
   // an area has to change the map immediately — a geofence you cannot see is
   // a geofence you will draw again.
@@ -627,7 +832,11 @@ export function MapView() {
   // the first the day either is touched — which is the same "a collector that
   // started detecting" mistake the assistant is built to avoid.
   useEffect(() => {
-    if (predictionBucket == null || !visible.predicted) return;
+    // Asked whenever anything could draw a projection: the fleet-wide switch,
+    // or a selected vessel — who gets hers drawn regardless. Gating this on the
+    // switch alone is what would make clicking a hull on the default map show
+    // her trail and nothing ahead of her.
+    if (predictionBucket == null || !(visible.predicted || selected)) return;
     const ctrl = new AbortController();
     // A short delay so dragging the scrubber across a week fires one request at
     // the end rather than forty on the way.
@@ -645,9 +854,12 @@ export function MapView() {
     }, 180);
     return () => { clearTimeout(h); ctrl.abort(); };
     // `clockSec` is deliberately not a dependency — the bucket is. Keying on
-    // the raw clock would re-fire this on every animation frame.
+    // the raw clock would re-fire this on every animation frame. `selected` is
+    // reduced to a boolean: the projections come back for the whole
+    // broadcasting fleet in one answer, so changing WHICH hull is selected
+    // needs no new request, only a redraw.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [predictionBucket, visible.predicted]);
+  }, [predictionBucket, visible.predicted, !!selected]);
 
   // ---- static layers: events, ports, scenes, alert markers, track lines ----
   useEffect(() => {
@@ -656,7 +868,7 @@ export function MapView() {
     renderDensity(map.current, data.density, visible.density);
     renderRadar(map.current, data, radarTracks, visible);
     renderZones(map.current, data.zones, visible, (z) => setSelectedZone(z));
-  }, [ready, data, tracks, radarTracks, visible]);
+  }, [styleEpoch, data, tracks, radarTracks, visible]);
 
   // ---- the draw tool ----
   useEffect(() => {
@@ -674,33 +886,136 @@ export function MapView() {
     };
     m.on("click", onClick);
     return () => m.off("click", onClick);
-  }, [ready, drawing]);
+  }, [styleEpoch, drawing]);
 
   // ---- moving vessels: interpolate each track to the clock and glide ----
   useEffect(() => {
     if (!ready || !map.current) return;
     renderVessels(map.current, trackList, clockSec, visible.positions,
                   (id) => setSelected(id));
-  }, [ready, trackList, clockSec, visible.positions]);
+  }, [styleEpoch, trackList, clockSec, visible.positions]);
 
   // ---- the trail: where she has been in THIS session, up to the clock ----
   useEffect(() => {
     if (!ready || !map.current) return;
-    renderTrails(map.current, trackList, trailClockSec, visible.trails);
-  }, [ready, trackList, trailClockSec, visible.trails]);
+    renderTrails(map.current, trackList, trailClockSec, visible.trails, selected);
+  }, [styleEpoch, trackList, trailClockSec, visible.trails, selected]);
+
+  // ---- her name, beside her mark, once you are close enough --------------
+  //
+  // **DOM markers, not a MapLibre symbol layer, and that is a deliberate
+  // trade.** A symbol layer would be GPU-drawn and would declutter itself,
+  // which is the better mechanism — but it needs a `glyphs` URL, and this
+  // app's style is raster-only with no font server behind it. Adding one would
+  // put the vessel names behind a THIRD external host, on a screen where the
+  // operator is already watching basemap tiles fail to arrive. A glyph server
+  // that does not answer does not error visibly: the layer just renders
+  // nothing, which is this project's least favourite kind of failure.
+  //
+  // So the names are HTML, served from the same origin as the app, and they
+  // appear or they do not for reasons visible in the page. The cost is DOM
+  // nodes, which is what LABEL_MIN_ZOOM and LABEL_MAX are for.
+  useEffect(() => {
+    if (!ready || !map.current) return;
+    const m = map.current;
+    const live = labelMarkers.current;
+    const wanted = new Map();
+
+    if (visible.positions && zoom >= LABEL_MIN_ZOOM && clockSec != null) {
+      const b = m.getBounds();
+      const cands = [];
+      for (const tr of trackList) {
+        if (!tr.name) continue;      // no name is not a reason to invent one
+        const pos = posAt(tr, clockSec);
+        if (!pos) continue;
+        if (pos[0] < b.getWest() || pos[0] > b.getEast()
+            || pos[1] < b.getSouth() || pos[1] > b.getNorth()) continue;
+        cands.push({ id: tr.vessel_id, name: tr.name, pos });
+      }
+      // **Decluttered in screen space, because nothing else will do it.** A
+      // MapLibre symbol layer hides colliding labels for free; DOM markers
+      // (see the note above on why these are DOM) happily draw all of them on
+      // top of each other, and an anchorage came out as one grey smear of
+      // overlapping names — strictly worse than no names, because it looks
+      // like information.
+      //
+      // Greedy, in a fixed priority: the selected hull first, then by id so
+      // the same ships keep their labels as the fleet moves rather than the
+      // set flickering between neighbours on every tick.
+      cands.sort((x, y) => (x.id === selected ? -1 : y.id === selected ? 1
+                            : x.id < y.id ? -1 : 1));
+      const placed = [];
+      let over = 0;
+      for (const c of cands) {
+        if (wanted.size >= LABEL_MAX) { over++; continue; }
+        const p = m.project(c.pos);
+        // The marker sits 10px right of the mark, 11px type. Width is
+        // estimated from the character count rather than measured: measuring
+        // means laying the node out, and doing that for forty candidates on
+        // every tick is a synchronous reflow per frame.
+        //
+        // LABEL_CHAR_PX is measured, not guessed — rendered names in this
+        // corpus run 6.6 to 7.55 px per character (they are upper case, which
+        // is the wide end), and the constant sits above the top of that range
+        // deliberately. Under-estimating is the expensive direction: it lets
+        // two boxes both claim they fit and puts the overlap back, which is
+        // exactly what a first pass at 6.1 px did.
+        const r = { x1: p.x + 8, y1: p.y - LABEL_H_PX / 2 - 1,
+                    x2: p.x + 12 + c.name.length * LABEL_CHAR_PX,
+                    y2: p.y + LABEL_H_PX / 2 + 1 };
+        if (placed.some((q) => r.x1 < q.x2 && r.x2 > q.x1
+                            && r.y1 < q.y2 && r.y2 > q.y1)) { over++; continue; }
+        placed.push(r);
+        wanted.set(c.id, { name: c.name, pos: c.pos });
+      }
+      if (over !== labelsHidden) setLabelsHidden(over);
+    } else if (labelsHidden !== 0) {
+      setLabelsHidden(0);
+    }
+
+    for (const [id, mk] of live) {
+      if (!wanted.has(id)) { mk.remove(); live.delete(id); }
+    }
+    for (const [id, { name, pos }] of wanted) {
+      let mk = live.get(id);
+      if (!mk) {
+        const el = document.createElement("div");
+        el.className = "vessel-label";
+        el.textContent = name;
+        // Clicking the name selects the hull. A label you cannot click is a
+        // smaller target sitting next to the one you can, which reads as a
+        // dead spot on the map.
+        el.addEventListener("click", (e) => { e.stopPropagation(); setSelected(id); });
+        mk = new maplibregl.Marker({ element: el, anchor: "left", offset: [10, 0] })
+          .setLngLat(pos).addTo(m);
+        live.set(id, mk);
+      } else {
+        mk.setLngLat(pos);
+      }
+      mk.getElement().classList.toggle("is-selected", id === selected);
+    }
+  }, [styleEpoch, trackList, clockSec, zoom, viewTick, visible.positions, selected,
+      labelsHidden]);
+
+  // Markers live outside React's tree, so nothing else removes them when the
+  // view unmounts.
+  useEffect(() => () => {
+    for (const mk of labelMarkers.current.values()) mk.remove();
+    labelMarkers.current.clear();
+  }, []);
 
   // ---- the projection: where dead reckoning says she is going ------------
   useEffect(() => {
     if (!ready || !map.current) return;
     renderPredictions(map.current, predictions, selected,
                       visible.predicted, visible.cone);
-  }, [ready, predictions, selected, visible.predicted, visible.cone]);
+  }, [styleEpoch, predictions, selected, visible.predicted, visible.cone]);
 
   // ---- the selection ring, redrawn wherever the subject is --------------
   useEffect(() => {
     if (!ready || !map.current) return;
     renderSelection(map.current, selected, trackList, clockSec, data);
-  }, [ready, selected, trackList, clockSec, data]);
+  }, [styleEpoch, selected, trackList, clockSec, data]);
 
   // ---- park the playhead where the fleet actually is ----
   // The clock defaulted to the very END of the window, which is the one instant
@@ -1058,45 +1373,36 @@ export function MapView() {
         </div>
       )}
 
-      {/* What the map is NOT showing, in the operator's line of sight. Every
-          one of these used to be silent: a capped event query looked like an
-          empty second half of the window, and an empty SAR layer looked like a
-          clean scene rather than a scene we never processed. */}
-      {Object.values(notes).some(Boolean) && (
-        <div className="notebar">
-          {Object.entries(notes).filter(([, v]) => v).map(([k, v]) => (
-            <div key={k} style={{ marginBottom: 4 }}>
-              <span className="note-key mono">{k}</span>: {v}
-            </div>
-          ))}
-        </div>
-      )}
+      {/* **Folded to a chip.** These two panels covered a third of the sea.
+          Each sentence in them earns its place — a capped event query looks
+          exactly like an empty second half of the window, an empty SAR layer
+          looks like a clean scene rather than one nobody processed, and a
+          dashed line reaching ahead of a ship reads as knowledge unless
+          something says it is dead reckoning — but "the disclosure must be
+          available" was being read as "the disclosure must be permanently in
+          front of the map", and those are different requirements. A wall of
+          text nobody can dismiss is one nobody reads either.
 
-      {/* What the projection layer is, in the operator's line of sight rather
-          than in a tooltip. A dashed line reaching ahead of a ship is exactly
-          the kind of mark that gets read as knowledge, and this one is dead
-          reckoning. The caveat is the load-bearing half: `projection.py`
-          measured that a departure from a dead-reckoned track flags 98% of the
-          fleet, because every vessel alters at every waypoint, which is why
-          this system does not carry it as a suspicion factor. Without that
-          sentence on screen, "she left her predicted track" reads as a
-          finding. */}
-      {visible.predicted && predictions && (
-        <div className="notebar" style={{ borderLeft: `3px solid ${PREDICT_COLOR}` }}>
-          {predictions.failed ? (
-            <><strong>Projections unavailable.</strong> {predictions.failed}.
-              The vessels and their trails are unaffected.</>
-          ) : (
-            <>
-              <strong>
-                {predictions.items.length} projection
-                {predictions.items.length === 1 ? "" : "s"},
-                {" "}{PREDICTION_LEAD_HOURS} h ahead.
-              </strong>{" "}
-              {predictions.basis} {predictions.caveat}
-              {predictions.note ? ` ${predictions.note}` : ""}
-              {" "}Select a vessel to see her uncertainty cone.
-            </>
+          So: a chip that states how many notes there are, opening to the full
+          text on click. Nothing is deleted and nothing is summarised away. */}
+      {(mapNotes.length > 0) && (
+        <div className={`notechip ${notesOpen ? "is-open" : ""}`}>
+          <button type="button" className="notechip-head"
+                  aria-expanded={notesOpen}
+                  onClick={() => setNotesOpen((v) => !v)}>
+            <span className="notechip-dot" />
+            {mapNotes.length} note{mapNotes.length === 1 ? "" : "s"} on what
+            this map is showing
+            <span className="notechip-caret">{notesOpen ? "▾" : "▸"}</span>
+          </button>
+          {notesOpen && (
+            <div className="notechip-body">
+              {mapNotes.map((n) => (
+                <div key={n.key} className="notechip-item">
+                  <span className="note-key mono">{n.key}</span>: {n.text}
+                </div>
+              ))}
+            </div>
           )}
         </div>
       )}
@@ -1434,10 +1740,15 @@ function renderVessels(m, tracks, clockSec, on, onSelect) {
 // The trail is drawn to the interpolated position rather than to her last fix,
 // so its head sits under the vessel mark instead of trailing it by up to a
 // decimated sample.
-function renderTrails(m, tracks, clockSec, on) {
+// **The selected vessel always gets hers**, whatever the fleet-wide switch
+// says. The map opens showing positions only, and "click a ship to see where
+// she has been and where she is going" has to work from that state without the
+// operator first finding a checkbox — the click IS the request.
+function renderTrails(m, tracks, clockSec, on, selected) {
   const feats = [];
-  if (on && clockSec != null) {
+  if (clockSec != null) {
     for (const tr of tracks) {
+      if (!on && tr.vessel_id !== selected) continue;
       const s = sessionAt(tr, clockSec);
       if (!s) continue;
       const pts = tr.points;
@@ -1454,7 +1765,9 @@ function renderTrails(m, tracks, clockSec, on) {
       });
     }
   }
-  upsertTrailLayer(m, "trails", feats, on);
+  // Visible whenever there is anything in it. Keying visibility off `on` would
+  // build the selected vessel's trail and then hide the layer holding it.
+  upsertTrailLayer(m, "trails", feats, feats.length > 0);
 }
 
 //: `line-gradient` fades each trail toward the start of its own session, so on
@@ -1502,13 +1815,19 @@ function upsertTrailLayer(m, id, feats, on) {
 //     cone belongs on the hull the operator is asking about, which is what
 //     selecting one means. The radius comes from the API — it is the cone
 //     `tracks/projection.py` computed, not one re-derived here.
+//
+// **The selected vessel is drawn whatever the fleet-wide switch says**, for
+// the same reason her trail is: the map opens on positions alone, and clicking
+// a hull is the operator asking where she has been and where she is going.
 function renderPredictions(m, predictions, selected, on, coneOn) {
   const items = (predictions && predictions.items) || [];
   const lines = [];
   const ends = [];
   const cones = [];
-  if (on) {
+  {
     for (const p of items) {
+      const mine = p.vessel_id === selected;
+      if (!on && !mine) continue;
       const path = p.path || [];
       if (path.length < 2) continue;
       lines.push({
@@ -1532,7 +1851,11 @@ function renderPredictions(m, predictions, selected, on, coneOn) {
               : ""),
         },
       });
-      if (coneOn && selected && p.vessel_id === selected) {
+      // The cone follows the selection, and it is drawn for her whether or not
+      // the fleet-wide cone switch is on — that switch exists to put cones on
+      // everybody, which is a fog, not to withhold one from the hull under the
+      // question.
+      if (mine || (coneOn && on)) {
         // One ring per projected step: the cone is not a single circle, it is
         // a circle that widens along the path, and drawing only the end of it
         // would hide that the near end is tight.
@@ -1548,11 +1871,13 @@ function renderPredictions(m, predictions, selected, on, coneOn) {
       }
     }
   }
-  upsertPredictionLayer(m, "prediction-line", lines, on);
+  // Each layer is visible when it holds something, rather than when its switch
+  // is on: with the switches off and a hull selected these hold exactly her.
+  upsertPredictionLayer(m, "prediction-line", lines, lines.length > 0);
   upsertCircleLayer(m, "prediction-end", ends,
                     themeColor("--mark-predicted", PREDICT_COLOR),
-                    on, () => {}, MARK_STYLE.predicted);
-  upsertConeLayer(m, "prediction-cone", cones, on && coneOn);
+                    ends.length > 0, () => {}, MARK_STYLE.predicted);
+  upsertConeLayer(m, "prediction-cone", cones, cones.length > 0);
 }
 
 function upsertPredictionLayer(m, id, feats, on) {
