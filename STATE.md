@@ -8,8 +8,76 @@ session. `CLAUDE.md`, `ARCHITECTURE.md`, `DECISIONS.md` are stable contracts;
 > between status buckets, record what was verified vs assumed, log anything now
 > broken, and set "Next up." If you don't update it, the next session starts blind.
 
-**Last updated:** 2026-08-29 (sixth session) — **Area 5 fires for the first
-time: 2 alerts, both authored, no false positive. Area 4 unchanged at 3/2/1.**
+**Last updated:** 2026-08-31 (seventh session) — **The operator surface: three
+tabs merged into one, attribution named, dark theme, and a brace that emptied
+the light theme of its typography.**
+
+**Watch replaces Assistant, Findings and Alerts** (ADR-038). They showed
+substantially the same facts three times over, and the only irreplaceable
+capability, recording a disposition, was buried in the last of them. Two lenses
+now: *by vessel* (one row per hull, ranked, her detections gathered underneath)
+and *by event* (a chronological queue). Confirm / Monitor / Dismiss sit on the
+alert in both. No real-versus-synthetic filter or section by instruction; the
+per-row SCENARIO tag stays, because a boundary makes you navigate to see
+everything and a label lets you tell what you are looking at.
+
+**"Source: graph / events" named a table inside this repository.** New
+`assistant/attribution.py` splits provenance into `origin` (the outside body a
+fact came from) and `derivation` (what this system then did to it), attached at
+serialisation so it is a guarantee rather than a convention twelve collectors
+must remember. Identity-change evidence now says *what* changed ("flag changed
+from PAN to TON") instead of nine identical copies of "identity changed on
+record".
+
+**Dark theme**, three states (System / Light / Dark), off one set of CSS custom
+properties. The six evidence-family colours are re-stepped for the dark surface
+and revalidated rather than inverted: worst adjacent pair dE 8.4 protan and 19.3
+normal-vision, floors 8 and 15, all six over 3:1. Map marks read their colours
+from the stylesheet; hardcoded, they stayed light-mode blue on a dark sea.
+
+**The basemap was serving a watermark.** The CARTO endpoint stopped being
+keyless, so every tile came back stamped "API KEY REQUIRED". Three keyless
+sources now (Ocean default, for bathymetry), switchable in the layer panel.
+Nothing about the map itself was wrong: every mark was always placed from a
+lat/lon.
+
+**Four defects surfaced while doing the above, three of them worse than the
+thing being fixed:**
+
+* **A misplaced brace emptied the light theme of its typography.** Inserting the
+  dark block closed `:root` one declaration early, so `--font`, the whole
+  `--fs-*` scale, the weights, `--radius` and `--nav-h` were swallowed into
+  `:root[data-theme="dark"]` and were **undefined** in light mode. The browser
+  fell back to serif at default sizes across every screen. It read as a
+  redesign. Watch for this shape: a CSS insertion that lands mid-block does not
+  error, it silently reassigns everything below it.
+* **Every operational map layer was gated on MapLibre's `load`**, which waits on
+  sources. An unreachable tile host therefore deleted the picture rather than
+  degrading it: no vessels, no alerts, no AOI. Gated on `style.load` now.
+* **`EvidenceHop` had no `origin` field**, so Pydantic silently dropped the
+  attribution and alert cards kept printing the raw module id it replaced.
+* **A failed `/tracks` request was swallowed**, and the map printed "no AIS
+  tracks in this window" either way. Loading, failed and empty are three
+  sentences now.
+
+**Interface language** was tightened (shorter strings, no em or en dashes
+anywhere a user can see, frontend and backend). One rule from that pass was
+**reverted after review and must not be reintroduced**: casing is left as the
+data and the existing screens had it. Forcing a capital on every enum was not
+asked for.
+
+**Open, needs the operator:** on his machine the map showed no vessels and the
+status read "no AIS tracks in this window". Not reproduced in the sandbox, where
+97 of 200 draw. The status line now distinguishes loading / failed / genuinely
+empty, so his next run will say which. Untriaged until he reports back.
+
+**Full suite green throughout: 967 passed, 37 skipped.** Nothing in this session
+touched a detector, and the Area 4 and Area 5 alert counts are unchanged.
+
+---
+
+**Sixth session** — **Area 5 fires for the first time: 2 alerts, both authored,
+no false positive. Area 4 unchanged at 3/2/1.**
 
 **Area 5 was silent because the corpus held no lie.** `DECLARED_CLASS_OVERRIDES`
 is written in cast keys (`eo_false_class`); both readers look it up by entity id
@@ -654,7 +722,7 @@ on Eshan's machine.
 | 6.0 → 6.3 | Phase 6 product surface (API + UI + export) | 🟡 | **The M6 demo definition is now fully built** (ADR-024/025): map, ranked findings, plain-English reason, one-click incident report. Sandbox-green and browser-verified; **never run against the real corpus**. Graph opens on the whole network and the scrubber no longer disappears (ADR-027). |
 | — | Coastal radar as a source (`ingest/radar`, `fusion/radar_ais`, `api/radar/*`, Radar tab) | 🟡 | **Not a spec unit** — ADR-028 + **ADR-029**. A simulated CSN picture over the same vessel truth as the AIS, landed through a real connector into `radar_track_report`, correlated by the existing association engine, filtered by the existing dark cascade, served over three API routes and drawn in the UI. **Precision 100%, recall 43% on the synthetic picture; correlation resolves 98.2% of resolvable tracks to the right hull.** Sandbox-green; **never run on the laptop**, and no real radar feed exists. |
 | — | Maritime zone layer (`zones/`, `ingest/zones`, `/api/zones`, map geography + draw tool) | 🟡 | **Not a spec unit** — ADR-030. Port areas, anchorages, terminals/SPMs, customary lanes, the four migrated sensitive areas and operator geofences, as landed rows with provenance and an H3 cell index. Zone entry/exit are landed events. **The four statutory limits are absent by decision** and arrive only through the connector. Sandbox-green; **never run on the laptop**. |
-| — | **IDEX Area 1 — the MDA assistant** (`assistant/`, `/api/voi`, `maritime-isr voi`, Assistant tab) | 🟡 | **Not a spec unit** — ADR-031. The ranked Vessel of Interest object: factor catalog, a score that decomposes exactly to the factor, plain-language narration, next actions with computed feasibility and stated capability, and a question answerer that retrieves rather than generates. Sandbox-green, browser-verified; **never run on the laptop**. |
+| — | **IDEX Area 1 — the MDA assistant** (`assistant/`, `/api/voi`, `maritime-isr voi`, Watch tab) | 🟡 | **Not a spec unit** — ADR-031. The ranked Vessel of Interest object: factor catalog, a score that decomposes exactly to the factor, plain-language narration, next actions with computed feasibility and stated capability, and a question answerer that retrieves rather than generates. Sandbox-green, browser-verified; **never run on the laptop**. |
 | — | **IDEX Area 2 — predictive AIS analysis** (`anomaly/identity`, `tracks/activity`, `tracks/projection`, `baselines.py`) | 🟡 | **Not a spec unit** — ADR-032. Identity authenticity (IMO check digit, MMSI/flag, registry consistency), activity classification from motion alone, forward projection as an assertion, per-area baselines as a landed artifact. **The arithmetic identity checks cannot fire on scenario data by construction** and must be measured on the landed real GFW corpus. Track-departure detection is built and deliberately **not** a suspicion factor — measured at 87-98% of the fleet. |
 | — | **IDEX Area 3 — radar picture classification** (`tracks/vessel_type`, `tracks/interactions`, `fusion/contact_profile`) | 🟡 | **Not a spec unit** — ADR-033. Vessel type from motion alone: **65% fine / 90% coarse on held-out hulls**, with the coarse vocabulary derived from the confusion matrix so the model is never asked to separate `Aframax/bulker/product_tanker` or `Suezmax/VLCC`. Interaction detection (company, shadowing, converging-and-holding, transfer): **0 findings on the corpus at the 120-minute gate**, reported not tuned; `transfer_pattern` is **unvalidatable here** because the scenario's counterparties are dark by design. Contact profiles produced on all 8 dark contacts. Sandbox-green; **never run on the laptop**, and no real CSN feed exists. |
 | — | **IDEX Area 2 — declared voyage** (`schemas.VoyageDeclaration`, `ingest/aisstream`, `anomaly/voyage`, `coastline.py`) | 🟡 | **Not a spec unit** — ADR-035. AIS message 5 landed for the first time: 3,091 declarations over 131 hulls, honest by default. Two rules — an arrival no hull could make, and a destination she never steered towards. **2 alerts, both true positives, zero false positives.** The live connector now parses `ShipStaticData` but is on the PARKED path and has never seen a live message. Real distance-from-shore replaces the port-distance proxy; **operating depth is still absent and not faked**. Sandbox-green; **never run on the laptop**. |

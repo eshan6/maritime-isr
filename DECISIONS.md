@@ -3392,3 +3392,109 @@ is not an observation about the sea (ADR-021).
   on prototype descriptors rather than on the corpus. There is no camera, no
   image has ever been examined, and real-feed precision must be re-measured on a
   deploy host that does not exist (CLAUDE.md §4.6, §5).
+
+---
+
+## ADR-038 — One operator surface, and naming who says so *(Accepted)*
+
+**Context.** The product had grown three top-level views that a user, opening it
+cold, described as "seemingly doing the same things": **Assistant** (every
+subject ranked, with the score decomposed, narration and recommended actions),
+**Findings** (a narrower table restricted to what the real landed corpus
+supports, attribution-first), and **Alerts** (the raw detector queue, and the
+only place any of it could be acted on).
+
+They were not identical. But the overlap was most of each, and the split cost
+more than it bought:
+
+* The assistant was already a superset by coverage. Nearly anything in the other
+  two also appeared there.
+* Two capabilities were unique and both were buried. Only Alerts could record a
+  disposition. Only Findings held the real-versus-synthetic line.
+* An officer investigating a hull had to visit two screens to see her ranked
+  score and her detections, and a third to act on either.
+
+**Decisions.**
+
+**(a) One tab, two lenses over the same facts.** `Watch` replaces all three.
+*By vessel* is one row per hull, ranked, with every detection about her gathered
+underneath. *By event* is a chronological queue, newest first, one card per
+detection. Neither is a subset of the other and neither is a filter of the
+other: they are two orderings of one dataset, because an officer investigates a
+*ship* and works a *watch*, and those are different verbs. Four alerts on one
+hull are one investigation and four items on a queue at the same time.
+
+**(b) The disposition controls live on the alert, in both lenses.** The
+capability that was unique to the old Alerts tab is now available wherever an
+alert is shown. Recording a decision never requires changing screen, which was
+the single strongest argument the old split had against it.
+
+**(c) The real-versus-synthetic *boundary* goes; the real-versus-synthetic
+*label* stays.** By operator instruction there is no filter, no separate
+section and no gate. Every row still carries its `SCENARIO` tag. These are not
+the same thing: a boundary makes a person navigate to see everything, a label
+makes them able to tell what they are looking at. Dropping the tag as well would
+put a generated figure in front of somebody with nothing to say it was
+generated, which is the one error CLAUDE.md §4.6 and ADR-019 treat as
+unrecoverable.
+
+**(d) Provenance gets a reader-facing half: `origin` and `derivation`.** The
+envelope on every record (CLAUDE.md §4.1) carries `source_id` and `source_ref`,
+and those are correct as identifiers. What was wrong was rendering them raw. The
+assistant printed `source graph / events` beneath an accusation, which names a
+SQLite table and a column *inside this repository*. An operator asked to trust a
+flag cannot audit that: there is nobody to ring and no record to pull. Against a
+product whose entire proposition is traceable trust, citing a folder on our own
+laptop is worse than saying nothing.
+
+Two fields, deliberately separate because they answer different questions:
+
+* **`origin`** is the body, register or feed the underlying facts came from. The
+  thing an operator could go and check independently.
+* **`derivation`** is what this system then did to those facts. Empty when a
+  record was landed as-is; populated whenever we computed, compared, joined or
+  inferred.
+
+The split is the same one ADR-017 and ADR-018 already draw: a dark-vessel
+assessment is GFW's finding carried through, a designation is OFAC's decision,
+and the identity match between their record and our hull is **ours**.
+`derivation` is where that last sentence lives. A derived claim carried under
+its source's name is the source asserting something it never said.
+
+Attribution is attached at **serialisation**, in `Evidence.as_dict`, not at the
+dozen construction sites. "Every evidence item names a source somebody could
+check" is then a guarantee rather than a convention twelve callers must
+remember. Our own rule modules are named as ours (`identity_rules` reads
+"Maritime ISR identity rules") rather than hidden behind a module path, and a
+source id with no entry is humanised rather than dressed up: an unattributed
+record says "not attributed", because a plausible-looking source name for a
+record we cannot attribute would be a fabrication.
+
+**Consequences and the defects this surfaced.**
+
+* **Three tests asserted on the exact casing of a note** rather than on the fact
+  that a note is made, so a copy edit failed them for a reason unrelated to the
+  behaviour under test. They compare case-insensitively now.
+* **`EvidenceHop` had no `origin` field**, so Pydantic silently dropped the
+  attribution and alert cards kept printing the raw module id it was written to
+  replace. A response model that omits a field does not error, it deletes: the
+  same class of silent loss as an unregistered conformed table.
+* **A failed `/tracks` request was swallowed**, and the map then printed "no AIS
+  tracks in this window" — a claim about the sea made on the strength of a
+  request that never returned. Loading, failed and genuinely empty are three
+  different sentences now.
+* **Every operational layer on the map was gated on MapLibre's `load`**, which
+  does not fire until the map has rendered its sources. An unreachable tile host
+  therefore did not degrade the picture, it deleted it: no vessels, no alerts,
+  no area of interest, on a screen whose whole job is showing where things are.
+  None of those marks need a basemap. They are gated on `style.load`.
+* The old paths (`/assistant`, `/findings`, `/alerts`) redirect rather than 404.
+  Somebody has a bookmark or a link in a handover note, and a dead URL in an
+  operations tool reads as the tool being broken.
+
+**What this ADR does not decide.** The interface's *wording* was rewritten at
+the same time and is not a decision worth an ADR: it is house style, recorded in
+the header comment of `WatchView.jsx`. One rule from that pass was reverted after
+review and is worth stating so it is not reintroduced: **casing is left as the
+data and the existing screens had it.** Forcing a capital on every enum was a
+change nobody asked for.

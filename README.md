@@ -57,7 +57,7 @@ maritime_isr/
   schemas/   canonical schemas (versioned) + the shared H3 helper
   ports.py   the one port gazetteer (ADR-023)
   overpass.py  satellite imaging opportunities over AIS gaps (ADR-026)
-frontend/    React + MapLibre product surface (Phase 6) — Map · Findings · Alerts · Radar · Vessels · Graph
+frontend/    React + MapLibre product surface (Phase 6) — Map · Watch · Radar · Vessels · Graph
 ```
 
 ---
@@ -205,9 +205,15 @@ lands, and running it first prints "no landed ais_position data" and exits.
 > it is no longer something you must remember.
 
 Then open **http://127.0.0.1:8000** in a browser. That's the whole demo — Map,
-Findings, Alerts, Radar, Vessels, Graph. Nav routes, hard refreshes and pasted deep
+Watch, Radar, Vessels, Graph. Nav routes, hard refreshes and pasted deep
 links all work; the backend falls back to the app's `index.html` for any
-non-`/api` path.
+non-`/api` path. The three older paths (`/assistant`, `/findings`, `/alerts`)
+redirect into Watch rather than 404, because a dead URL in an operations tool
+reads as the tool being broken.
+
+**Light or dark**, chosen from the button at the end of the nav bar. Three
+states: System follows the operating system, Light and Dark override it in
+either direction.
 
 **If a view is empty, it is telling you which step is missing** — "no AIS
 positions landed" means `scenario generate` has not run, and "no ownership
@@ -227,6 +233,7 @@ token (`X-API-Token`, default `maritime-isr-dev`, override with `MISR_API_TOKEN`
 | `/api/vessels/{id}/report` | **the one-click incident report** (HTML, or `?format=json`) |
 | `/api/findings` | the ranked findings table |
 | `/api/alerts` (+ detail, `/disposition`) | the alert queue and analyst feedback |
+| `/api/voi` (+ `/{id}`, `/workload`, `/catalog`, `/{id}/ask`) | the ranked Vessel of Interest list, one subject's full account, the workload reduction, the factor catalog, and grounded Q&A |
 | `/api/events`, `/api/events/density` | event rows; per-H3-cell counts over the whole corpus |
 | `/api/detections` | SAR radar contacts |
 | `/api/tracks`, `/api/scenes`, `/api/ports`, `/api/stats` | map layers and headline figures |
@@ -240,7 +247,7 @@ token (`X-API-Token`, default `maritime-isr-dev`, override with `MISR_API_TOKEN`
 Interactive docs at `/docs`. Every vessel/edge payload carries `is_synthetic`
 and the provenance envelope; every count returns `{real, synthetic}` separately.
 
-The six views:
+The five views:
 
 - **Map** — AOI framed on the Arabian Sea, an 8-week time scrubber with
   play/pause that animates vessels along their AIS tracks, and toggleable
@@ -252,12 +259,24 @@ The six views:
   the target is), tracks, and dark contacts with a dashed segment from a
   vessel's last AIS fix to where radar still had her. Click a vessel for its
   entity panel.
-- **Findings** — the ranked table: GFW-assessed intentional-disabling AIS gaps
-  first, then sanctions-matched hulls, each row expanding to its evidence.
-  Ranking is a sum of **named signals shown with the row**, never a blended
-  score.
-- **Alerts** — a short, high-signal queue; each alert's evidence chain as
-  labelled hops, with confirm/watch/dismiss that persist.
+- **Watch** — the one screen an officer works, read two ways (ADR-038). It
+  replaces the three separate Assistant, Findings and Alerts tabs, which showed
+  substantially the same facts three times over with the only irreplaceable
+  capability, recording a decision, buried in the last of them.
+  - *By vessel* — one row per hull, ranked, with every detection about her
+    gathered underneath. The score decomposes on its face: each factor's points
+    are printed and they add to the total. Selecting a hull opens why she is on
+    the list, her evidence with its attribution, the arithmetic, the recommended
+    actions and a grounded question box.
+  - *By event* — a chronological queue, newest first, one card per detection.
+  - **Confirm / Monitor / Dismiss are on the alert in both lenses**, so
+    recording a decision never needs a change of screen. The stored vocabulary
+    is `confirm | dismiss | watch`; `watch` shows as *Monitor* because the tab
+    is itself called Watch.
+  - There is **no real-versus-synthetic filter or section**. Every row still
+    carries its `SCENARIO` tag: a boundary makes you navigate to see everything,
+    a label lets you tell what you are looking at, and only the second is an
+    invariant here.
 - **Radar** — the coastal-radar dark-contact queue (ADR-028/029), with the
   evidence for each: which stations held it, its length from radar
   cross-section, how long nothing on AIS explained it, and — where the contact

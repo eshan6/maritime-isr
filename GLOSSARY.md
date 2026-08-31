@@ -251,13 +251,44 @@ firewall ports, used to connect the Vercel frontend to the backend.
 
 ## Terms an operator meets on screen (Phase 6)
 
+**Watch** — the one screen an officer works, read two ways. *By vessel* is one
+row per hull, ranked, with every detection about her gathered underneath, because
+you investigate a ship. *By event* is a chronological queue, newest first,
+because you work a watch by going down a list and clearing it. Same facts, two
+orderings. It replaced three separate tabs that showed most of the same things
+(ADR-038).
+
+**Disposition** — the analyst's verdict on one alert: **Confirm** (it was real),
+**Monitor** (keep it open and keep looking), **Dismiss** (not real, close it).
+Stored against the alert and against a ledger that keeps every verdict, not just
+the latest. This is the feedback loop's raw material, and it is what the
+precision figure is measured from. The stored words are `confirm | dismiss |
+watch`; `watch` shows as *Monitor* on screen so it does not collide with the tab
+called Watch.
+
+**Origin** and **derivation** — the two halves of "and who says that?". *Origin*
+is the outside body, register or feed a fact came from, the thing you could go
+and check independently: OFAC, Global Fishing Watch, an AIS broadcast, a filed
+arrival notification. *Derivation* is what this system then did to those
+records, and it is present only when we computed, compared, joined or inferred
+something. A derived claim carried under its source's name would be that source
+asserting something it never said. Storage inside this repository is never an
+origin (ADR-038).
+
+**Evidence family** — which kind of evidence a factor came from: movement,
+declared identity, connections, filed paperwork, imagery, radio. Each has one
+fixed colour across the whole product, so a colour means the same thing on every
+screen. Three of the six are unbuilt areas, and the screen shows them as absent
+rather than omitting them, because a page listing only what it found reads as
+complete.
+
 **Finding vs candidate** — the distinction the whole sanctions gradient exists to
 protect. A **finding** is matched on an IMO (a permanent hull number, hard to
 fake) or on a call sign *and* a name agreeing — two independent identifiers. A
 **candidate** is a name-only or call-sign-only hit: names change and collide, and
 call signs are reassigned by the flag state, so it is a lead to verify rather
 than an assertion. A candidate never earns a red treatment and never ranks a row
-on the Findings screen. (ADR-018, CLAUDE.md §4.4.)
+on the Watch screen. (ADR-018, CLAUDE.md §4.4.)
 
 **Match tier** — *which* of those a given match is: `imo` (0.95) > `call_sign_name`
 (0.80) > `call_sign` (0.40) > `name` (0.35). The gap between 0.80 and 0.40 is the
@@ -270,7 +301,7 @@ worth an analyst's time and they are not the same claim, so the badge and the
 sentence say which. It also means a vessel name differing from the listed name is
 *not* evidence of anything: a ship's name never equals a company's.
 
-**Priority** (Findings screen) — the sum of the named signals a vessel actually
+**Priority** (Watch screen) — the sum of the named signals a vessel actually
 carries, shown with the signals under it. **It is an ordering, not a
 probability**, and it is never displayed without its parts. Deliberately not a
 blended risk score: a number whose listed reasons do not add up to it is not an
