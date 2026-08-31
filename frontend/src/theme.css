@@ -72,6 +72,14 @@
   --mark-vessel: #1a5fb4;
   --mark-alert: #b0221b;
   --mark-selected: #0b7ea8;
+  /* Where she has been on this trip, and where dead reckoning says she is
+     going. Deliberately the SAME hue as the vessel mark and separated by
+     line style instead: solid behind her, dashed ahead. Past and future are
+     two halves of one object's motion, and spending a second hue on the
+     future would say they are two different kinds of thing on a map that has
+     already spent eleven hues saying that about eleven other layers. */
+  --mark-trail: #4a7fbe;
+  --mark-predicted: #0f7bd1;
   --map-ground: #eef2f6;
   --map-tile-opacity: 1;
 
@@ -156,6 +164,8 @@
   --mark-vessel: #4b95e8;
   --mark-alert: #e06c66;
   --mark-selected: #38c6f4;
+  --mark-trail: #6ea3dc;
+  --mark-predicted: #58aef5;
   --map-ground: #14171a;
   /* Raster basemaps are drawn for a light page. Dimming and desaturating the
      tiles is what stops the land plate glowing brighter than the vessels on
@@ -568,6 +578,21 @@ p:last-child { margin-bottom: 0; }
 .scrubber-waiting { opacity: 0.62; }
 .scrubber-waiting .play, .scrubber-waiting input[type="range"] {
   cursor: default; }
+/* The playback rate. Same control shape as the basemap picker, because it is
+   the same kind of choice: a small set of named alternatives where one is on. */
+.speed-pick { display: flex; gap: 3px; flex: 0 0 auto; }
+.speed-pick button {
+  border: 1px solid var(--border); background: var(--surface);
+  color: var(--ink-3); border-radius: var(--radius-sm); padding: 3px 7px;
+  cursor: pointer; font: inherit; font-size: var(--fs-micro);
+  font-variant-numeric: tabular-nums;
+}
+.speed-pick button:hover:not(:disabled) { color: var(--ink); }
+.speed-pick button:disabled { cursor: default; opacity: 0.55; }
+.speed-pick button.on {
+  background: var(--blue-weak); border-color: var(--blue);
+  color: var(--blue-ink); font-weight: var(--w-bold);
+}
 
 .maplibregl-popup-content { font: inherit; font-size: var(--fs-meta);
   border-radius: var(--radius); box-shadow: var(--shadow-lg); padding: 9px 11px; }
@@ -578,9 +603,16 @@ p:last-child { margin-bottom: 0; }
    The disclosures and the controls they qualify were competing for one column.
    240px is the key's 216px plus its 12px gutter and a 12px gap; the `min()`
    keeps the panel on screen when the window is too narrow for both. */
+/* One positioned COLUMN holding every note, rather than each note positioning
+   itself. They all carried `position: absolute` at this one corner, so two on
+   screen together landed exactly on top of each other and the later one in the
+   DOM covered the earlier — a disclosure hidden by another disclosure, which
+   is the worst possible way to lose one. */
 .map-notes {
   position: absolute; left: 240px; bottom: 74px; z-index: 5;
   max-width: min(460px, calc(100vw - 264px));
+  display: flex; flex-direction: column; gap: 8px;
+  max-height: calc(100vh - 200px); overflow-y: auto;
 }
 .map-notes .note-key { font-weight: var(--w-bold); }
 
@@ -835,6 +867,7 @@ p:last-child { margin-bottom: 0; }
     --fam-paperwork: #c98500; --fam-imagery: #d55181; --fam-radio: #008300;
     --fam-other: #7c8791;
     --mark-vessel: #4b95e8; --mark-alert: #e06c66; --mark-selected: #38c6f4;
+    --mark-trail: #6ea3dc; --mark-predicted: #58aef5;
     --map-ground: #14171a; --map-tile-opacity: 0.62;
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(0, 0, 0, 0.3);
     --shadow-lg: 0 8px 30px rgba(0, 0, 0, 0.55);

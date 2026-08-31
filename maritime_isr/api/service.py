@@ -20,8 +20,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-from ..config import CLI
+from ..config import AIS_SESSION_BREAK_HOURS, CLI
 from ..schemas.keys import native_vessel_id, vessel_node_id
+from ..tracks.projection import (CONE_GROWTH_M_PER_HOUR, MAX_LEAD_HOURS,
+                                 project_from)
 from . import graph_service as gsvc
 from . import report
 from .reader import Reader, as_iso, open_reader
@@ -378,10 +380,37 @@ def get_track(canonical: str, *, start: Optional[str] = None,
     }
 
 
+def _session_starts(epochs: list[int], break_s: float) -> list[int]:
+    """Indices at which a new **reporting session** begins.
+
+    A session is an unbroken run of broadcasting: consecutive fixes separated by
+    no more than ``break_s``. Index 0 is never returned — every track starts a
+    session by definition, and saying so would be noise.
+
+    This is the whole defence against the map's oldest piece of fabrication.
+    Interpolating between two fixes asserts that the vessel travelled the line
+    between them at a steady speed; across four minutes that is a fair reading
+    of the data, and across five days it is an invention. Segmenting first means
+    the animation can refuse to draw her at all while she was not reporting,
+    which is the honest answer to "where was she" during a silence.
+    """
+    return [i for i in range(1, len(epochs))
+            if epochs[i] - epochs[i - 1] > break_s]
+
+
 def list_tracks(*, max_vessels: int = 200, max_points: int = 140) -> dict:
     """Decimated AIS tracks for every vessel that has positions, for the map's
     time animation. Each track is [[lon, lat, epoch_seconds], ...] so the client
     can interpolate a vessel's position at any clock time and animate it moving.
+
+    **Each track also carries ``breaks``** — the indices into ``points`` where
+    a new reporting session starts (``AIS_SESSION_BREAK_HOURS``). Without it the
+    client cannot tell a four-minute report interval from a five-day silence,
+    because decimation flattens both to "the next point in the array": at 200
+    points over a fifty-day track, consecutive samples are hours apart whether
+    or not anything was heard in between. The client needs the breaks measured
+    on the FULL-resolution series, which is here, not on what survived
+    decimation, which is all it can see.
 
     On the real corpus there is no free AIS, so ais_position is empty and this
     returns an empty list with a note — the honest reason the real map shows no
@@ -395,6 +424,7 @@ def list_tracks(*, max_vessels: int = 200, max_points: int = 140) -> dict:
     draws 200 of 208 ships is asserting a fleet size it did not measure.
     `matched_vessels` carries the true count.
     """
+    break_s = AIS_SESSION_BREAK_HOURS * 3600.0
     with open_reader() as reader:
         if not reader.has("ais_position"):
             return {"items": [], "note": "no AIS positions landed",
@@ -416,24 +446,43 @@ def list_tracks(*, max_vessels: int = 200, max_points: int = 140) -> dict:
                 "AND lat IS NOT NULL ORDER BY ts", [vid])
             if not pts:
                 continue
-            step = max(1, len(pts) // max_points)
-            dec = pts[::step]
-            # always include the last point so the track ends where it truly ends
-            if dec[-1] is not pts[-1]:
-                dec.append(pts[-1])
-            coords = []
-            for p in dec:
+            # Every usable fix, at full resolution, BEFORE decimation. The
+            # session boundaries have to be measured here: decimation is what
+            # destroys the evidence of a silence.
+            full = []
+            for p in pts:
                 ts = p["ts"]
                 epoch = int(ts.timestamp()) if hasattr(ts, "timestamp") else None
                 if epoch is None or p["lon"] is None or p["lat"] is None:
                     continue
-                coords.append([round(p["lon"], 4), round(p["lat"], 4), epoch])
+                full.append([round(p["lon"], 4), round(p["lat"], 4), epoch])
+            if len(full) < 2:
+                continue
+            starts = _session_starts([c[2] for c in full], break_s)
+
+            # Decimate WITHIN each session, never across one. The first and last
+            # fix of every session are always kept: they are where the broadcast
+            # resumed and where it stopped, which are the two instants the
+            # segmentation exists to preserve, and a stride that skipped them
+            # would move a session boundary by up to `step` fixes.
+            step = max(1, len(full) // max(1, max_points))
+            coords: list[list] = []
+            breaks: list[int] = []
+            for lo, hi in zip([0] + starts, starts + [len(full)]):
+                if lo > 0:
+                    breaks.append(len(coords))
+                seg = full[lo:hi]
+                dec = seg[::step]
+                if dec[-1] is not seg[-1]:
+                    dec.append(seg[-1])
+                coords.extend(dec)
             if len(coords) < 2:
                 continue
             items.append({
                 "vessel_id": canonical_id(vid),
                 "is_synthetic": bool(pts[0].get("is_synthetic")) if syn_col else False,
                 "points": coords,
+                "breaks": breaks,
             })
     # Truncation is measured against what the CAP dropped, not against what the
     # decimator skipped: a vessel with a single position is legitimately absent
@@ -451,6 +500,175 @@ def list_tracks(*, max_vessels: int = 200, max_points: int = 140) -> dict:
         note = None
     return {"items": items, "note": note,
             "matched_vessels": matched, "truncated": truncated}
+
+
+# --------------------------------------------------------------------------
+# forward projection for the map (ADR-039)
+# --------------------------------------------------------------------------
+
+#: How many points make up a drawn projection, end to end. Six segments is
+#: enough for the line to bend visibly with the earth over a few hours and few
+#: enough that a hundred of them are not a payload.
+PROJECTION_STEPS = 6
+
+
+def project_active(*, at: float, lead_hours: float = 3.0,
+                   max_vessels: int = 400,
+                   steps: int = PROJECTION_STEPS) -> dict:
+    """Where every currently-broadcasting vessel is predicted to go from here.
+
+    This is the map's window onto :mod:`maritime_isr.tracks.projection`, and
+    **the projection is computed there, not here and not in the browser.** The
+    model — dead reckoning, a cone growing at ``CONE_GROWTH_M_PER_HOUR``, capped
+    by ``MAX_FEASIBLE_SPEED_KN``, with confidence falling as the lead grows — is
+    a calibrated rule with a documented error budget. A second copy of it in
+    JavaScript would be a second, uncalibrated rule that drifts from the first
+    the day either is tuned, which is the failure CLAUDE.md §5 names for the
+    detectors and which applies just as hard to a predictor.
+
+    **Nothing here reads ahead of the clock.** The projection is made from the
+    last fix at or before ``at`` and reaches forward from ``at``; no fix later
+    than the clock is consulted, not even to decide whether she is still
+    broadcasting. That matters more than it looks: using a future fix to decide
+    "is she active" would quietly remove a vessel from the picture at the exact
+    moment she stopped transmitting, which is the one moment this whole system
+    exists to notice. A hull that has just gone quiet stays on screen with a
+    widening cone, and ``stale_minutes`` says how long since she was last heard.
+
+    Active means "heard within ``AIS_SESSION_BREAK_HOURS``" — the same
+    continuity threshold :func:`list_tracks` segments sessions on, so the set
+    projected here and the set drawn moving there are the same set.
+
+    A returned item is::
+
+        {"vessel_id", "made_at", "stale_minutes",
+         "from": {"lat", "lon", "sog_kn", "cog_deg"},
+         "path": [[lon, lat, valid_for, radius_m, confidence], ...]}
+
+    where ``path[0]`` is where she is predicted to be **now** (at the clock) and
+    ``path[-1]`` is ``lead_hours`` further on. The radius is the uncertainty
+    cone at that moment, in metres, and it already carries the staleness: a
+    vessel last heard four hours ago has a wide cone at ``path[0]``, which is
+    the correct and useful thing to show.
+    """
+    break_s = AIS_SESSION_BREAK_HOURS * 3600.0
+    at = float(at)
+    steps = max(1, int(steps))
+    lead_s = float(lead_hours) * 3600.0
+
+    with open_reader() as reader:
+        if not reader.has("ais_position"):
+            return {"at": at, "lead_hours": lead_hours, "items": [],
+                    "active_vessels": 0, "truncated": False,
+                    "note": "no AIS positions landed",
+                    "basis": _PROJECTION_BASIS,
+                    "caveat": _PROJECTION_CAVEAT,
+                    "cone_growth_nm_per_hour": round(
+                        CONE_GROWTH_M_PER_HOUR / 1852.0, 2)}
+        # One query, one row per vessel: her last fix at or before the clock,
+        # within the continuity window. `QUALIFY` keeps this a single scan —
+        # the per-vessel loop `list_tracks` uses would be 240 round trips on a
+        # call the client repeats as the clock advances.
+        rows = reader.rows(
+            "SELECT vessel_id, epoch(ts) AS t, lat, lon, sog_kn, cog_deg "
+            "FROM ais_position "
+            "WHERE lat IS NOT NULL AND lon IS NOT NULL "
+            "  AND ts <= to_timestamp(?) AND ts >= to_timestamp(?) "
+            "QUALIFY row_number() OVER (PARTITION BY vessel_id ORDER BY ts DESC) = 1",
+            [at, at - break_s])
+
+    # Ordered freshest first, so a cap drops the stalest rather than an
+    # arbitrary slice — and so `truncated` means something an operator can
+    # reason about.
+    rows.sort(key=lambda r: -float(r["t"]))
+    active = len(rows)
+    kept = rows[:max_vessels]
+
+    items: list[dict] = []
+    n_no_kinematics = 0
+    for row in kept:
+        sog, cog = row.get("sog_kn"), row.get("cog_deg")
+        if sog is None or cog is None:
+            # Dead reckoning needs a speed and a course. Without them there is
+            # no null hypothesis to project, and inventing one (say, the
+            # bearing between her last two fixes) would be a different model
+            # wearing this one's confidence.
+            n_no_kinematics += 1
+            continue
+        made_at = float(row["t"])
+        path = []
+        for k in range(steps + 1):
+            valid_for = at + lead_s * k / steps
+            # The projection module refuses beyond its own ceiling rather than
+            # returning a cone wider than anything could be outside of. Honour
+            # that here by truncating the drawn path instead of extrapolating
+            # past it.
+            if (valid_for - made_at) / 3600.0 > MAX_LEAD_HOURS:
+                break
+            p = project_from(
+                lat=float(row["lat"]), lon=float(row["lon"]),
+                sog_kn=float(sog), cog_deg=float(cog),
+                made_at=made_at, valid_for=valid_for,
+                track_id=None, track_source="ais")
+            path.append([round(p.lon, 5), round(p.lat, 5), int(valid_for),
+                         round(p.radius_m, 1), round(p.confidence, 3)])
+        if not path:
+            continue
+        items.append({
+            "vessel_id": canonical_id(row["vessel_id"]),
+            "made_at": int(made_at),
+            "stale_minutes": round((at - made_at) / 60.0, 1),
+            "from": {"lat": round(float(row["lat"]), 5),
+                     "lon": round(float(row["lon"]), 5),
+                     "sog_kn": round(float(sog), 2),
+                     "cog_deg": round(float(cog), 1)},
+            "path": path,
+        })
+
+    truncated = active > len(kept)
+    notes = []
+    if truncated:
+        notes.append(f"Truncated. Projecting {len(kept):,} of {active:,} vessels "
+                     f"heard in the last {AIS_SESSION_BREAK_HOURS:.0f} h, the "
+                     f"most recently heard first.")
+    if n_no_kinematics:
+        notes.append(f"{n_no_kinematics:,} vessel(s) broadcast a position but no "
+                     f"speed or course, so no projection could be made for them.")
+    if not items and not notes:
+        notes.append("No vessel was heard in the "
+                     f"{AIS_SESSION_BREAK_HOURS:.0f} h before this moment, so "
+                     "there is nothing to project.")
+    return {
+        "at": int(at),
+        "lead_hours": float(lead_hours),
+        "items": items,
+        "active_vessels": active,
+        "truncated": truncated,
+        "note": " ".join(notes) or None,
+        "basis": _PROJECTION_BASIS,
+        "caveat": _PROJECTION_CAVEAT,
+        "cone_growth_nm_per_hour": round(CONE_GROWTH_M_PER_HOUR / 1852.0, 2),
+    }
+
+
+#: Said once, served with every response, and shown on the screen that draws it.
+#: A predicted track that does not say what model drew it invites the reading
+#: that the system knows where she is going.
+_PROJECTION_BASIS = (
+    "Dead reckoning from her last AIS fix before this moment: she holds her "
+    "course and speed. The cone around it grows at 1 nm per hour of lead and "
+    "is capped by what a hull could physically do."
+)
+
+#: The half that has to be on screen and not in a tooltip, because it is the
+#: misreading a dashed line reaching ahead of a ship actually invites.
+#: `tracks/projection.py` measured it: a departure from dead reckoning flags
+#: 98% of the fleet, because every vessel alters at every waypoint, which is
+#: why this system does not carry it as a suspicion factor.
+_PROJECTION_CAVEAT = (
+    "This is not a route model and knows nothing about waypoints, so a vessel "
+    "leaving her cone is ordinary navigation and not a finding."
+)
 
 
 # --------------------------------------------------------------------------
