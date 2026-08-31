@@ -380,6 +380,36 @@ def get_track(canonical: str, *, start: Optional[str] = None,
     }
 
 
+def _track_labels(reader: Reader) -> dict[str, str]:
+    """{canonical_vessel_id: what to write beside her mark on the map}.
+
+    Her current declared name, and **nothing invented when there isn't one**. A
+    hull with no name in the identity table falls back to her MMSI, prefixed so
+    it cannot be mistaken for one: a nine-digit number floating beside a mark
+    reads as a name to anybody who does not already know the difference. A hull
+    with neither gets no label at all rather than her internal row id, which
+    would be this system labelling the map with its own plumbing — the same
+    mistake ADR-038 caught in the evidence cards.
+
+    One query for the whole fleet. This is called once per `/tracks` request,
+    not per vessel.
+    """
+    if not reader.has("gfw_vessel_identity"):
+        return {}
+    out: dict[str, str] = {}
+    for r in reader.rows(_CURRENT_IDENTITY_SQL):
+        vid = r.get("vessel_id")
+        if not vid:
+            continue
+        name = (r.get("ship_name") or "").strip()
+        mmsi = _s(r.get("mmsi"))
+        if name:
+            out[canonical_id(vid)] = name
+        elif mmsi:
+            out[canonical_id(vid)] = f"MMSI {mmsi}"
+    return out
+
+
 def _session_starts(epochs: list[int], break_s: float) -> list[int]:
     """Indices at which a new **reporting session** begins.
 
@@ -430,6 +460,7 @@ def list_tracks(*, max_vessels: int = 200, max_points: int = 140) -> dict:
             return {"items": [], "note": "no AIS positions landed",
                     "matched_vessels": 0, "truncated": False}
         syn_col = "is_synthetic" in reader.columns("ais_position")
+        names = _track_labels(reader)
         matched = int(reader.scalar(
             "SELECT count(*) FROM (SELECT vessel_id FROM ais_position "
             "WHERE lat IS NOT NULL GROUP BY vessel_id)") or 0)
@@ -478,8 +509,10 @@ def list_tracks(*, max_vessels: int = 200, max_points: int = 140) -> dict:
                 coords.extend(dec)
             if len(coords) < 2:
                 continue
+            cid = canonical_id(vid)
             items.append({
-                "vessel_id": canonical_id(vid),
+                "vessel_id": cid,
+                "name": names.get(cid),
                 "is_synthetic": bool(pts[0].get("is_synthetic")) if syn_col else False,
                 "points": coords,
                 "breaks": breaks,

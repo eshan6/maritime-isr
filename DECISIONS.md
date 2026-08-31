@@ -3643,3 +3643,114 @@ and will alter at the waypoint" is the null hypothesis a coastal voyage actually
 follows, and the zone layer (ADR-030) already holds the customary lanes such a
 model could be fitted to. That is real work and it is not this session's; it is
 recorded in `projection.py` so it is not rediscovered.
+
+---
+
+## ADR-040 — The map opens on the sea: a dark canvas, one layer, and names *(Accepted)*
+
+**Context.** Four asks about the Map screen, and three defects underneath them
+that nobody was looking for.
+
+**Decision.**
+
+**(a) The basemap follows the theme.** Setting the app dark used to leave the
+map a bright plate of land with the raster turned down to 62% — a light map
+wearing a filter, and it read as one. A dark operations screen wants a basemap
+that was *drawn* dark: near-black water, dark grey land, restrained labels, so
+that the marks on top are the brightest thing on screen. That is the entire
+reason such a screen goes dark, and dimming a light raster gets a muddy plate
+instead.
+
+`canvas` (Esri Light Gray / Dark Gray — the same cartography in two values) is
+now the default and the only entry carrying both variants; a basemap declares
+`tiles` as one array or as `{light, dark}`. `dimInDark` is per-source rather
+than global, because dimming a basemap that is already dark washes the land
+into the background colour and takes the coastline with it.
+
+`--map-ground`, the colour under the tiles, matters more than it looks: it is
+what the operator sees wherever a tile has not arrived, which on a slow link is
+most of the screen for a second and on a blocked one is all of it, forever.
+
+**(b) The disclosures fold into a chip.** Two permanent text panels covered a
+third of the sea. Every sentence in them earns its place — a capped event query
+looks exactly like an empty second half of the window; a dashed line reaching
+ahead of a ship reads as knowledge unless something says it is dead reckoning —
+but *"the disclosure must be available"* had been read as *"the disclosure must
+be permanently in front of the map"*, and those are different requirements. A
+wall of text nobody can dismiss is a wall nobody reads.
+
+Nothing is deleted or summarised away. The chip names a count and opens to the
+full text. The count is derived from the list it renders, so it cannot drift
+from its contents.
+
+**(c) The map opens on one layer: where the ships are.** Every previous opening
+set was assembled by adding one more well-argued default to the last, and each
+addition was individually right — the footprints were the only unambiguously
+real thing, a radar contact without its coverage ring invites a misreading,
+density summarises four event layers better than they do. Nobody added the
+reasons up, and a map that opens with everything shouting opens illegible.
+
+The floor is now the question the screen exists to answer, *what is out there
+right now*. Everything else is one click away in a group that says what it
+holds.
+
+**The selected vessel is the exception, and it is the whole interaction.** Her
+trail, her projection and her cone are drawn whatever the fleet-wide switches
+say: the map opens on positions alone, and clicking a hull *is* the operator
+asking where she has been and where she is going. Making them hunt for a
+checkbox first would be a step that exists only because it was easier to build.
+
+**(d) Names beside the marks past zoom 8.5**, decluttered in screen space, with
+her current declared name — or her MMSI prefixed so it cannot be mistaken for
+one, or nothing at all. Never the internal row id, which is the mistake ADR-038
+caught printing `graph / events` under an accusation.
+
+**DOM markers, not a MapLibre symbol layer**, and it is a real trade. A symbol
+layer is GPU-drawn and declutters itself, which is the better mechanism, but it
+needs a `glyphs` URL — and this style is raster-only with no font server behind
+it. Adding one would put the vessel names behind a *third* external host on a
+screen where the operator is already watching basemap tiles fail to arrive, and
+a glyph server that does not answer fails silently: the layer renders nothing.
+The names are HTML from the app's own origin instead, and they appear or do not
+for reasons visible in the page.
+
+The cost is that nothing declutters them: a first pass drew 31 labels in a
+cluster as one grey smear, which is strictly worse than no names because it
+looks like information. So a greedy screen-space collision test, in a fixed
+priority (selected hull first, then by id) so the same ships keep their labels
+as the fleet moves rather than the set flickering between neighbours. The label
+box is estimated from character count — measuring means a synchronous reflow
+per candidate per frame — and `LABEL_CHAR_PX` is **measured, then rounded up**:
+a first estimate of 6.1 px against a real range of 6.6-7.55 let two boxes each
+decide they fit and put the overlap straight back.
+
+**Consequences — three defects, and the second is the worst kind.**
+
+* **Picking a basemap did nothing until you picked it twice.** The swap effect
+  carried an "if the ref is still null this is the mount run, record and
+  return" branch. The mount run never reached that line: a `!ready` guard above
+  it returned first and `ready` was not in the dependency list, so the effect's
+  next run was the operator's first click — which hit the null branch and was
+  swallowed. The baseline is seeded where the style is actually built, and the
+  branch is gone.
+
+* **Switching basemap emptied the map, permanently, with no error.** Two causes
+  stacked. MapLibre *diffs* an incoming style by default, and a basemap swap is
+  perfectly diffable (same source ids, different tile URLs) — a diff strips
+  every source this app added and **never fires `style.load`**. Then, with
+  `diff: false` forcing a real reload, the gate itself failed: the effect set
+  `ready` false, called `setStyle`, and raised it again from `style.load`, and
+  React batched both into `true → false → true`, compared the ends, saw no
+  change and re-ran nothing. **A boolean cannot express "this happened again".**
+  The gate is a monotonic `styleEpoch` now; batching cannot collapse a counter.
+
+  Both were invisible while the first click was being swallowed. Fixing the
+  swallow is what surfaced them, which is the ordinary shape of a bug that has
+  been sitting behind another one.
+
+* Trail and projection take a hue each — pink behind, yellow ahead — where they
+  shared the vessel blue split by line style. That was right while they were
+  drawn for the whole fleet, where a second hue would have been a twelfth
+  colour on a map already carrying eleven. It is wrong now: they appear for
+  *one* vessel, together, on an otherwise empty map, and there they are the
+  whole content.

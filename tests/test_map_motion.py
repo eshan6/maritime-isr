@@ -166,6 +166,60 @@ def test_points_stay_in_time_order_across_the_whole_track():
         assert ts == sorted(ts), it["vessel_id"]
 
 
+# ---------------------------------------------------------------------------
+# the name drawn beside her mark
+# ---------------------------------------------------------------------------
+
+def test_every_track_carries_a_name_field():
+    """Present on every item, null included. The client writes
+    `if (!tr.name) continue`, so a missing key and an absent name have to mean
+    the same thing — and both have to mean "draw no label", never "draw
+    something else"."""
+    for it in _tracks()["items"]:
+        assert "name" in it
+        assert it["name"] is None or isinstance(it["name"], str)
+
+
+def test_a_label_is_never_this_system_s_own_row_id():
+    """The map may write what a hull *declared* beside her mark. It may not
+    write `vessel:gfw:bg_11`, which is plumbing from this repository — the same
+    mistake ADR-038 caught printing `graph / events` under an accusation. A
+    hull with no name and no MMSI gets no label rather than an internal id."""
+    for it in _tracks()["items"]:
+        if it["name"] is None:
+            continue
+        assert not it["name"].startswith("vessel:"), it["vessel_id"]
+        assert it["name"] != it["vessel_id"]
+
+
+def test_an_mmsi_fallback_is_labelled_as_one():
+    """A bare nine-digit number floating beside a mark reads as a name to
+    anybody who does not already know the difference, so the fallback says
+    what it is."""
+    for it in _tracks()["items"]:
+        n = it["name"] or ""
+        if n[:1].isdigit():
+            raise AssertionError(
+                f"{it['vessel_id']} is labelled with a bare number ({n!r}); an "
+                f"identifier used as a name must say which identifier it is")
+
+
+def test_the_label_is_her_current_declared_name():
+    """Cross-checked against the vessels table rather than trusted from the
+    same query, so a change to the current-identity rule cannot quietly give
+    the map one name and every other screen a different one."""
+    tracks = {it["vessel_id"]: it["name"] for it in _tracks()["items"]}
+    listed = {v["id"]: v.get("name") for v in service.list_vessels(limit=1000)["items"]}
+    checked = 0
+    for vid, name in tracks.items():
+        want = listed.get(vid)
+        if not want:
+            continue
+        assert name == want, f"{vid}: map says {name!r}, vessels table says {want!r}"
+        checked += 1
+    assert checked, "no served track matched a vessel in the identity table"
+
+
 def test_segmentation_did_not_cost_the_truncation_report():
     """The cap semantics `test_map_legibility` pinned still hold — decimating
     inside sessions changes how many points come back, never how many vessels."""

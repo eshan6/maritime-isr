@@ -8,9 +8,82 @@ session. `CLAUDE.md`, `ARCHITECTURE.md`, `DECISIONS.md` are stable contracts;
 > between status buckets, record what was verified vs assumed, log anything now
 > broken, and set "Next up." If you don't update it, the next session starts blind.
 
-**Last updated:** 2026-08-31 (eighth session) — **The map stops drawing history
-and starts drawing motion: reporting sessions, a served forward projection, and
-a clock slow enough to watch.**
+**Last updated:** 2026-08-31 (ninth session) — **The map opens on the sea: a
+dark canvas, one layer, names beside the marks, and two style-swap defects that
+emptied it.**
+
+**The basemap follows the theme** (ADR-040). Dark app, dark map: `canvas`
+(Esri Light Gray / Dark Gray, the same cartography in two values) is the new
+default and the one entry carrying both variants. Dimming is per-source now —
+turning a light raster down to 62% is a light map wearing a filter, and it read
+as one. `--map-ground` matters more than it looks: it is what shows wherever a
+tile has not arrived, which on Eshan's machine (basemap tiles are failing there,
+"Map data not yet available" stamped across the plate) is most of the screen.
+
+**The two permanent text panels are folded into a chip.** They covered a third
+of the sea. Nothing is deleted — the chip names a count and opens to the full
+text, and the count is derived from the list it renders so it cannot drift.
+"The disclosure must be available" had been read as "the disclosure must be
+permanently in front of the map"; those are different requirements.
+
+**The map opens on ONE layer: where the ships are.** No trails, no projections,
+no event pins, no density, no footprints, no areas. Every previous opening set
+was assembled by adding one more well-argued default to the last and nobody
+added the reasons up. **Clicking a vessel draws her trail and her projection
+whatever the fleet-wide switches say** — the click *is* the request.
+
+**Names beside the marks past zoom 8.5**, decluttered in screen space, showing
+her declared name or her MMSI prefixed so it cannot be mistaken for one, and
+nothing at all when there is neither. DOM markers rather than a MapLibre symbol
+layer: a symbol layer needs a glyph server, which would be a third external
+host on a screen already watching tiles fail, and a glyph server that does not
+answer fails *silently*.
+
+**Pink for travelled, yellow for predicted.**
+
+**Three defects, and the middle one is the worst kind:**
+
+* **Picking a basemap did nothing until you picked it twice.** The swap effect
+  carried an "if the ref is still null, this is the mount run — record and
+  return" branch that the mount run never reached (a `!ready` guard above it
+  returned first, and `ready` was not in the deps), so it ate the operator's
+  first click instead.
+* **Switching basemap emptied the map, permanently, with no error.** Two causes
+  stacked. MapLibre *diffs* an incoming style by default and a basemap swap is
+  perfectly diffable — a diff strips every source this app added and **never
+  fires `style.load`**. Then with `diff: false` forcing a real reload, the gate
+  itself failed: `ready` went true → false → true inside one React batch, React
+  compared the ends, saw no change, and re-ran nothing. **A boolean cannot
+  express "this happened again."** It is a monotonic `styleEpoch` now. Both were
+  invisible while the first click was being swallowed.
+* A first pass at label decluttering estimated the text box at 6.1 px per
+  character against a measured 6.6-7.55, so two boxes each decided they fit and
+  the overlap came back. `LABEL_CHAR_PX` is measured and rounded up.
+
+**Verified in a browser** on the live backend, both themes: default map 92
+vessels and nothing else; zoom 9.2 gives 7 labels with **0 overlapping pairs**
+(31 before decluttering); selecting a hull gives exactly 1 trail, 1 projection
+and 6 cone rings; all four basemaps and the theme toggle keep all 92 vessels.
+
+**Not verifiable from here, and it is the thing most likely to still be wrong
+on his machine: the tiles themselves.** This sandbox has no outbound network,
+so every basemap request fails and the map draws on `--map-ground` alone. I
+proved the app *asks* for the Dark Gray endpoint under a dark theme and the
+Light Gray one under light; I did not see a tile. His last screenshot already
+showed "Map data not yet available" across the plate, so the tile host is not
+answering for him either — that is unresolved and he has been asked to report
+it. Also unexplained and untouched: his nav bar reads **"API unreachable"**
+while the map is full of data.
+
+**Full suite: 966 passed, 64 skipped, 1 failed** — `test_ports_non_empty_and_split`
+again, the empty port gazetteer in this sandbox. Confirmed pre-existing last
+session against a stashed tree. Nothing here touched a detector.
+
+---
+
+**Eighth session** — **The map stops drawing history and starts drawing motion:
+reporting sessions, a served forward projection, and a clock slow enough to
+watch.**
 
 **The map was asserting positions during silences, and had been since it first
 animated anything** (ADR-039). It interpolated between whichever two fixes
@@ -921,6 +994,29 @@ steps personally.
 ---
 
 ## Next up
+
+> **2026-08-31, ninth session — two things I could not check from here.**
+>
+> 1. **Do the basemap tiles arrive on your machine?** Your last screenshot had
+>    "Map data not yet available" stamped across the plate, which is the tile
+>    host not answering. This sandbox has no outbound network at all, so I
+>    could not test the new dark tiles against the real Esri endpoint — I could
+>    only prove the app *asks* for the right one. If the plate is still blank,
+>    the marks are all still correctly placed (they never needed a tile) but
+>    say so and I will find a source that answers for you.
+> 2. **Your nav bar reads "API unreachable"** while the map is clearly full of
+>    data. Something in the health check disagrees with the rest of the app. I
+>    have not touched it and did not investigate; tell me if you want it looked
+>    at.
+>
+> Then the map itself: it should open **dark** on a dark system, showing vessel
+> marks and nothing else, with one small chip above the scrubber where two
+> paragraphs of text used to be. Zoom in past about 8.5 and names appear beside
+> the marks. Click a vessel: a **pink** line behind her (where she has been on
+> this trip) and a **dashed yellow** one ahead (where she is predicted to go),
+> with faint rings widening along it (how wrong that could be). Switch basemap
+> with the Canvas / Ocean / Streets / Satellite buttons — **the ships must
+> still be there after every switch**; they were not, before this session.
 
 > **2026-08-31, eighth session — run the map and tell me what moves.** The
 > whole live-traffic layer changed (ADR-039) and none of it has run on your

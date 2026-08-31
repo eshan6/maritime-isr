@@ -73,13 +73,18 @@
   --mark-alert: #b0221b;
   --mark-selected: #0b7ea8;
   /* Where she has been on this trip, and where dead reckoning says she is
-     going. Deliberately the SAME hue as the vessel mark and separated by
-     line style instead: solid behind her, dashed ahead. Past and future are
-     two halves of one object's motion, and spending a second hue on the
-     future would say they are two different kinds of thing on a map that has
-     already spent eleven hues saying that about eleven other layers. */
-  --mark-trail: #4a7fbe;
-  --mark-predicted: #0f7bd1;
+     going. Two hues now, not one, and the reason is what the default map
+     became: it opens with positions only, so these two lines appear together,
+     for ONE vessel, when she is clicked. In that picture they are the whole
+     content and the strongest possible separation is the right call — pink
+     behind her, yellow ahead. (While they were drawn for the whole fleet at
+     once, one blue hue split by line style was right; a second hue then would
+     have been a twelfth colour on a map already carrying eleven.)
+
+     Both are chosen to read against a DARK canvas basemap first, which is now
+     the default, and checked against the light one second. */
+  --mark-trail: #c2185b;
+  --mark-predicted: #a86b00;
   --map-ground: #eef2f6;
   --map-tile-opacity: 1;
 
@@ -164,8 +169,8 @@
   --mark-vessel: #4b95e8;
   --mark-alert: #e06c66;
   --mark-selected: #38c6f4;
-  --mark-trail: #6ea3dc;
-  --mark-predicted: #58aef5;
+  --mark-trail: #ff5fae;
+  --mark-predicted: #ffd24a;
   --map-ground: #14171a;
   /* Raster basemaps are drawn for a light page. Dimming and desaturating the
      tiles is what stops the land plate glowing brighter than the vessels on
@@ -616,6 +621,50 @@ p:last-child { margin-bottom: 0; }
 }
 .map-notes .note-key { font-weight: var(--w-bold); }
 
+/* The disclosure chip. Two panels of text used to sit here permanently and
+   cover a third of the sea; the sentences in them are all load-bearing, so
+   they are folded rather than cut. Closed it is one line naming a count. */
+.notechip {
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: var(--shadow);
+  font-size: var(--fs-meta); color: var(--ink-2);
+  max-width: 100%; overflow: hidden;
+}
+.notechip-head {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 7px 11px; background: none; border: 0; cursor: pointer;
+  font: inherit; color: var(--ink-2); text-align: left;
+}
+.notechip-head:hover { color: var(--ink); }
+.notechip-dot {
+  width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto;
+  background: var(--amber);
+}
+.notechip-caret { margin-left: auto; color: var(--ink-3); }
+.notechip-body {
+  padding: 2px 11px 10px; border-top: 1px solid var(--border);
+  max-height: 46vh; overflow-y: auto;
+}
+.notechip-item { margin-top: 8px; line-height: 1.55; }
+.notechip .note-key { font-weight: var(--w-bold); color: var(--ink); }
+
+/* Vessel names beside their marks, past LABEL_MIN_ZOOM. DOM nodes rather than
+   a MapLibre symbol layer, because a symbol layer needs a glyph server and
+   this style is raster-only — see the comment on the effect that builds them.
+   The halo is drawn with text-shadow so a name stays readable over a coastline
+   or another vessel's track in either theme. */
+.vessel-label {
+  font-size: var(--fs-micro); font-weight: var(--w-med);
+  color: var(--ink); white-space: nowrap; cursor: pointer;
+  pointer-events: auto; letter-spacing: 0.01em;
+  text-shadow:
+    0 0 3px var(--bg), 0 0 3px var(--bg), 0 0 6px var(--bg), 0 1px 2px var(--bg);
+}
+.vessel-label:hover { color: var(--blue-ink); }
+.vessel-label.is-selected {
+  color: var(--mark-selected); font-weight: var(--w-bold);
+}
+
 /* ---- stat strip ---- */
 .statstrip { display: flex; gap: 10px; flex-wrap: wrap; padding: 12px 16px;
   border-bottom: 1px solid var(--border); background: var(--panel); }
@@ -867,7 +916,7 @@ p:last-child { margin-bottom: 0; }
     --fam-paperwork: #c98500; --fam-imagery: #d55181; --fam-radio: #008300;
     --fam-other: #7c8791;
     --mark-vessel: #4b95e8; --mark-alert: #e06c66; --mark-selected: #38c6f4;
-    --mark-trail: #6ea3dc; --mark-predicted: #58aef5;
+    --mark-trail: #ff5fae; --mark-predicted: #ffd24a;
     --map-ground: #14171a; --map-tile-opacity: 0.62;
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(0, 0, 0, 0.3);
     --shadow-lg: 0 8px 30px rgba(0, 0, 0, 0.55);
