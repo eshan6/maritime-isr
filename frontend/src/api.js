@@ -14,7 +14,12 @@ function authHeaders(extra) {
   return { "X-API-Token": TOKEN, ...(extra || {}) };
 }
 
-async function get(path, params) {
+// `signal` is optional and only one caller needs it: the map re-asks for
+// forward projections every time the clock crosses a refresh boundary, and a
+// scrub drags the clock across dozens of them in a second. Without an abort the
+// answers arrive out of order and the map settles on whichever slow response
+// landed last, which is a picture of a moment the operator has already left.
+async function get(path, params, signal) {
   const url = new URL(BASE + path, window.location.origin);
   if (params) {
     for (const [k, v] of Object.entries(params)) {
@@ -29,6 +34,7 @@ async function get(path, params) {
   }
   const r = await fetch(url.pathname + url.search, {
     headers: authHeaders({ Accept: "application/json" }),
+    signal,
   });
   if (!r.ok) {
     const detail = await r.text().catch(() => "");
@@ -164,6 +170,11 @@ export const api = {
   eventDensity: (params) => get("/events/density", params),
   detections: (params) => get("/detections", params),
   tracks: (params) => get("/tracks", params),
+  // Forward projection of every vessel broadcasting at `at` (ADR-039). Asked
+  // fresh as the clock advances rather than precomputed, because a projection
+  // is made from one fix at one moment: there is no single answer to cache.
+  // Never memoised for the same reason.
+  predictions: (params, signal) => get("/predictions", params, signal),
   scenes: () => get("/scenes"),
   ports: () => get("/ports"),
   // ---- coastal radar (ADR-028) -----------------------------------------

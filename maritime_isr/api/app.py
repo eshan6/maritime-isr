@@ -347,6 +347,25 @@ def create_app() -> FastAPI:
         # would cost more than it is worth for coordinates.
         return service.list_tracks(max_vessels=max_vessels, max_points=max_points)
 
+    @api.get("/predictions", dependencies=guard)
+    def predictions(at: float = Query(..., description=
+                        "the clock, as epoch seconds — projections are made "
+                        "from the last fix at or before this and reach forward "
+                        "from it"),
+                    lead_hours: float = Query(default=3.0, ge=0.25, le=12.0),
+                    max_vessels: int = Query(default=400, ge=1, le=2000)) -> dict:
+        # Forward projection of every vessel broadcasting at `at` (ADR-039).
+        # Plain dict for the same reason /tracks is: these are coordinate
+        # arrays, and pydantic-validating each point costs more than it buys.
+        #
+        # `lead_hours` is capped at 12 rather than at the projection module's
+        # 24-hour ceiling because the cone at 12 h is already ~22 km wide
+        # before the physics cap. Past that the drawn line stops being a
+        # prediction and becomes a statement that she is somewhere in the
+        # Arabian Sea.
+        return service.project_active(at=at, lead_hours=lead_hours,
+                                      max_vessels=max_vessels)
+
     @api.get("/scenes", dependencies=guard)
     def scenes(limit: int = Query(default=2000, ge=1, le=20000)) -> dict:
         res = service.list_scenes(limit=limit)

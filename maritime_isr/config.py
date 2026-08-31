@@ -638,6 +638,30 @@ MAX_FEASIBLE_SPEED_KN = 60.0
 # hypothesis spawns a new hypothesis instead (spoof / reuse / outlier path).
 HYPOTHESIS_SPEED_GATE_KN = 60.0
 TRACK_BREAK_DAYS = 7          # silence longer than this closes the track (MMSI-reuse guard)
+
+#: Silence long enough to end a **reporting session** — the unbroken run of
+#: broadcasting that the map draws as "where she has been on this trip".
+#:
+#: **This is not TRACK_BREAK_DAYS and must never be confused with it.** Seven
+#: days is an *identity* threshold: below it the same MMSI is presumed the same
+#: hull, so a track survives a long silence rather than being handed to a
+#: different vessel. Six hours is a *continuity* threshold: below it we are
+#: willing to draw a line between two fixes and say she travelled it.
+#:
+#: Six hours because straight-lining a longer silence is fabrication. The
+#: landed corpus reports at a four-minute median and a fifty-seven-minute p99,
+#: so six hours is an order of magnitude clear of ordinary cadence and cannot
+#: be tripped by a vessel that merely reports slowly at anchor. What it does
+#: catch is the 206 inter-fix gaps above it (145 above twelve hours, the
+#: longest 5.4 days): join those and the map draws a vessel gliding at constant
+#: speed across a silence nobody observed, which is the same class of error as
+#: pinning an alert to a position it never claimed.
+#:
+#: It is deliberately NOT a claim that the silence was intentional. A session
+#: break says only "the broadcast stopped here"; asserting darkness needs
+#: demonstrated receiver coverage at the position (ADR-005, CLAUDE.md §6).
+AIS_SESSION_BREAK_HOURS = 6.0
+
 GAP_MIN_MINUTES = 15          # shortest interval that can be called a gap at all
 GAP_NOMINAL_MULT = 3.0        # gap = interval > max(GAP_MIN, mult × track's own median cadence)
 ENCOUNTER_RADIUS_M = 500.0    # the rendezvous primitive, per roadmap 2.3

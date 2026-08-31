@@ -1463,3 +1463,71 @@ thing to check is whether `--font` still resolves on `:root` rather than inside
 a theme block. An empty map with "no AIS tracks in this window" means the tracks
 request returned nothing; "could not load tracks" means it failed and the
 message names why.
+
+---
+
+## Only the vessels that are broadcasting: reporting sessions, a drawn projection, and a clock at 20 s per hour (ADR-039)
+
+Two asks, and a defect neither of them mentions.
+
+**"No point showing historical vessel tracks on our Map."** The `tracks` layer
+drew every hull's entire eight-week polyline at once: two hundred static lines
+that said nothing about *when*, did not change as the clock ran, and crossed
+everything else on screen. Deleted. In its place, for the vessels broadcasting
+at the instant on the clock: the vessel, the **trail** she has travelled in this
+reporting session (growing behind her as it plays), and the **projection**
+reaching ahead of her.
+
+**"AIS track predictions are not visible."** They were not — in the strongest
+sense. `tracks/projection.py` has existed since ADR-032 and **nothing served
+it**. New `GET /predictions?at=`, and the map draws it: a dashed line to where
+dead reckoning puts her three hours on, a hollow ring at the predicted position,
+and the uncertainty cone on the selected vessel. The model stays in Python; a
+JavaScript copy of it would be a second, uncalibrated predictor.
+
+**The defect underneath.** The animation interpolated between whichever two
+fixes bracketed the clock, anywhere in a vessel's series — so across the 206
+inter-fix gaps in this corpus that run over six hours (longest 5.4 days) it drew
+a vessel steaming steadily along a line **nobody observed**. It went unnoticed
+because a smoothly gliding dot looks exactly like a correct one. `/tracks` now
+segments each series into reporting sessions (`AIS_SESSION_BREAK_HOURS`, six
+hours) on the full data before decimation, and during a silence she is simply
+not drawn.
+
+**The clock runs at 20 wall-clock seconds per hour**, up from 0.29 (7 s/day),
+with a 1x/2x/5x/15x/60x control and the rate stated in the readout. It advances
+by measured elapsed time each frame rather than a fixed step per timer tick.
+
+**Four more defects found doing it:**
+
+* **The playhead parking never worked** — it called `busiestInstant` with rows
+  carrying no sessions, found nothing and gave up. It looked fine because play
+  wraps to the start. Three of two hundred vessels on screen, in the run that
+  caught it; ninety-one after the fix.
+* **Every map note positioned itself at the same corner**, so two on screen
+  together sat exactly on top of each other — a disclosure hidden by another
+  disclosure. They stack in one column now.
+* A fixed step per `setInterval` tick tied the pace to timer scheduling: a
+  backgrounded tab made every vessel jump ten minutes at a time.
+* A ring mark was selected by comparing its stroke colour to the alert red,
+  which gave the second ring layer a hardcoded, un-themed stroke.
+
+Verify:
+
+```
+python -m maritime_isr.api
+```
+
+*Success:* the Map opens with the fleet on screen (not one or two dots) and the
+readout reads "N of M vessels broadcasting · 20 s per hour". Press play: the
+clock advances about three minutes of corpus time per wall-clock second, and
+each vessel slides along a solid trail that grows behind her with a dashed line
+reaching ahead. Click one: her uncertainty cone appears as faint circles
+widening along the dashed line. A note above the scrubber states the model and
+that leaving the cone is ordinary navigation, not a finding.
+*Failure:* "3 of 200 vessels broadcasting" at first paint means the playhead did
+not park on the busiest instant — check that `busiestInstant` is being handed
+`trackList` and not `tracks`. No dashed lines at all means `/predictions`
+failed; the note says so and names the reason. Trails that jump across open
+water mean `breaks` is not reaching the client — `tr.breaks || []` silently
+treats a missing field as "she never stopped talking".

@@ -8,6 +8,32 @@
 // Where no AIS tracks exist for the window, nothing moves and the events and
 // sanctioned-vessel markers still render.
 //
+// **The map draws one vessel's motion in three parts and no vessel's history.**
+// The old `tracks` layer drew every vessel's entire eight-week polyline at once
+// — a static mat of two hundred lines that was on-or-off, told you nothing
+// about *when*, and did not change as the clock ran. It is gone. In its place,
+// for the vessels broadcasting at the instant on the clock:
+//
+//   * **the vessel**, at her interpolated position (as before);
+//   * **the trail** — where she has been *in this reporting session*, drawn
+//     only up to the clock, so it grows behind her as she moves;
+//   * **the projection** — where dead reckoning says she is going, from the
+//     API (ADR-039), with the uncertainty cone on the selected vessel.
+//
+// A *session* is an unbroken run of broadcasting: consecutive fixes no more
+// than `AIS_SESSION_BREAK_HOURS` apart, segmented server-side on the full
+// series (`/tracks` returns the break indices). This is not decoration. It is
+// what stops the animation drawing a vessel gliding steadily across a five-day
+// silence nobody observed — the map has been doing exactly that, straight-lining
+// every gap in the corpus, and the trail layer would have drawn that invention
+// as a travelled path.
+//
+// It is deliberately NOT a voyage and is not labelled as one. A trawler working
+// a ground for four days broadcasts continuously and gets one long tangled
+// session; a merchant crossing the Gulf gets one clean leg. Both are honestly
+// "the run of broadcasting she is in", which is a fact about the data. Calling
+// it a voyage would be a claim about her intent that nothing here measures.
+//
 // **The scrubber plays the AIS window, not the corpus window.** Those are
 // different spans and treating them as one is what made the player look dead:
 // the laptop corpus reaches back to 2012 on a thin tail of real GFW identity
@@ -29,18 +55,55 @@ import { ZonePanel } from "../components/ZonePanel.jsx";
 // AOI v1 — Arabian Sea / Indian west coast (config.py AOI_V1).
 const AOI = { lonMin: 60, latMin: 5, lonMax: 78, latMax: 25 };
 
-//: Wall-clock seconds the animation spends on one day of corpus time. Slow
-//: enough to follow a vessel's movement across a day rather than watch it
-//: flicker past.
-const SECONDS_PER_DAY = 7;
+//: Wall-clock seconds the animation spends on one HOUR of corpus time, at 1x.
+//:
+//: **Twenty seconds an hour, where it used to be 0.29.** The old pace was
+//: 7 s/day, which meant a vessel making 12 knots crossed the whole Arabian Sea
+//: in the time it takes to read this sentence: nothing on screen was a
+//: *movement*, it was a streak. At 20 s/h a merchant covers about four nautical
+//: miles per wall-clock second of watching, which is slow enough that an
+//: operator can follow one hull, see her overhaul another, and watch her leave
+//: the cone drawn ahead of her.
+//:
+//: The cost is stated rather than capped: the eight-week AIS window is 1,344
+//: hours and takes seven and a half hours to play end to end at 1x. That is
+//: what the speed control is for, and why the scrubber says the rate out loud.
+//: A silent cap — which is what MAX_PLAYTHROUGH_S was — would have quietly
+//: overridden the requested pace and left nobody able to tell why.
+const SECONDS_PER_HOUR = 20;
 
-//: …but never more than this end to end. A fixed seconds-per-day is the right
-//: pace for a window measured in weeks and an absurd one for a window measured
-//: in years: at 7 s/day the 5,317-day corpus window took **ten hours** to play
-//: through, which is indistinguishable from a broken button. The cap is what
-//: keeps the fallback case (no AIS at all, so the scrubber spans the whole
-//: corpus) honest — the clock still crosses the window while somebody watches.
-const MAX_PLAYTHROUGH_S = 120;
+//: Multipliers on that pace. 1x is the requested rate and the default; the rest
+//: exist because "watch one hull manoeuvre" and "see where the fleet got to by
+//: Thursday" are both real questions and no single rate answers both. Capped at
+//: 60x — that is back to roughly the old streaking pace, and above it the
+//: animation stops being one.
+const SPEEDS = [1, 2, 5, 15, 60];
+
+//: How often the animation recomputes positions, in wall-clock milliseconds.
+//: Driven by requestAnimationFrame and throttled to this, rather than a
+//: setInterval: a fixed interval drifts against the frame clock and shows as a
+//: stutter, and at 20 s/h the whole point is that the motion is smooth enough
+//: to follow.
+const FRAME_MS = 40;
+
+//: How far the clock has to move, in seconds of corpus time, before the map
+//: asks the API for fresh forward projections. Thirty minutes: at 1x that is a
+//: request every ten wall-clock seconds, and a projection made from a fix up to
+//: half an hour stale is still the projection the system would have been
+//: asserting at that moment.
+const PREDICTION_REFRESH_S = 1800;
+
+//: How far ahead the drawn projection reaches. Three hours is the lead the
+//: projection module's own measurements are quoted at, and at merchant speeds
+//: it is about 36 nm — long enough to see where she is headed, short enough
+//: that the cone is still narrower than the gap to the next ship.
+const PREDICTION_LEAD_HOURS = 3;
+
+//: How much of the travelled trail is drawn at full strength. The trail fades
+//: back toward the start of the session so the recent movement reads first;
+//: without it a trawler working one ground for four days draws a solid scribble
+//: in which nothing says which end is now.
+const TRAIL_FADE = 0.55;
 
 // ---- basemaps -------------------------------------------------------------
 //
@@ -126,6 +189,8 @@ function themeColor(name, fallback) {
 }
 const VESSEL_COLOR = "#1a5fb4";
 const ALERT_COLOR = "#b0221b";
+const TRAIL_COLOR = "#4a7fbe";
+const PREDICT_COLOR = "#0f7bd1";
 
 // **AIS gaps no longer share the encounter red.** Three layers were painted
 // `#b0221b` — encounters, gaps and alert markers — so the key showed three
@@ -159,10 +224,14 @@ const LAYER_GROUPS = [
   {
     id: "live",
     title: "Live traffic",
-    hint: "Moves with the timeline. Drawn where the vessel was at the time on the clock.",
+    hint: "Only vessels broadcasting at the time on the clock. Everything here "
+      + "moves with the timeline: the trail grows behind her, the projection "
+      + "reaches ahead of her.",
     layers: [
-      { id: "positions", label: "Vessels", color: VESSEL_COLOR },
-      { id: "tracks", label: "Vessel tracks", color: "#7aa8dd" },
+      { id: "positions", label: "Vessels broadcasting now", color: VESSEL_COLOR },
+      { id: "trails", label: "Track travelled this session", color: TRAIL_COLOR },
+      { id: "predicted", label: "Predicted track (3 h ahead)", color: PREDICT_COLOR },
+      { id: "cone", label: "Uncertainty cone (selected vessel)", color: PREDICT_COLOR },
     ],
   },
   {
@@ -251,7 +320,16 @@ const MARK_STYLE = {
   //: A ring with nothing in the middle. `opacity` here is the FILL's, so zero
   //: is what makes it an annotation drawn around a position instead of a
   //: fourteenth kind of dot sitting on one.
-  flag: { radius: 9, opacity: 0, strokeWidth: 3, strokeColor: ALERT_COLOR },
+  //: `ownStroke` is what makes it a ring rather than a haloed disc: the stroke
+  //: takes the layer's own colour instead of the white separator every filled
+  //: mark gets. It replaced a `strokeColor === ALERT_COLOR` comparison, which
+  //: only worked while exactly one layer wanted the behaviour and silently
+  //: gave the second one a hardcoded, un-themed stroke.
+  flag: { radius: 9, opacity: 0, strokeWidth: 3, ownStroke: true },
+  //: The far end of a projection. Hollow, and smaller than the vessel mark
+  //: that is its origin — it is a claim about where she will be, and it must
+  //: never outweigh the fix she actually broadcast.
+  predicted: { radius: 4, opacity: 0, strokeWidth: 1.6, ownStroke: true },
 };
 
 //: Events requested for the individual-dot layers. The dots are the detail
@@ -292,7 +370,12 @@ export function MapView() {
   // and the operator's own drawn areas. Everything else is one click away in
   // its group, and the groups say what they hold.
   const [visible, setVisible] = useState({
-    positions: true, tracks: false, density: true,
+    // The three live layers open together on purpose. They are one picture of
+    // one vessel — been here, is here, going there — and an operator who has
+    // to switch two of them on to see the third has been handed a puzzle
+    // rather than a map. The old whole-corpus `tracks` mat, which is what the
+    // clutter budget was being spent on, is gone entirely.
+    positions: true, trails: true, predicted: true, cone: true, density: true,
     encounter: false, loitering: false, port_visit: false, gap: false,
     alerts: true,
     detections: false, scenes: true, ports: false,
@@ -317,6 +400,10 @@ export function MapView() {
   const [notes, setNotes] = useState({});
   const [tracks, setTracks] = useState([]);
   const [radarTracks, setRadarTracks] = useState([]);
+  //: Forward projections for the instant on the clock, re-asked as it advances
+  //: (ADR-039). `null` until the first answer, so the readout can distinguish
+  //: "not asked yet" from "asked, and nobody is broadcasting".
+  const [predictions, setPredictions] = useState(null);
   const [selectedZone, setSelectedZone] = useState(null);
   const [drawing, setDrawing] = useState(null);   // null | {points: [[lon,lat]]}
   const [zoneNote, setZoneNote] = useState(null);
@@ -327,6 +414,10 @@ export function MapView() {
   const [windowError, setWindowError] = useState(null);
   const [t, setT] = useState(1); // 0..1 across the window
   const [playing, setPlaying] = useState(false);
+  //: Multiplier on SECONDS_PER_HOUR. 1x is the honest default and the rate the
+  //: readout quotes; anything else is the operator saying "faster than real
+  //: watching", which is their call to make and not one to bury in a constant.
+  const [speed, setSpeed] = useState(1);
   // Has the operator moved the clock themselves? Until they have, the playhead
   // is ours to park somewhere useful (see the parking effect below); once they
   // have, it is theirs and we never move it under them.
@@ -503,6 +594,61 @@ export function MapView() {
   }, [window_, t]);
   const clockSec = clockMs ? clockMs / 1000 : null;
 
+  // Each track with its reporting sessions resolved once, rather than on every
+  // frame. `breaks` arrives from the API as indices into `points`; this turns
+  // them into [firstIndex, lastIndex] pairs, which is the form both the vessel
+  // mark and the trail need sixty times a second.
+  const trackList = useMemo(
+    () => tracks.map((tr) => ({ ...tr, sessions: sessionsOf(tr) })), [tracks]);
+
+  //: The trail is rebuilt on a coarser clock than the vessel mark. A trail is
+  //: up to a few hundred points per hull across a hundred hulls, and handing
+  //: MapLibre that collection twenty-five times a second is the one thing on
+  //: this screen that would actually cost frames — while the visible
+  //: difference is the last two minutes of a line measured in days. The mark
+  //: itself still moves every frame, which is what the eye is following.
+  const trailClockSec = clockSec == null ? null
+    : Math.floor(clockSec / 120) * 120;
+
+  //: Which projection request the clock is currently inside. Quantised so that
+  //: advancing the clock re-asks on a stated cadence instead of on every frame,
+  //: and so that a scrub across the window collapses to one request per
+  //: boundary rather than one per pixel dragged.
+  const predictionBucket = clockSec == null ? null
+    : Math.floor(clockSec / PREDICTION_REFRESH_S);
+
+  // ---- forward projections, re-asked as the clock advances ---------------
+  //
+  // Asked of the API rather than computed here, and that is a deliberate
+  // constraint rather than a convenience: the projection model is a calibrated
+  // rule in `tracks/projection.py` with a measured error budget behind every
+  // constant in it. Reimplementing dead reckoning in JavaScript would put a
+  // second copy of that rule on the other side of the wire, free to drift from
+  // the first the day either is touched — which is the same "a collector that
+  // started detecting" mistake the assistant is built to avoid.
+  useEffect(() => {
+    if (predictionBucket == null || !visible.predicted) return;
+    const ctrl = new AbortController();
+    // A short delay so dragging the scrubber across a week fires one request at
+    // the end rather than forty on the way.
+    const h = setTimeout(() => {
+      api.predictions({ at: Math.round(clockSec),
+                        lead_hours: PREDICTION_LEAD_HOURS }, ctrl.signal)
+        .then((r) => setPredictions(r))
+        .catch((e) => {
+          if (e?.name === "AbortError") return;
+          // Same rule as `/tracks`: a failed request is not an empty sea. An
+          // empty projection layer with no explanation reads as "no vessel
+          // here is going anywhere", which is a claim we did not make.
+          setPredictions({ items: [], failed: String(e?.message || e) });
+        });
+    }, 180);
+    return () => { clearTimeout(h); ctrl.abort(); };
+    // `clockSec` is deliberately not a dependency — the bucket is. Keying on
+    // the raw clock would re-fire this on every animation frame.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [predictionBucket, visible.predicted]);
+
   // ---- static layers: events, ports, scenes, alert markers, track lines ----
   useEffect(() => {
     if (!ready || !map.current) return;
@@ -533,14 +679,28 @@ export function MapView() {
   // ---- moving vessels: interpolate each track to the clock and glide ----
   useEffect(() => {
     if (!ready || !map.current) return;
-    renderVessels(map.current, tracks, clockSec, visible.positions, (id) => setSelected(id));
-  }, [ready, tracks, clockSec, visible.positions]);
+    renderVessels(map.current, trackList, clockSec, visible.positions,
+                  (id) => setSelected(id));
+  }, [ready, trackList, clockSec, visible.positions]);
+
+  // ---- the trail: where she has been in THIS session, up to the clock ----
+  useEffect(() => {
+    if (!ready || !map.current) return;
+    renderTrails(map.current, trackList, trailClockSec, visible.trails);
+  }, [ready, trackList, trailClockSec, visible.trails]);
+
+  // ---- the projection: where dead reckoning says she is going ------------
+  useEffect(() => {
+    if (!ready || !map.current) return;
+    renderPredictions(map.current, predictions, selected,
+                      visible.predicted, visible.cone);
+  }, [ready, predictions, selected, visible.predicted, visible.cone]);
 
   // ---- the selection ring, redrawn wherever the subject is --------------
   useEffect(() => {
     if (!ready || !map.current) return;
-    renderSelection(map.current, selected, tracks, clockSec, data);
-  }, [ready, selected, tracks, clockSec, data]);
+    renderSelection(map.current, selected, trackList, clockSec, data);
+  }, [ready, selected, trackList, clockSec, data]);
 
   // ---- park the playhead where the fleet actually is ----
   // The clock defaulted to the very END of the window, which is the one instant
@@ -552,14 +712,22 @@ export function MapView() {
   // Park it instead on the busiest instant: the moment the most vessels are
   // simultaneously broadcasting. Only until the operator touches the scrubber,
   // after which the clock is theirs.
+  //
+  // **`trackList`, not `tracks`.** `busiestInstant` counts reporting sessions,
+  // and only `trackList` carries them: handed the raw API rows it found no
+  // sessions on any of them, returned null, and this effect gave up — so the
+  // playhead stayed at the end of the window exactly as it had before the
+  // parking was written. It looked like it worked, because pressing play wraps
+  // straight back to the start, and the start of an AIS window does have a
+  // handful of vessels in it. Three of two hundred, in the run that caught it.
   useEffect(() => {
-    if (scrubbed || !window_ || !tracks.length) return;
-    const at = busiestInstant(tracks);
+    if (scrubbed || !window_ || !trackList.length) return;
+    const at = busiestInstant(trackList);
     if (at == null) return;
     const span = window_.end - window_.start;
     if (span <= 0) return;
     setT(Math.min(1, Math.max(0, (at * 1000 - window_.start) / span)));
-  }, [scrubbed, window_, tracks]);
+  }, [scrubbed, window_, trackList]);
 
   // ---- "find her on the map" -------------------------------------------
   //
@@ -647,30 +815,50 @@ export function MapView() {
       data.events, window_, setParams]);
 
   // ---- play/pause ----
-  // Playback runs at SECONDS_PER_DAY, derived from the window's real span, so
-  // an 8-week corpus and a 6-month one advance at the same readable pace —
-  // tying the step to a raw fraction instead made a long window blur past. The
-  // MAX_PLAYTHROUGH_S cap catches the other end: a window of years at 7 s/day
-  // is a progress bar nobody lives to see finish.
+  //
+  // **The clock advances by measured wall time, not by a fixed step per tick.**
+  // The old loop added a constant fraction every 100 ms, which ties the pace of
+  // the simulation to how fast the browser gets round to the timer: a busy
+  // frame silently slowed the fleet down, and a backgrounded tab (where
+  // setInterval is throttled to once a second) made every vessel jump ten
+  // minutes at a time. Reading the real elapsed time each frame means the rate
+  // is what SECONDS_PER_HOUR says it is, whatever the frame rate does.
+  //
+  // Throttled to FRAME_MS rather than run at full rAF: each tick rebuilds the
+  // vessel layer, and at 20 s/h a hull moves well under a pixel between frames,
+  // so 25 updates a second is already far more than the eye can use.
   useEffect(() => {
     if (!playing || !window_) return;
-    const totalDays = Math.max(1, (window_.end - window_.start) / 86400000);
-    const playthroughS = Math.min(SECONDS_PER_DAY * totalDays, MAX_PLAYTHROUGH_S);
-    const tickMs = 100;
-    const dt = tickMs / (playthroughS * 1000); // fraction of the window per tick
-    const h = setInterval(() => {
+    const spanMs = window_.end - window_.start;
+    if (spanMs <= 0) return;
+    //: Corpus milliseconds per wall-clock millisecond.
+    const rate = (3600_000 * speed) / (SECONDS_PER_HOUR * 1000);
+    let raf = 0;
+    let last = performance.now();
+    const frame = (now) => {
+      raf = requestAnimationFrame(frame);
+      const elapsed = now - last;
+      if (elapsed < FRAME_MS) return;
+      last = now;
+      const dt = (elapsed * rate) / spanMs;   // fraction of the window
       setT((x) => (x >= 1 ? 0 : Math.min(1, x + dt)));
-    }, tickMs);
-    return () => clearInterval(h);
-  }, [playing, window_]);
+    };
+    raf = requestAnimationFrame(frame);
+    return () => cancelAnimationFrame(raf);
+  }, [playing, window_, speed]);
 
-  const movingCount = tracks.length;
+  const movingCount = trackList.length;
   // How many of those are on screen at THIS instant — the number that tells the
   // operator whether the clock is somewhere with traffic. `movingCount` is the
   // corpus total and never changes, so on its own it cannot say that.
+  //
+  // Counted on the coarse clock, not on every frame: the number cannot change
+  // between two frames forty milliseconds apart at any speed this player runs,
+  // and recomputing it over every track sixty times a second is the kind of
+  // work that shows up as a stutter in the thing it is describing.
   const onScreen = useMemo(
-    () => tracks.reduce((n, tr) => n + (posAt(tr.points, clockSec) ? 1 : 0), 0),
-    [tracks, clockSec],
+    () => trackList.reduce((n, tr) => n + (posAt(tr, trailClockSec) ? 1 : 0), 0),
+    [trackList, trailClockSec],
   );
 
   return (
@@ -818,12 +1006,19 @@ export function MapView() {
         )}
       </div>
 
+      {/* **One positioned column, several notes.** Each of these used to
+          position itself absolutely at the same corner, so any two on screen
+          together sat exactly on top of each other and the later one in the DOM
+          silently covered the earlier. Two were rare enough together to hide
+          it; the projection disclosure below is always on, which would have
+          made it permanent. They stack now. */}
+      <div className="map-notes">
       {/* Sent here from a vessel card. States which fix the map flew to and
           how old it is, because "her position" and "the last position she
           broadcast" are different claims and the gap between them is often the
           finding. Dismissable, and it never covers the hull it is describing. */}
       {locate && (
-        <div className="notebar map-notes" style={{ borderLeft: "3px solid var(--blue)" }}>
+        <div className="notebar" style={{ borderLeft: "3px solid var(--blue)" }}>
           {locate.found ? (
             <>
               <strong>
@@ -868,7 +1063,7 @@ export function MapView() {
           empty second half of the window, and an empty SAR layer looked like a
           clean scene rather than a scene we never processed. */}
       {Object.values(notes).some(Boolean) && (
-        <div className="notebar map-notes">
+        <div className="notebar">
           {Object.entries(notes).filter(([, v]) => v).map(([k, v]) => (
             <div key={k} style={{ marginBottom: 4 }}>
               <span className="note-key mono">{k}</span>: {v}
@@ -876,6 +1071,36 @@ export function MapView() {
           ))}
         </div>
       )}
+
+      {/* What the projection layer is, in the operator's line of sight rather
+          than in a tooltip. A dashed line reaching ahead of a ship is exactly
+          the kind of mark that gets read as knowledge, and this one is dead
+          reckoning. The caveat is the load-bearing half: `projection.py`
+          measured that a departure from a dead-reckoned track flags 98% of the
+          fleet, because every vessel alters at every waypoint, which is why
+          this system does not carry it as a suspicion factor. Without that
+          sentence on screen, "she left her predicted track" reads as a
+          finding. */}
+      {visible.predicted && predictions && (
+        <div className="notebar" style={{ borderLeft: `3px solid ${PREDICT_COLOR}` }}>
+          {predictions.failed ? (
+            <><strong>Projections unavailable.</strong> {predictions.failed}.
+              The vessels and their trails are unaffected.</>
+          ) : (
+            <>
+              <strong>
+                {predictions.items.length} projection
+                {predictions.items.length === 1 ? "" : "s"},
+                {" "}{PREDICTION_LEAD_HOURS} h ahead.
+              </strong>{" "}
+              {predictions.basis} {predictions.caveat}
+              {predictions.note ? ` ${predictions.note}` : ""}
+              {" "}Select a vessel to see her uncertainty cone.
+            </>
+          )}
+        </div>
+      )}
+      </div>
 
       {/* The scrubber is ALWAYS mounted — it is the demo's primary control and
           it must not appear and disappear. It used to render only once its
@@ -894,6 +1119,26 @@ export function MapView() {
         <span className="clock">
           {clockMs ? fmtDate(new Date(clockMs).toISOString(), true) : "-"}
         </span>
+        {/* The pace, and the fact that it is a choice. An animation whose rate
+            is invisible cannot be read: "she has gone twenty miles" means
+            nothing until you know whether that took an hour or a week. 1x is
+            the honest default and the label says what it buys.
+
+            Left of the scrubber bar, with the play button and the clock, and
+            not out at the right-hand end with the status line: the vessel
+            drawer is an overlay and it covers the right third of this control
+            whenever a hull is selected — which is most of the time an operator
+            is actually watching one move. */}
+        <div className="speed-pick" title={
+          `One hour of the corpus takes ${SECONDS_PER_HOUR} wall-clock seconds `
+          + `at 1x. Higher covers more of the window per second and shows less `
+          + `of each vessel's movement.`}>
+          {SPEEDS.map((s) => (
+            <button key={s} className={speed === s ? "on" : ""}
+                    disabled={!window_}
+                    onClick={() => setSpeed(s)}>{s}x</button>
+          ))}
+        </div>
         <input
           type="range"
           min={0}
@@ -912,7 +1157,9 @@ export function MapView() {
             ? (windowError || "loading time window…")
             : movingCount > 0
               ? `${onScreen} of ${movingCount} vessel`
-                + (movingCount === 1 ? "" : "s") + " moving"
+                + (movingCount === 1 ? "" : "s") + " broadcasting"
+                + ` · ${(SECONDS_PER_HOUR / speed).toFixed(
+                    SECONDS_PER_HOUR / speed < 1 ? 1 : 0)} s per hour`
                 + (window_.playsWholeCorpus ? "" : " · AIS window")
               : trackError
                 ? `could not load tracks: ${trackError}`
@@ -1008,32 +1255,91 @@ function addAoi(m) {
   });
 }
 
-// ---- interpolation: a vessel's [lon,lat] at epoch-seconds t, or null if the
-//      clock is outside its track's time span (it hasn't started / has ended). ----
-function posAt(points, tSec) {
-  if (!points || points.length === 0 || tSec == null) return null;
-  if (tSec < points[0][2] || tSec > points[points.length - 1][2]) return null;
-  let lo = 0, hi = points.length - 1;
-  while (lo < hi - 1) {
-    const mid = (lo + hi) >> 1;
-    if (points[mid][2] <= tSec) lo = mid;
-    else hi = mid;
+// ---- reporting sessions -------------------------------------------------
+//
+// `breaks` comes from `/tracks` as indices into `points` where a new session
+// starts, measured server-side on the full-resolution series (see
+// `AIS_SESSION_BREAK_HOURS`). This turns them into inclusive [first, last]
+// index pairs.
+//
+// A single-fix session is dropped: one point cannot be interpolated, and
+// drawing a vessel for the one instant she reported and nowhere either side of
+// it would be a flicker, not a position. She is still projected — the
+// projection endpoint works from a single fix, which is exactly the case it is
+// for.
+function sessionsOf(tr) {
+  const pts = tr.points || [];
+  const breaks = tr.breaks || [];
+  const out = [];
+  let s = 0;
+  for (const b of breaks) {
+    if (b > s) out.push([s, b - 1]);
+    s = b;
   }
-  const a = points[lo], b = points[hi];
+  if (pts.length - 1 > s) out.push([s, pts.length - 1]);
+  return out.filter(([a, b]) => b > a);
+}
+
+//: The session the clock falls inside, as [first, last] indices, or null if she
+//: was not broadcasting then. Linear over sessions on purpose: the corpus
+//: averages under two per hull and the median vessel has one, so a binary
+//: search would be more code for no measurable difference.
+function sessionAt(tr, tSec) {
+  if (tSec == null) return null;
+  const pts = tr.points;
+  for (const s of tr.sessions || []) {
+    if (tSec >= pts[s[0]][2] && tSec <= pts[s[1]][2]) return s;
+  }
+  return null;
+}
+
+//: Index of the last fix at or before `tSec`, within [lo, hi]. Returns `lo`
+//: when the clock sits on the session's first fix.
+function fixBefore(points, lo, hi, tSec) {
+  let a = lo, b = hi;
+  while (a < b - 1) {
+    const mid = (a + b) >> 1;
+    if (points[mid][2] <= tSec) a = mid;
+    else b = mid;
+  }
+  return a;
+}
+
+// ---- interpolation: a vessel's [lon,lat] at epoch-seconds t, or null when she
+//      was not broadcasting then. ----
+//
+// **The session gate is the correctness fix, not an optimisation.** This used
+// to interpolate between whichever two fixes bracketed the clock anywhere in
+// the track, which across a silence draws a vessel steaming smoothly along a
+// line nobody observed — 206 of the gaps in the landed corpus are over six
+// hours and the longest is five days. During a gap the honest answer to "where
+// is she" is that we do not know, and the honest picture is that she is not
+// drawn.
+function posAt(tr, tSec) {
+  const s = sessionAt(tr, tSec);
+  if (!s) return null;
+  const points = tr.points;
+  const lo = fixBefore(points, s[0], s[1], tSec);
+  const a = points[lo], b = points[Math.min(lo + 1, s[1])];
   const span = b[2] - a[2] || 1;
-  const f = (tSec - a[2]) / span;
+  const f = Math.max(0, Math.min(1, (tSec - a[2]) / span));
   return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f];
 }
 
-//: The epoch-second at which the most tracks are simultaneously live — a sweep
-//: over track start/end events, so it is one sort rather than a scan per
-//: candidate instant. Ties go to the earliest such moment.
+//: The epoch-second at which the most vessels are simultaneously broadcasting —
+//: a sweep over session start/end events, so it is one sort rather than a scan
+//: per candidate instant. Ties go to the earliest such moment.
+//:
+//: Counts SESSIONS, not tracks. Counting whole tracks put the busiest instant
+//: wherever the most hulls had a first and a last fix either side of it,
+//: silences included — so the playhead could park on a moment when half the
+//: "live" fleet had not been heard from in days.
 function busiestInstant(tracks) {
   const marks = [];
   for (const tr of tracks) {
-    const p = tr.points;
-    if (!p || p.length < 2) continue;
-    marks.push([p[0][2], 1], [p[p.length - 1][2], -1]);
+    for (const [a, b] of tr.sessions || []) {
+      marks.push([tr.points[a][2], 1], [tr.points[b][2], -1]);
+    }
   }
   if (!marks.length) return null;
   // Opens before closes at the same instant: a track that ends exactly as
@@ -1071,7 +1377,11 @@ function alertPosition(alert, tracks, events) {
   const tSec = alert.ts ? Date.parse(alert.ts) / 1000 : null;
   if (tSec != null && !Number.isNaN(tSec)) {
     const tr = tracks.find((t) => t.vessel_id === alert.subject);
-    const pos = tr && posAt(tr.points, tSec);
+    // Null when the alert falls inside a silence, which is correct and is the
+    // whole reason the session gate exists: "she was here when we flagged her"
+    // must not be answered by interpolating across a gap. The cascade below
+    // then falls through to a labelled proxy rather than to an invention.
+    const pos = tr && posAt(tr, tSec);
     if (pos) return { pos, basis: "her position at the time of the alert" };
   }
   let best = null, bestGap = Infinity;
@@ -1095,7 +1405,7 @@ function alertPosition(alert, tracks, events) {
 function renderVessels(m, tracks, clockSec, on, onSelect) {
   const feats = [];
   for (const tr of tracks) {
-    const pos = posAt(tr.points, clockSec);
+    const pos = posAt(tr, clockSec);
     if (!pos) continue;
     feats.push({
       type: "Feature",
@@ -1105,6 +1415,194 @@ function renderVessels(m, tracks, clockSec, on, onSelect) {
   }
   upsertCircleLayer(m, "vessels", feats, themeColor("--mark-vessel", VESSEL_COLOR),
                     on, onSelect, MARK_STYLE.live);
+}
+
+// ---- the trail: where she has been on this trip ---------------------------
+//
+// One line per broadcasting vessel, running from the start of the session she
+// is currently in to where she is on the clock — so it grows behind her as the
+// animation plays and disappears the moment she stops reporting.
+//
+// **Bounded by the session, not by the window.** The layer this replaces drew
+// every vessel's whole eight-week polyline whether or not the clock was
+// anywhere near it, which is a picture of the corpus rather than of the sea:
+// two hundred static lines that said nothing about when, crossed everything,
+// and never changed. What an operator asks of a vessel on a moving map is
+// "where has she come from", and the answer to that is bounded by the trip she
+// is on.
+//
+// The trail is drawn to the interpolated position rather than to her last fix,
+// so its head sits under the vessel mark instead of trailing it by up to a
+// decimated sample.
+function renderTrails(m, tracks, clockSec, on) {
+  const feats = [];
+  if (on && clockSec != null) {
+    for (const tr of tracks) {
+      const s = sessionAt(tr, clockSec);
+      if (!s) continue;
+      const pts = tr.points;
+      const i = fixBefore(pts, s[0], s[1], clockSec);
+      const coords = [];
+      for (let k = s[0]; k <= i; k++) coords.push([pts[k][0], pts[k][1]]);
+      const head = posAt(tr, clockSec);
+      if (head) coords.push(head);
+      if (coords.length < 2) continue;
+      feats.push({
+        type: "Feature",
+        geometry: { type: "LineString", coordinates: coords },
+        properties: { vessel_id: tr.vessel_id },
+      });
+    }
+  }
+  upsertTrailLayer(m, "trails", feats, on);
+}
+
+//: `line-gradient` fades each trail toward the start of its own session, so on
+//: a trawler that has worked one ground for four days the recent movement is
+//: still the part that reads. It needs `lineMetrics` on the source, and it
+//: cannot be combined with a data-driven colour — which is fine, every trail
+//: means the same thing.
+function upsertTrailLayer(m, id, feats, on) {
+  const fc = { type: "FeatureCollection", features: feats };
+  const src = m.getSource(id);
+  if (src) src.setData(fc);
+  else {
+    m.addSource(id, { type: "geojson", data: fc, lineMetrics: true });
+    m.addLayer({
+      id, type: "line", source: id,
+      layout: { "line-cap": "round", "line-join": "round" },
+      paint: {
+        "line-width": 1.6,
+        "line-color": themeColor("--mark-trail", TRAIL_COLOR),
+        "line-gradient": [
+          "interpolate", ["linear"], ["line-progress"],
+          0, `rgba(0,0,0,0)`,
+          TRAIL_FADE, themeColor("--mark-trail", TRAIL_COLOR),
+          1, themeColor("--mark-trail", TRAIL_COLOR),
+        ],
+      },
+    });
+  }
+  if (m.getLayer(id)) m.setLayoutProperty(id, "visibility", on ? "visible" : "none");
+}
+
+// ---- the projection: where she is predicted to go -------------------------
+//
+// Drawn from `/predictions` (ADR-039), which computes it with the same module
+// the rest of the system reasons about departures with. Three marks:
+//
+//   * a **dashed line** from her position now to where dead reckoning puts her
+//     three hours on. Dashed because it has not happened: solid behind the
+//     vessel and dashed ahead of her is the one convention on this map that
+//     needs no key entry to read.
+//   * a **hollow ring** at the far end — the predicted position itself, which
+//     is the actual assertion the line is a path to.
+//   * the **uncertainty cone**, on the selected vessel only. A hundred
+//     overlapping circles is not a picture of uncertainty, it is a fog; the
+//     cone belongs on the hull the operator is asking about, which is what
+//     selecting one means. The radius comes from the API — it is the cone
+//     `tracks/projection.py` computed, not one re-derived here.
+function renderPredictions(m, predictions, selected, on, coneOn) {
+  const items = (predictions && predictions.items) || [];
+  const lines = [];
+  const ends = [];
+  const cones = [];
+  if (on) {
+    for (const p of items) {
+      const path = p.path || [];
+      if (path.length < 2) continue;
+      lines.push({
+        type: "Feature",
+        geometry: { type: "LineString",
+                    coordinates: path.map((q) => [q[0], q[1]]) },
+        properties: { vessel_id: p.vessel_id },
+      });
+      const last = path[path.length - 1];
+      ends.push({
+        type: "Feature",
+        geometry: { type: "Point", coordinates: [last[0], last[1]] },
+        properties: {
+          vessel_id: p.vessel_id,
+          label: `Predicted position · ${fmtDateTime(
+            new Date(last[2] * 1000).toISOString())} · within `
+            + `${(last[3] / 1852).toFixed(1)} nm · dead reckoning from `
+            + `${p.from.sog_kn} kn on ${p.from.cog_deg}°`
+            + (p.stale_minutes >= 30
+              ? ` · last heard ${Math.round(p.stale_minutes)} min ago`
+              : ""),
+        },
+      });
+      if (coneOn && selected && p.vessel_id === selected) {
+        // One ring per projected step: the cone is not a single circle, it is
+        // a circle that widens along the path, and drawing only the end of it
+        // would hide that the near end is tight.
+        for (const q of path) {
+          if (q[3] < 200) continue;   // tighter than the mark, nothing to draw
+          cones.push({
+            type: "Feature",
+            geometry: { type: "Polygon",
+                        coordinates: [circleRing(q[1], q[0], q[3] / 1000)] },
+            properties: { confidence: q[4] },
+          });
+        }
+      }
+    }
+  }
+  upsertPredictionLayer(m, "prediction-line", lines, on);
+  upsertCircleLayer(m, "prediction-end", ends,
+                    themeColor("--mark-predicted", PREDICT_COLOR),
+                    on, () => {}, MARK_STYLE.predicted);
+  upsertConeLayer(m, "prediction-cone", cones, on && coneOn);
+}
+
+function upsertPredictionLayer(m, id, feats, on) {
+  const fc = { type: "FeatureCollection", features: feats };
+  const src = m.getSource(id);
+  if (src) src.setData(fc);
+  else {
+    m.addSource(id, { type: "geojson", data: fc });
+    m.addLayer({
+      id, type: "line", source: id,
+      paint: {
+        "line-color": themeColor("--mark-predicted", PREDICT_COLOR),
+        "line-width": 1.4,
+        "line-opacity": 0.85,
+        "line-dasharray": [2, 2],
+      },
+    });
+  }
+  if (m.getLayer(id)) m.setLayoutProperty(id, "visibility", on ? "visible" : "none");
+}
+
+function upsertConeLayer(m, id, feats, on) {
+  const fc = { type: "FeatureCollection", features: feats };
+  const src = m.getSource(id);
+  if (src) src.setData(fc);
+  else {
+    m.addSource(id, { type: "geojson", data: fc });
+    // Under the AOI outline and therefore under every mark: a cone is the
+    // uncertainty around a prediction, and one painted over the traffic it
+    // describes would hide the vessels an operator is comparing it against.
+    const under = m.getLayer("aoi-line") ? "aoi-line" : undefined;
+    m.addLayer({
+      id: `${id}-fill`, type: "fill", source: id,
+      paint: {
+        "fill-color": themeColor("--mark-predicted", PREDICT_COLOR),
+        "fill-opacity": 0.06,
+      },
+    }, under);
+    m.addLayer({
+      id: `${id}-line`, type: "line", source: id,
+      paint: {
+        "line-color": themeColor("--mark-predicted", PREDICT_COLOR),
+        "line-width": 0.8, "line-opacity": 0.35,
+      },
+    }, under);
+  }
+  for (const suff of ["-fill", "-line"]) {
+    if (m.getLayer(id + suff))
+      m.setLayoutProperty(id + suff, "visibility", on ? "visible" : "none");
+  }
 }
 
 // **Which one is selected, on the map.** Clicking a vessel opened her record
@@ -1121,7 +1619,10 @@ function renderVessels(m, tracks, clockSec, on, onSelect) {
 function renderSelection(m, id, tracks, clockSec, data) {
   let pos = null;
   const tr = id && tracks.find((t) => t.vessel_id === id);
-  if (tr) pos = posAt(tr.points, clockSec) || tr.points[tr.points.length - 1]?.slice(0, 2);
+  // Her position now if she is broadcasting; her last known fix otherwise. The
+  // ring is "which one are we talking about", so it has to survive the subject
+  // going quiet — that is frequently the moment the operator selected her.
+  if (tr) pos = posAt(tr, clockSec) || tr.points[tr.points.length - 1]?.slice(0, 2);
   if (!pos && id) {
     const key = String(id).startsWith("contact:radar:")
       ? String(id).slice("contact:radar:".length) : null;
@@ -1170,13 +1671,10 @@ function renderStatic(m, data, tracks, visible, onSelect) {
                       onSelect, MARK_STYLE.history);
   }
 
-  // track polylines
-  const lineFeats = tracks.map((tr) => ({
-    type: "Feature",
-    geometry: { type: "LineString", coordinates: tr.points.map((p) => [p[0], p[1]]) },
-    properties: {},
-  }));
-  upsertLineLayer(m, "tracklines", lineFeats, "#7aa8dd", visible.tracks);
+  // NB: the whole-corpus track polylines that used to be drawn here are gone.
+  // See `renderTrails` — a vessel's line is now bounded by the session she is
+  // in and by the clock, and there is no layer that draws where every hull went
+  // over eight weeks all at once.
 
   // ports
   const portFeats = data.ports
@@ -1710,8 +2208,7 @@ function upsertCircleLayer(m, id, feats, color, on, onSelect,
         "circle-stroke-width": style.strokeWidth,
         // A ring mark strokes in its own colour; everything else strokes white
         // to separate it from whatever it overlaps.
-        "circle-stroke-color": style.strokeColor === ALERT_COLOR ? color
-                                                                 : style.strokeColor,
+        "circle-stroke-color": style.ownStroke ? color : style.strokeColor,
         "circle-stroke-opacity": 1,
       },
     });

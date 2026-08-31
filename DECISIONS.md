@@ -3498,3 +3498,148 @@ the header comment of `WatchView.jsx`. One rule from that pass was reverted afte
 review and is worth stating so it is not reintroduced: **casing is left as the
 data and the existing screens had it.** Forcing a capital on every enum was a
 change nobody asked for.
+
+---
+
+## ADR-039 — Reporting sessions, and the projection as a drawn layer *(Accepted)*
+
+**Context.** The map's Live traffic group held two layers: vessels, animated
+along their AIS tracks, and `tracks`, which drew every hull's entire eight-week
+polyline at once. Two complaints, and underneath them a defect neither
+complaint mentions.
+
+*"No point showing historical vessel tracks on our Map"* is right, and for a
+sharper reason than clutter. That layer was a picture of the corpus rather than
+of the sea. Two hundred static lines said nothing about *when*, did not change
+as the clock ran, and crossed everything else on screen. The question an
+operator asks of a moving vessel is "where has she come from and where is she
+going", and a mat of whole-window polylines answers neither.
+
+*"AIS track predictions are not visible"* is also right, and it was true in the
+strongest sense: `tracks/projection.py` has existed since ADR-032, is exercised
+by the evaluation suite, and **nothing served it**. There was no endpoint. The
+one capability the brief calls *predictive* was reachable only from Python.
+
+**The defect underneath.** The animation interpolated between whichever two
+fixes bracketed the clock, anywhere in a vessel's series. Across a four-minute
+report interval that is a fair reading of the data. Across the 206 inter-fix
+gaps in the landed corpus that run over six hours — 145 over twelve, the longest
+5.4 days — it draws a vessel steaming steadily along a line **nobody observed**.
+The map has been asserting positions during silences for as long as it has
+animated anything. It went unnoticed because a smoothly gliding dot looks
+exactly like a correct one; the only way to see it was to ask what evidence sat
+behind a particular instant, which no view invited anybody to do.
+
+That is the same class of error as pinning an alert to a position it never
+claimed (ADR-038), and it is worse here, because the position a silence hides is
+disproportionately the position worth having. A vessel that stops broadcasting
+is the phenomenon this system exists to find, and the map was quietly filling
+her gap in with a straight line.
+
+**Decision.**
+
+**(a) A track is cut into reporting sessions before it is drawn.** A session is
+an unbroken run of broadcasting: consecutive fixes no more than
+`AIS_SESSION_BREAK_HOURS` (six) apart. Inside a session the client may
+interpolate; across a break it draws nothing, because there is nothing to draw.
+
+Six hours is chosen against the reporting cadence, not against the alert count.
+The landed corpus reports at a four-minute median and a fifty-seven-minute p99,
+so six hours is an order of magnitude clear of ordinary cadence and cannot be
+tripped by a vessel reporting slowly at anchor. It is deliberately **not**
+`TRACK_BREAK_DAYS`, which is seven days and answers a different question:
+"is this still the same hull" (identity, MMSI reuse) versus "may we draw a line
+between these two fixes" (continuity). Collapsing the two would either fabricate
+a week of steaming or shred every track into fragments.
+
+**A session is not a voyage and is not labelled as one.** A trawler working one
+ground for four days broadcasts continuously and gets one long tangled session;
+a merchant crossing the Gulf gets one clean leg. Both are honestly "the run of
+broadcasting she is in", which is a fact about the data. Calling it a voyage
+would be a claim about intent that nothing here measures — and the declared
+voyage, which *is* such a claim, already has its own rule (ADR-035).
+
+The boundaries are computed **server-side on the full-resolution series** and
+served as indices into the decimated points. They cannot be derived on the
+client: at a 200-point budget over a fifty-day track, consecutive samples are
+hours apart whether or not anything was heard in between, so decimation destroys
+exactly the evidence the segmentation needs. One vessel in this corpus reports
+13,881 times with no raw gap over 58 minutes and still lands served samples
+sixteen hours apart.
+
+**(b) The whole-corpus track layer is deleted, and replaced by a trail bounded
+by the session and by the clock.** It runs from the start of the session she is
+currently in to where she is now, so it grows behind her as the animation plays
+and disappears the moment she stops reporting.
+
+**(c) Forward projection is served, and computed once.** `GET /predictions?at=`
+returns, for every vessel heard within the continuity window before the clock,
+the dead-reckoned path from the clock forward with the uncertainty cone at each
+step. The model stays in `tracks/projection.py`. A JavaScript reimplementation
+of dead reckoning would be a second, uncalibrated predictor, free to drift from
+the first the day either is tuned — the same "a collector that started
+detecting" mistake ADR-031 forbids the assistant, and it applies as hard to a
+predictor as to a detector.
+
+Asked fresh as the clock advances rather than precomputed, because a projection
+is made from one fix at one moment and there is no single answer to cache. The
+refresh is quantised to thirty minutes of corpus time, which at the default rate
+is one request every ten wall-clock seconds.
+
+**Nothing in that endpoint reads ahead of the clock**, and the tempting version
+that does is worth naming. Deciding "is she active" by looking for a fix *after*
+the clock would be cheap, would look more correct, and would silently remove a
+vessel from the picture at the exact instant she stopped transmitting. Activity
+is therefore "heard within the last six hours", past only. A hull that has just
+gone quiet keeps her projection with a widening cone, and `stale_minutes` says
+how long since she was heard.
+
+**(d) The cone is drawn on the selected vessel only.** A hundred overlapping
+circles is not a picture of uncertainty, it is a fog. The cone belongs on the
+hull the operator is asking about, which is what selecting one means.
+
+**(e) The clock runs at twenty wall-clock seconds per hour of corpus time**, up
+from 0.29 (7 s/day). At the old rate a merchant crossed the Arabian Sea in the
+time it takes to read a sentence: nothing on screen was a movement, it was a
+streak, and the trail and projection layers would have been unreadable smears.
+The cost is stated rather than capped: the eight-week AIS window takes seven and
+a half hours to play end to end at 1x, which is what the speed control is for
+and why the readout says the rate out loud. The old `MAX_PLAYTHROUGH_S` cap is
+removed — a silent cap overrides the requested pace and leaves nobody able to
+tell why.
+
+**Consequences, including four defects this surfaced.**
+
+* **Departure from a projection is still not a suspicion factor**, and the
+  screen says so. `tracks/projection.py` measured it: a departure rule flags 98%
+  of the fleet at any usable threshold, because every vessel alters at every
+  waypoint. A dashed line reaching ahead of a ship is exactly the mark that gets
+  read as knowledge, so the caveat ships in the response body and is rendered on
+  the map, not parked in a tooltip.
+* **The playhead parking never worked.** It was written to open the map on the
+  busiest instant and it called `busiestInstant` with rows that carry no
+  sessions, so it found nothing, returned null, and gave up — leaving the clock
+  at the end of the window exactly as before. It looked like it worked, because
+  pressing play wraps straight back to the start and the start of an AIS window
+  does have a few vessels in it. Three of two hundred, in the run that caught it.
+* **Every map note positioned itself at the same corner.** Each carried
+  `position: absolute` at `left: 240px; bottom: 74px`, so any two on screen
+  together sat exactly on top of each other and the later one in the DOM covered
+  the earlier — a disclosure hidden by another disclosure. Rare enough with two
+  transient notes to go unseen; permanent once the projection disclosure joined
+  them. They stack in one positioned column now.
+* **The clock advanced by a fixed step per timer tick**, which ties the pace of
+  the simulation to how promptly the browser services a timer: a busy frame
+  slowed the fleet down and a backgrounded tab (where `setInterval` is throttled
+  to 1 Hz) made every vessel jump ten minutes at a time. It reads measured
+  elapsed time each frame now.
+* **A ring mark was selected by comparing its stroke colour to the alert red.**
+  That worked while exactly one layer wanted a ring and gave the second one a
+  hardcoded, un-themed stroke. It is a named flag on the mark style.
+
+**What this does not decide.** Prediction stays dead reckoning. Making it
+discriminate needs a **route-aware** model — "she is on the Kandla-Colombo track
+and will alter at the waypoint" is the null hypothesis a coastal voyage actually
+follows, and the zone layer (ADR-030) already holds the customary lanes such a
+model could be fitted to. That is real work and it is not this session's; it is
+recorded in `projection.py` so it is not rediscovered.

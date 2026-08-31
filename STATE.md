@@ -8,9 +8,96 @@ session. `CLAUDE.md`, `ARCHITECTURE.md`, `DECISIONS.md` are stable contracts;
 > between status buckets, record what was verified vs assumed, log anything now
 > broken, and set "Next up." If you don't update it, the next session starts blind.
 
-**Last updated:** 2026-08-31 (seventh session) — **The operator surface: three
-tabs merged into one, attribution named, dark theme, and a brace that emptied
-the light theme of its typography.**
+**Last updated:** 2026-08-31 (eighth session) — **The map stops drawing history
+and starts drawing motion: reporting sessions, a served forward projection, and
+a clock slow enough to watch.**
+
+**The map was asserting positions during silences, and had been since it first
+animated anything** (ADR-039). It interpolated between whichever two fixes
+bracketed the clock, anywhere in a vessel's series — so across the 206 inter-fix
+gaps in this corpus that run over six hours (145 over twelve, the longest 5.4
+days) it drew a vessel steaming steadily along a line **nobody observed**. It
+went unnoticed because a smoothly gliding dot looks exactly like a correct one.
+`/tracks` now cuts each series into **reporting sessions** (six hours of silence
+ends one, `AIS_SESSION_BREAK_HOURS`), measured on the full data before
+decimation because decimation is what destroys the evidence of a gap. During a
+silence she is not drawn. This is deliberately not `TRACK_BREAK_DAYS` (seven
+days), which answers "is this the same hull" rather than "may we draw a line
+between these two fixes"; and a session is **not** a voyage — a trawler working
+one ground gets one long tangled session and that is an honest fact about the
+data, not a claim about her intent.
+
+**The whole-corpus track layer is gone.** It drew every hull's eight-week
+polyline at once: two hundred static lines that said nothing about *when* and
+did not change as the clock ran. Live traffic is now three layers that are one
+picture of one vessel — where she has been *this session* (a trail that grows
+behind her), where she is, and where she is going.
+
+**Forward projection is served for the first time.** `tracks/projection.py` has
+existed since ADR-032 and **nothing served it** — the one capability the brief
+calls *predictive* was reachable only from Python. New `GET /predictions?at=`
+returns the dead-reckoned path and its widening cone for every vessel heard in
+the six hours before the clock; the map draws a dashed line, a hollow ring at
+the predicted position, and the cone on the selected hull. The model stays in
+Python: a JavaScript copy would be a second, uncalibrated predictor. **Nothing
+in the endpoint reads ahead of the clock** — activity is "heard recently", past
+only, because deciding it from a later fix would remove a vessel from the
+picture at the exact instant she stopped transmitting.
+
+**Departure from a projection is still not a suspicion factor**, and the screen
+says so out loud rather than in a tooltip: `projection.py` measured that such a
+rule flags 98% of the fleet, because every vessel alters at every waypoint.
+
+**The clock runs at 20 wall-clock seconds per hour**, up from 0.29 (7 s/day),
+with a 1x/2x/5x/15x/60x control and the rate in the readout. Measured in the
+browser: 30 wall seconds advanced the clock 1 h 29 m. The old
+`MAX_PLAYTHROUGH_S` cap is removed — a silent cap overrides the requested pace
+and leaves nobody able to tell why. The eight-week window therefore takes 7.5 h
+to play end to end at 1x, which is what the speed control is for.
+
+**Four defects surfaced doing it:**
+
+* **The playhead parking never worked.** Written to open the map on the busiest
+  instant, it called `busiestInstant` with rows carrying no sessions, found
+  nothing and gave up — leaving the clock at the end of the window exactly as
+  before. It looked fine because pressing play wraps straight to the start.
+  Three of two hundred vessels on screen in the run that caught it; ninety-one
+  after the fix.
+* **Every map note positioned itself absolutely at the same corner**, so two on
+  screen together sat exactly on top of each other and the later covered the
+  earlier — a disclosure hidden by another disclosure. They stack in one
+  positioned column now.
+* **The clock advanced by a fixed step per timer tick**, tying the pace to timer
+  scheduling: a backgrounded tab (`setInterval` throttled to 1 Hz) made every
+  vessel jump ten minutes at a time. It reads measured elapsed time per frame.
+* **A ring mark was selected by comparing its stroke colour to the alert red** —
+  fine with one ring layer, and it gave the second a hardcoded, un-themed stroke.
+
+**Verified in a browser** against the live backend and the landed scenario
+corpus, not only in pytest: 91 of 200 vessels on screen at first paint, 91
+trails, 93 projections, the cone appearing on click, no page errors, both
+themes. `tests/test_map_motion.py` adds 23 tests; one of them caught the
+playhead bug and one caught a faulty premise of my own (served points far apart
+in time are decimation, not a silence — only the raw series knows).
+
+**Full suite: 962 passed, 64 skipped, 1 failed.** The failure is
+`test_ports_non_empty_and_split` — the port gazetteer is empty in this sandbox
+because the registry ingest was never run here. Confirmed pre-existing: it fails
+identically on a stashed tree. Nothing in this session touched a detector; alert
+counts are unchanged.
+
+**Still open from last session:** on Eshan's machine the map showed no vessels
+and read "no AIS tracks in this window". Not reproduced here (91 of 200 draw).
+That status line already distinguishes loading / failed / genuinely empty, so
+his next run will say which — and the new projection note adds a second
+independent signal: if `/predictions` also comes back empty or failed, the
+problem is the corpus or the API, not the track layer.
+
+---
+
+**Seventh session** — **The operator surface: three tabs merged into
+one, attribution named, dark theme, and a brace that emptied the light theme of
+its typography.**
 
 **Watch replaces Assistant, Findings and Alerts** (ADR-038). They showed
 substantially the same facts three times over, and the only irreplaceable
@@ -835,8 +922,41 @@ steps personally.
 
 ## Next up
 
-> **Read this box first — the rest of this section is from 2026-07-31 and some
-> of it is done.** The current highest-leverage action, as of 2026-08-10, is
+> **2026-08-31, eighth session — run the map and tell me what moves.** The
+> whole live-traffic layer changed (ADR-039) and none of it has run on your
+> machine.
+>
+> ```
+> cd maritime-isr-live
+> python -m maritime_isr.api          # then open the Map tab
+> ```
+>
+> **Four things to report back**, whatever they are:
+> 1. The line at the right of the scrubber. It should read something like
+>    **"91 of 200 vessels broadcasting · 20 s per hour"**. If the first number
+>    is 0-3, the playhead did not park; if it says "could not load tracks" or
+>    "no AIS tracks in this window", that is the unresolved problem from last
+>    session and the sentence now names which of the two it is.
+> 2. Press ▶ and watch one ship for half a minute. The clock should advance
+>    about **an hour and a half in thirty seconds**, and each ship should slide
+>    along a solid line that grows behind her. If she jumps rather than glides,
+>    say so.
+> 3. The blue note above the scrubber: **how many projections?** Each
+>    broadcasting ship should have a dashed line reaching ahead of her to a
+>    small hollow ring. If the note says "Projections unavailable", paste the
+>    reason it gives.
+> 4. Click a ship. Faint circles should appear along her dashed line, widening
+>    as it goes — that is her uncertainty cone.
+>
+> Plain English for the terms above: a **trail** is where she has been on this
+> trip; a **projection** is where she would be if she just holds her current
+> course and speed (sailors call that *dead reckoning*); the **cone** is how
+> wrong that could be, and it widens the further ahead you look. A ship leaving
+> her cone is normal — it means she turned — and the map says so.
+
+> **The 2026-08-10 box below is still open**, and the rest of this section is
+> from 2026-07-31 and some of it is done. The highest-leverage action after the
+> map check, as of 2026-08-10, is
 > **running the demo on the laptop against the real corpus.** Everything in
 > ADR-024 and ADR-025 is sandbox-green and browser-verified and *none of it has
 > touched real data*. In order:
