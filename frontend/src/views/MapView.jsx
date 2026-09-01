@@ -86,12 +86,32 @@ const SPEEDS = [1, 2, 5, 15, 60];
 //: to follow.
 const FRAME_MS = 40;
 
-//: How far the clock has to move, in seconds of corpus time, before the map
-//: asks the API for fresh forward projections. Thirty minutes: at 1x that is a
-//: request every ten wall-clock seconds, and a projection made from a fix up to
-//: half an hour stale is still the projection the system would have been
-//: asserting at that moment.
-const PREDICTION_REFRESH_S = 1800;
+//: How stale the standing projection may get before it is re-asked, as a
+//: fraction of its own lead. A quarter of three hours is forty-five corpus
+//: minutes.
+//:
+//: Expressed against the lead rather than as a fixed span of corpus time
+//: BECAUSE the playback speed varies. A fixed span is a promise about corpus
+//: time and says nothing about the picture; a fraction of the lead is a promise
+//: about the picture — the drawn path is never more than a quarter of the way
+//: through being overtaken by the vessel it belongs to, at 1x or at 60x.
+//
+//: 0.15 rather than something larger because the far end of the drawn path
+//: jumps forward by exactly this fraction on every refresh, and a tail that
+//: leaps a quarter of its own length every fifteen seconds reads as flicker.
+//: The cost is requests, and at 1x that is one every nine wall-seconds, which
+//: is nothing. The high-speed end is protected by the wall-clock floor below,
+//: not by this.
+const PREDICTION_STALE_FRACTION = 0.15;
+
+//: How often the wall clock is checked to see whether a refresh is due, and the
+//: floor on how often one may actually be issued. The poll is cheap (a
+//: comparison); the floor is what stops 60x playback turning into a request
+//: storm. With at most one request in flight, the effective rate settles at
+//: whatever the machine can serve — which is the property the old
+//: simulation-time cadence did not have.
+const PREDICTION_POLL_MS = 200;
+const PREDICTION_MIN_INTERVAL_MS = 350;
 
 //: How far ahead the drawn projection reaches. Three hours is the lead the
 //: projection module's own measurements are quoted at, and at merchant speeds
@@ -187,11 +207,25 @@ const BASEMAPS = [
   {
     id: "ocean",
     label: "Ocean",
-    hint: "Bathymetry and coastline. Depth contours and shelf edges.",
+    hint: "Bathymetry and coastline. Goes soft past mid zoom.",
     tiles: ["https://services.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}"],
     labels: ["https://services.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Reference/MapServer/tile/{z}/{y}/{x}"],
     attribution: "Esri, GEBCO, NOAA, National Geographic and other contributors",
-    maxzoom: 13,
+    // **Nine, not thirteen, and this is what stops "Map data not yet
+    // available" being stamped across the sea.** Past its published levels this
+    // service does not 404 — it returns a PICTURE that says the data is
+    // missing, which a raster layer draws like any other tile. So the map has
+    // to stop asking rather than handle an error, and `maxzoom` on a raster
+    // source means exactly that: do not request above this level, upsample the
+    // tiles from it instead. The cost is that pushing in past 9 goes soft,
+    // which is stated in the hint; the alternative is a legend covering the
+    // water at every berth-level zoom.
+    //
+    // Nine is deliberately conservative and is NOT measured: this sandbox has
+    // no outbound network, so the level at which Esri's ocean coverage actually
+    // stops could not be checked. If the bathymetry now blurs sooner than it
+    // needs to, that number is the thing to raise.
+    maxzoom: 9,
     dimInDark: true,
   },
   {
@@ -218,6 +252,17 @@ const BASEMAPS = [
 
 const DEFAULT_BASEMAP = "canvas";
 
+//: **Versioned, and the version is the fix.** The remembered basemap was stored
+//: under `misr.basemap`, and anybody who had used this map before carried
+//: `"ocean"` in it — the old default. Changing the default in code therefore
+//: changed nothing for the one person actually running the app: the stored
+//: preference won, the theme-following canvas was never selected, and a dark
+//: app went on drawing a bright blue-grey sea. A remembered choice SHOULD beat
+//: a default; the bug was treating a value the operator never consciously made
+//: as a choice. Bumping the key retires those, once, and remembers real
+//: choices from here.
+const BASEMAP_KEY = "misr.basemap.v2";
+
 //: Pick the theme's variant of a field that may be one array or `{light, dark}`.
 function forTheme(v, themeKey) {
   if (!v) return null;
@@ -240,25 +285,53 @@ function forTheme(v, themeKey) {
 function basemapStyle(id, themeKey) {
   const b = BASEMAPS.find((x) => x.id === id) || BASEMAPS[0];
   const css = getComputedStyle(document.documentElement);
+  const num = (name, fallback) => {
+    const v = parseFloat(css.getPropertyValue(name));
+    return Number.isFinite(v) ? v : fallback;
+  };
   const ground = css.getPropertyValue("--map-ground").trim() || "#eef2f6";
-  const dim = parseFloat(css.getPropertyValue("--map-tile-opacity"));
-  const opacity = b.dimInDark && Number.isFinite(dim) ? dim : 1;
   const tiles = forTheme(b.tiles, themeKey);
   const labels = forTheme(b.labels, themeKey);
+
+  // **Opacity alone did not make a light basemap dark, it made it pale.**
+  // Fading a bright plate towards the ground colour lowers its contrast without
+  // lowering its lightness much, so the land stayed the brightest thing on
+  // screen and the vessels sat on top of it looking washed out — the exact
+  // complaint. A raster layer supports brightness, saturation and contrast as
+  // well, and those are the controls that actually turn a daylight cartography
+  // into a night one: pull the top of the brightness range down hard, drain
+  // most of the colour, and put a little contrast back so the coastline
+  // survives the other two.
+  //
+  // Only applied to sources that say they need it. A basemap already drawn dark
+  // (the canvas) is left alone: darkening it again collapses the land into the
+  // background and takes the coastline with it.
+  const adjust = b.dimInDark
+    ? {
+      "raster-opacity": num("--map-tile-opacity", 1),
+      "raster-brightness-max": num("--map-tile-brightness-max", 1),
+      "raster-saturation": num("--map-tile-saturation", 0),
+      "raster-contrast": num("--map-tile-contrast", 0),
+    }
+    : { "raster-opacity": 1 };
+
   const sources = {
     base: { type: "raster", tiles, tileSize: 256,
             maxzoom: b.maxzoom || 19, attribution: b.attribution },
   };
   const layers = [
     { id: "bg", type: "background", paint: { "background-color": ground } },
-    { id: "base", type: "raster", source: "base",
-      paint: { "raster-opacity": opacity } },
+    { id: "base", type: "raster", source: "base", paint: adjust },
   ];
   if (labels) {
     sources.baselabels = { type: "raster", tiles: labels, tileSize: 256,
                            maxzoom: b.maxzoom || 19 };
-    layers.push({ id: "baselabels", type: "raster", source: "baselabels",
-                  paint: { "raster-opacity": Math.min(1, opacity + 0.2) } });
+    // Place names are the one thing that must NOT be dimmed into
+    // illegibility — they are already thin light type on transparent tiles.
+    layers.push({
+      id: "baselabels", type: "raster", source: "baselabels",
+      paint: { "raster-opacity": Math.min(1, (adjust["raster-opacity"] ?? 1) + 0.25) },
+    });
   }
   return { version: 8, sources, layers };
 }
@@ -535,7 +608,7 @@ export function MapView() {
   //: which is the one entry that follows the theme — so a dark app opens a dark
   //: map without the operator having to know that is a setting.
   const [basemap, setBasemap] = useState(
-    () => localStorage.getItem("misr.basemap") || DEFAULT_BASEMAP);
+    () => localStorage.getItem(BASEMAP_KEY) || DEFAULT_BASEMAP);
   //: Set when a tile request fails, so a dead provider says so once instead of
   //: leaving a blank sea that reads as "no data here".
   const [tileError, setTileError] = useState(false);
@@ -549,6 +622,11 @@ export function MapView() {
   const [viewTick, setViewTick] = useState(0);
   //: How many names the cap withheld at the current view, so it can say so.
   const [labelsHidden, setLabelsHidden] = useState(0);
+  //: Projections the clock has run past, which are therefore not drawn. Should
+  //: be zero in normal play; a standing non-zero value means the machine cannot
+  //: serve projections as fast as the operator is playing, and that is worth
+  //: saying rather than leaving as a layer that quietly went empty.
+  const [overtaken, setOvertaken] = useState(0);
   //: Is the disclosure chip expanded? Closed on arrival: the notes are a
   //: reference an operator opens when a layer looks wrong, not a preamble they
   //: have to read past to reach the map.
@@ -563,7 +641,7 @@ export function MapView() {
 
   // ---- init map once ----
   useEffect(() => {
-    const initialBasemap = localStorage.getItem("misr.basemap") || DEFAULT_BASEMAP;
+    const initialBasemap = localStorage.getItem(BASEMAP_KEY) || DEFAULT_BASEMAP;
     // The baseline the swap effect compares against. Recorded here, where the
     // style is actually built, so the two can never disagree about what is on
     // screen.
@@ -641,7 +719,7 @@ export function MapView() {
     // finish.
     if (appliedStyle.current === want) return;
     appliedStyle.current = want;
-    localStorage.setItem("misr.basemap", basemap);
+    localStorage.setItem(BASEMAP_KEY, basemap);
     setTileError(false);
     const m = map.current;
     // **`diff: false`, and it is load-bearing.** MapLibre's default is to DIFF
@@ -775,6 +853,20 @@ export function MapView() {
               + (predictions.note ? ` ${predictions.note}` : ""),
       });
     }
+    if (overtaken > 0) {
+      out.push({
+        // Not "predicted track" — that key is already taken by the note above
+        // it, and two rows reading the same word is how a reader stops
+        // believing the key means anything. This one is about the playback.
+        key: "playback speed",
+        text: `The clock is running through ${overtaken} projection`
+          + `${overtaken === 1 ? "" : "s"} faster than ${overtaken === 1
+            ? "it can" : "they can"} be refreshed, so ${overtaken === 1
+            ? "that one is" : "those are"} drawn short or not at all — only the `
+          + `part still ahead of the clock is ever drawn. Slow the playback to `
+          + `see the full ${PREDICTION_LEAD_HOURS} h.`,
+      });
+    }
     if (labelsHidden > 0) {
       out.push({
         key: "vessel names",
@@ -784,7 +876,7 @@ export function MapView() {
       });
     }
     return out;
-  }, [notes, predictions, labelsHidden]);
+  }, [notes, predictions, labelsHidden, overtaken]);
 
   // Reloaded on demand rather than only at mount, because drawing or deleting
   // an area has to change the map immediately — a geofence you cannot see is
@@ -815,13 +907,6 @@ export function MapView() {
   const trailClockSec = clockSec == null ? null
     : Math.floor(clockSec / 120) * 120;
 
-  //: Which projection request the clock is currently inside. Quantised so that
-  //: advancing the clock re-asks on a stated cadence instead of on every frame,
-  //: and so that a scrub across the window collapses to one request per
-  //: boundary rather than one per pixel dragged.
-  const predictionBucket = clockSec == null ? null
-    : Math.floor(clockSec / PREDICTION_REFRESH_S);
-
   // ---- forward projections, re-asked as the clock advances ---------------
   //
   // Asked of the API rather than computed here, and that is a deliberate
@@ -831,35 +916,69 @@ export function MapView() {
   // second copy of that rule on the other side of the wire, free to drift from
   // the first the day either is touched — which is the same "a collector that
   // started detecting" mistake the assistant is built to avoid.
+  //
+  // **The refresh is paced in WALL time, and that is the whole repair.** It
+  // used to key an effect off a bucket of *simulation* time (one request per
+  // 30 corpus-minutes) with a 180 ms debounce and an abort-on-change cleanup.
+  // Simulation time runs at the playback speed, so the bucket period shrinks as
+  // the operator speeds up: 20 s per corpus-hour at 1x makes a bucket 10 s
+  // wide, at 15x it is 0.67 s, and **at 60x it is 0.17 s — shorter than the
+  // debounce**. The timer was cleared by the next bucket before it could fire,
+  // so past a certain speed the map issued *no requests at all* and went on
+  // drawing whichever projection had last landed. Measured: 12 seconds at 60x,
+  // zero requests fired, and the drawn path finished 8.7 nm BEHIND the vessel
+  // with her past the end of it. The same starvation happens at much lower
+  // speeds on a slower machine, because the real bound is request latency
+  // against bucket period, and neither was in the comparison.
+  //
+  // So: one poll on a wall clock, at most one request in flight, and nothing is
+  // ever aborted. The cadence then degrades to whatever the machine can
+  // actually serve instead of collapsing to zero.
+  const clockRef = useRef(null);
+  clockRef.current = clockSec;
+  const predWant = (visible.predicted || !!selected) && clockSec != null;
+  const predState = useRef({ inFlight: false, firedAt: 0, servedAt: null });
   useEffect(() => {
-    // Asked whenever anything could draw a projection: the fleet-wide switch,
-    // or a selected vessel — who gets hers drawn regardless. Gating this on the
-    // switch alone is what would make clicking a hull on the default map show
-    // her trail and nothing ahead of her.
-    if (predictionBucket == null || !(visible.predicted || selected)) return;
-    const ctrl = new AbortController();
-    // A short delay so dragging the scrubber across a week fires one request at
-    // the end rather than forty on the way.
-    const h = setTimeout(() => {
-      api.predictions({ at: Math.round(clockSec),
-                        lead_hours: PREDICTION_LEAD_HOURS }, ctrl.signal)
-        .then((r) => setPredictions(r))
+    if (!predWant) return;
+    const st = predState.current;
+
+    const maybeFetch = () => {
+      const now = clockRef.current;
+      if (now == null || st.inFlight) return;
+      // Never faster than this in wall time, whatever the playback speed.
+      if (performance.now() - st.firedAt < PREDICTION_MIN_INTERVAL_MS) return;
+      // Re-ask once the standing projection is STALE_FRACTION of its own lead
+      // out of date. Expressed against the lead rather than as a fixed span so
+      // the guarantee holds at every speed: the drawn path is never more than
+      // that fraction of the way through being overtaken.
+      const maxAge = PREDICTION_LEAD_HOURS * 3600 * PREDICTION_STALE_FRACTION;
+      if (st.servedAt != null && Math.abs(now - st.servedAt) < maxAge) return;
+
+      st.inFlight = true;
+      st.firedAt = performance.now();
+      const at = Math.round(now);
+      api.predictions({ at, lead_hours: PREDICTION_LEAD_HOURS })
+        .then((r) => {
+          st.servedAt = at;
+          setPredictions(r);
+        })
         .catch((e) => {
-          if (e?.name === "AbortError") return;
           // Same rule as `/tracks`: a failed request is not an empty sea. An
           // empty projection layer with no explanation reads as "no vessel
           // here is going anywhere", which is a claim we did not make.
-          setPredictions({ items: [], failed: String(e?.message || e) });
-        });
-    }, 180);
-    return () => { clearTimeout(h); ctrl.abort(); };
-    // `clockSec` is deliberately not a dependency — the bucket is. Keying on
-    // the raw clock would re-fire this on every animation frame. `selected` is
-    // reduced to a boolean: the projections come back for the whole
-    // broadcasting fleet in one answer, so changing WHICH hull is selected
-    // needs no new request, only a redraw.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [predictionBucket, visible.predicted, !!selected]);
+          st.servedAt = at;
+          setPredictions({ items: [], at, failed: String(e?.message || e) });
+        })
+        .finally(() => { st.inFlight = false; });
+    };
+
+    maybeFetch();
+    const h = setInterval(maybeFetch, PREDICTION_POLL_MS);
+    return () => clearInterval(h);
+    // Deliberately NOT keyed on the clock: the poll reads it from a ref. An
+    // effect that re-ran on the clock would be re-created on every animation
+    // frame, which is how the old one came to depend on a debounce at all.
+  }, [predWant]);
 
   // ---- static layers: events, ports, scenes, alert markers, track lines ----
   useEffect(() => {
@@ -1007,9 +1126,11 @@ export function MapView() {
   // ---- the projection: where dead reckoning says she is going ------------
   useEffect(() => {
     if (!ready || !map.current) return;
-    renderPredictions(map.current, predictions, selected,
-                      visible.predicted, visible.cone);
-  }, [styleEpoch, predictions, selected, visible.predicted, visible.cone]);
+    const n = renderPredictions(map.current, predictions, selected,
+                                visible.predicted, visible.cone, trailClockSec);
+    setOvertaken((prev) => (prev === n ? prev : n));
+  }, [styleEpoch, predictions, selected, visible.predicted, visible.cone,
+      trailClockSec]);
 
   // ---- the selection ring, redrawn wherever the subject is --------------
   useEffect(() => {
@@ -1819,16 +1940,41 @@ function upsertTrailLayer(m, id, feats, on) {
 // **The selected vessel is drawn whatever the fleet-wide switch says**, for
 // the same reason her trail is: the map opens on positions alone, and clicking
 // a hull is the operator asking where she has been and where she is going.
-function renderPredictions(m, predictions, selected, on, coneOn) {
+//
+// **Only the part of the path still ahead of the clock is drawn.** A projection
+// is made at one instant and describes the hours after it; once the clock has
+// passed a point on that path, that point is no longer a prediction, it is a
+// place the vessel has already been or not been. Drawing it anyway is what
+// produced the picture that started this: a dashed line and a cone sitting
+// BEHIND the ship, along the track she had visibly already travelled, asserting
+// a future that was in the past.
+//
+// So the head is trimmed to the clock (interpolated, so the line still starts
+// under her rather than at the next 30-minute step), and a path the clock has
+// run off the end of is not drawn at all. With the refresh now paced in wall
+// time this should be a rare state — it is the safety net for the case where
+// the machine cannot serve projections as fast as the operator is playing, and
+// the honest behaviour there is to show nothing rather than something false.
+function renderPredictions(m, predictions, selected, on, coneOn, clockSec) {
   const items = (predictions && predictions.items) || [];
   const lines = [];
   const ends = [];
   const cones = [];
+  // How many projections the clock has eaten most of. Counted, not silently
+  // shortened: a dashed line that quietly shrinks to a stub as the operator
+  // speeds up looks like a prediction getting more confident, which is the
+  // opposite of what is happening.
+  let overtaken = 0;
   {
     for (const p of items) {
       const mine = p.vessel_id === selected;
       if (!on && !mine) continue;
-      const path = p.path || [];
+      const full = p.path || [];
+      const path = trimPathToClock(full, clockSec);
+      if (full.length >= 2 && clockSec != null) {
+        const ahead = full[full.length - 1][2] - clockSec;
+        if (ahead < PREDICTION_LEAD_HOURS * 3600 * 0.5) overtaken++;
+      }
       if (path.length < 2) continue;
       lines.push({
         type: "Feature",
@@ -1878,6 +2024,36 @@ function renderPredictions(m, predictions, selected, on, coneOn) {
                     themeColor("--mark-predicted", PREDICT_COLOR),
                     ends.length > 0, () => {}, MARK_STYLE.predicted);
   upsertConeLayer(m, "prediction-cone", cones, cones.length > 0);
+  return overtaken;
+}
+
+//: The part of a projected path that is still in the future at `clockSec`.
+//:
+//: `path` is [[lon, lat, valid_for, radius_m, confidence], ...] in ascending
+//: time. The head is interpolated exactly at the clock so the drawn line starts
+//: under the vessel rather than at the next step, which at a 30-minute step and
+//: merchant speeds would otherwise leave a visible gap between the ship and her
+//: own projection. Returns [] once the clock is past the whole path — that
+//: projection has been overtaken and is not a statement about the future any
+//: more.
+function trimPathToClock(path, clockSec) {
+  if (!path.length || clockSec == null) return path;
+  if (clockSec <= path[0][2]) return path;
+  const last = path[path.length - 1];
+  if (clockSec >= last[2]) return [];
+  let i = 0;
+  while (i < path.length - 1 && path[i + 1][2] <= clockSec) i++;
+  const a = path[i], b = path[i + 1];
+  const span = b[2] - a[2] || 1;
+  const f = Math.max(0, Math.min(1, (clockSec - a[2]) / span));
+  const head = [
+    a[0] + (b[0] - a[0]) * f,
+    a[1] + (b[1] - a[1]) * f,
+    clockSec,
+    a[3] + (b[3] - a[3]) * f,
+    a[4] + (b[4] - a[4]) * f,
+  ];
+  return [head, ...path.slice(i + 1)];
 }
 
 function upsertPredictionLayer(m, id, feats, on) {

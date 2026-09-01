@@ -8,9 +8,63 @@ session. `CLAUDE.md`, `ARCHITECTURE.md`, `DECISIONS.md` are stable contracts;
 > between status buckets, record what was verified vs assumed, log anything now
 > broken, and set "Next up." If you don't update it, the next session starts blind.
 
-**Last updated:** 2026-08-31 (ninth session) — **The map opens on the sea: a
-dark canvas, one layer, names beside the marks, and two style-swap defects that
-emptied it.**
+**Last updated:** 2026-09-01 (tenth session) — **The projection stops falling
+behind the ship, and dark actually goes dark.** Three reports against the
+shipped map (ADR-041), one of them a real defect with a mechanism worth
+remembering.
+
+**The projection went stale and the vessel outran it.** The refresh was keyed to
+a bucket of *simulation* time with a 180 ms debounce — and simulation time runs
+at the playback speed, so the bucket is 10 s wide at 1x, 0.67 s at 15x and
+**0.17 s at 60x**, shorter than the debounce. The timer was cleared before it
+could fire, so past a certain speed the map issued **no requests at all** and
+went on drawing whichever projection had last landed. Measured in a browser:
+twelve seconds at 60x, **zero requests fired**, drawn path finishing **8.7 nm
+behind the vessel** with her past the end of it — a dashed line and a cone
+asserting a future that was in the past.
+
+The general fault: the cadence was expressed in the one unit that does not bound
+the work. What decides whether a refresh lands is **request latency against
+refresh period**, and neither term was in the comparison. That is why the same
+starvation shows up at much lower speeds on a slower machine (his report was at
+15x) and why it was invisible here, on a sandbox answering in 70 ms.
+
+Now: one poll on a **wall** clock, at most one request in flight, nothing
+aborted, and the trigger is staleness as a fraction of the projection's own lead
+(0.15) rather than a span of corpus time. After: 60x fires 18 and lands 18, head
+**0.02 nm** from the vessel. **And only the part of the path still ahead of the
+clock is drawn**, trimmed and interpolated so the line starts under her.
+
+**A dark app was still drawing a bright sea, for two independent reasons.**
+The remembered basemap beat the new default: the preference lived under
+`misr.basemap` and anybody who had used the map before carried `"ocean"` in it,
+so ADR-040's theme-following default changed nothing for the only person running
+the app. A remembered choice *should* beat a default; the bug was treating a
+value he never consciously chose as a choice. Key is versioned now. Separately,
+**opacity does not make a light basemap dark, it makes it pale** — dark mode
+pulls brightness to 0.38, saturation to -0.45 and adds 0.15 contrast, as theme
+tokens, applied only to sources that need it.
+
+**"Map data not yet available" across the water at high zoom.** Past its
+published levels the Esri ocean service returns *a picture saying the data is
+missing* rather than a 404, so there is nothing to catch — the map has to stop
+asking. Ocean is capped at `maxzoom` 9 and upsamples. **That number is
+conservative and unmeasured** (no outbound network here); if bathymetry now
+blurs sooner than it needs to, raise it.
+
+**Full suite: 966 passed, 64 skipped, 1 failed** — `test_ports_non_empty_and_split`
+again, the empty port gazetteer in this sandbox, confirmed pre-existing. No
+Python changed this session; the 132 ruff findings across the package are
+likewise unchanged and pre-existing.
+
+**Still not verified, and it is the same gap as last session: no tile of any
+kind has been seen to render here.** Everything above was checked by reading the
+style the app builds and the requests it issues, never by looking at imagery.
+
+---
+
+**Ninth session** — **The map opens on the sea: a dark canvas, one layer, names
+beside the marks, and two style-swap defects that emptied it.**
 
 **The basemap follows the theme** (ADR-040). Dark app, dark map: `canvas`
 (Esri Light Gray / Dark Gray, the same cartography in two values) is the new
@@ -994,6 +1048,33 @@ steps personally.
 ---
 
 ## Next up
+
+> **2026-09-01, tenth session — check these three, they are the ones you
+> reported.**
+>
+> ```
+> cd maritime-isr-live
+> python -m maritime_isr.api          # then open the Map tab
+> ```
+>
+> 1. **Does the map open dark now?** The basemap button should read **Canvas**,
+>    not Ocean, even though you have used the app before — the old remembered
+>    setting was what kept overriding it. If it still says Ocean, the versioned
+>    key did not take.
+> 2. **Select a vessel, press ▶ at 1x, then at 15x.** The dashed yellow line
+>    must stay *ahead* of her the whole time. It fell behind before because past
+>    a certain speed the map stopped asking for projections entirely. At 60x it
+>    will legitimately shorten (the clock covers three hours per second there)
+>    and the note chip gains a "playback speed" row saying so.
+> 3. **Switch to Ocean and zoom in.** It should go blurry rather than showing
+>    "Map data not yet available". If the bathymetry now blurs sooner than you
+>    want, tell me — I capped it at zoom 9 without being able to check where
+>    Esri's coverage actually ends.
+>
+> Still open from before, and I still cannot check it: **no basemap tile has
+> ever rendered in my sandbox** (no outbound network). And your nav bar reads
+> **"API unreachable"** while the map is full of data — untouched, unexplained,
+> say if you want it looked at.
 
 > **2026-08-31, ninth session — two things I could not check from here.**
 >
