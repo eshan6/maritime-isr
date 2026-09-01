@@ -1591,3 +1591,57 @@ Streets / Satellite) — the vessels must still be there after every switch.
 gate has regressed to a boolean. Names overlapping means `LABEL_CHAR_PX` is
 under-estimating the box again. A basemap button that highlights without the
 map changing means the swap effect is swallowing the first click.
+
+---
+
+## The projection stops falling behind the ship, and dark actually goes dark (ADR-041)
+
+Three reports against the shipped map.
+
+**The projection went stale and the vessel outran it.** The refresh was keyed to
+a bucket of *simulation* time with a 180 ms debounce — and simulation time runs
+at the playback speed, so the bucket is 10 s wide at 1x, 0.67 s at 15x and
+**0.17 s at 60x**, shorter than the debounce. The timer was cleared before it
+could fire and past a certain speed the map issued **no requests at all**.
+Measured: twelve seconds at 60x, **zero requests fired**, drawn path 8.7 nm
+*behind* the vessel with her past the end of it. The same starvation appears at
+much lower speeds on a slower machine, which is what the report showed at 15x.
+
+Now: one poll on a wall clock, one request in flight at a time, nothing
+aborted, and the trigger is staleness as a fraction of the projection's own lead
+rather than a span of corpus time. After: 60x fires 18 and lands 18, head
+0.02 nm from the vessel. **And only the part of the path still ahead of the
+clock is drawn** — trimmed and interpolated so the line starts under her, and
+not drawn at all once the clock has run off the end of it.
+
+**A dark app was still drawing a bright sea, for two independent reasons.** The
+remembered basemap (`misr.basemap` = `"ocean"`, the old default) beat the new
+theme-following default, so changing the default changed nothing for anyone who
+had used the map before; the key is versioned now. And opacity does not make a
+light basemap dark — it makes it pale. Dark mode now pulls brightness down to
+0.38, drains saturation to -0.45 and puts 0.15 of contrast back, as theme
+tokens, applied only to sources that need it.
+
+**"Map data not yet available" across the water at high zoom.** Past its
+published levels the Esri ocean service returns *a picture saying the data is
+missing* rather than a 404, so there is no error to handle — the map has to stop
+asking. Ocean is capped at `maxzoom` 9 and upsamples instead. That number is
+conservative and unmeasured: no outbound network here to check where coverage
+actually stops.
+
+Verify:
+
+```
+python -m maritime_isr.api
+```
+
+*Success:* the Map opens dark on a dark system **even though you have used it
+before** — the basemap button reads Canvas, not Ocean. Select a vessel, press ▶
+at 1x and then 15x: the dashed yellow line stays ahead of her the whole time and
+never falls behind. At 60x it shortens and the note chip gains a "playback
+speed" row saying why. Switch to Ocean and zoom in: it goes blurry rather than
+showing "Map data not yet available".
+*Failure:* a yellow line sitting behind the ship along her pink trail means the
+refresh has gone back to simulation-time pacing. A bright sea under a dark UI
+means either the stored basemap key is being read unversioned again, or the
+raster brightness tokens are not reaching the paint.

@@ -86,7 +86,14 @@
   --mark-trail: #c2185b;
   --mark-predicted: #a86b00;
   --map-ground: #eef2f6;
+  /* Raster adjustments applied to a basemap that was drawn for a LIGHT page.
+     Neutral here; the dark block re-steps them. Opacity alone was never enough
+     — fading a bright plate toward the ground lowers its contrast without
+     lowering its lightness, so it goes pale rather than dark. */
   --map-tile-opacity: 1;
+  --map-tile-brightness-max: 1;
+  --map-tile-saturation: 0;
+  --map-tile-contrast: 0;
 
   --radius: 7px;
   --radius-sm: 5px;
@@ -172,10 +179,16 @@
   --mark-trail: #ff5fae;
   --mark-predicted: #ffd24a;
   --map-ground: #14171a;
-  /* Raster basemaps are drawn for a light page. Dimming and desaturating the
-     tiles is what stops the land plate glowing brighter than the vessels on
-     top of it, which is the whole point of the layer order. */
-  --map-tile-opacity: 0.62;
+  /* Turning a daylight cartography into a night one. The top of the brightness
+     range comes down hard (this is what actually makes it dark), most of the
+     colour is drained, and a little contrast goes back so the coastline
+     survives the other two. Opacity does the last of the work rather than all
+     of it. Applied only to sources that declare `dimInDark`; a basemap already
+     drawn dark is left alone. */
+  --map-tile-opacity: 0.75;
+  --map-tile-brightness-max: 0.38;
+  --map-tile-saturation: -0.45;
+  --map-tile-contrast: 0.15;
 
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(0, 0, 0, 0.3);
   --shadow-lg: 0 8px 30px rgba(0, 0, 0, 0.55);
@@ -917,7 +930,9 @@ p:last-child { margin-bottom: 0; }
     --fam-other: #7c8791;
     --mark-vessel: #4b95e8; --mark-alert: #e06c66; --mark-selected: #38c6f4;
     --mark-trail: #ff5fae; --mark-predicted: #ffd24a;
-    --map-ground: #14171a; --map-tile-opacity: 0.62;
+    --map-ground: #14171a; --map-tile-opacity: 0.75;
+    --map-tile-brightness-max: 0.38; --map-tile-saturation: -0.45;
+    --map-tile-contrast: 0.15;
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(0, 0, 0, 0.3);
     --shadow-lg: 0 8px 30px rgba(0, 0, 0, 0.55);
   }

@@ -3754,3 +3754,96 @@ decide they fit and put the overlap straight back.
   colour on a map already carrying eleven. It is wrong now: they appear for
   *one* vessel, together, on an otherwise empty map, and there they are the
   whole content.
+
+---
+
+## ADR-041 — Pace the projection refresh in wall time, and make dark actually dark *(Accepted)*
+
+**Context.** Three reports against the shipped map, and the middle one is a real
+defect with a mechanism worth recording.
+
+**(a) The projection went stale and the vessel outran it.** At playback speeds
+above 1x the drawn projection fell behind the vessel and eventually sat *behind*
+her, along the track she had visibly already travelled — a dashed line and a
+cone asserting a future that was in the past.
+
+The refresh was keyed to a bucket of **simulation** time: one request per 30
+corpus-minutes, with a 180 ms debounce and an abort-on-change cleanup. But
+simulation time runs at the playback speed. At 20 wall-seconds per corpus-hour
+the bucket is 10 s wide at 1x, **0.67 s at 15x and 0.17 s at 60x** — shorter
+than the debounce. The timer was cleared by the next bucket before it could
+fire, so past a certain speed the map issued **no requests at all**. Measured in
+a browser: twelve seconds at 60x, zero requests fired, the drawn path finishing
+8.7 nm behind the vessel with her past the end of it.
+
+The general fault is that the cadence was expressed in the one unit that does
+not bound the work. What actually decides whether a refresh lands is **request
+latency against refresh period**, and neither term was in the comparison — which
+is why the same starvation appears at much lower speeds on a slower machine, and
+why it was invisible on a sandbox answering in 70 ms.
+
+**Decision.** One poll on a **wall** clock (200 ms), at most one request in
+flight, and **nothing is ever aborted**. The trigger is staleness expressed as a
+fraction of the projection's own lead (0.15 of three hours) rather than a fixed
+span of corpus time: a fixed span is a promise about corpus time and says
+nothing about the picture; a fraction of the lead is a promise about the picture
+— the drawn path is never more than that fraction of the way through being
+overtaken, at 1x or at 60x. A wall-clock floor (350 ms) bounds the request rate
+at high speed. The cadence then degrades to whatever the machine can serve
+instead of collapsing to zero.
+
+**And only the part of the path still ahead of the clock is drawn.** A
+projection is made at one instant and describes the hours after it; once the
+clock passes a point on it, that point is not a prediction, it is a place she
+has already been or not been. The head is trimmed to the clock and
+interpolated, so the line still starts under the vessel rather than at the next
+step; a path the clock has run off the end of is not drawn at all. With the
+refresh fixed this is a safety net rather than a common state — and where it
+does bite (60x consumes three corpus-hours per wall-second, so no three-hour
+projection can stay ahead of it) the chip says so rather than letting the line
+quietly shrink to a stub, which would read as a prediction growing *more*
+confident.
+
+**(b) A dark app was still drawing a bright sea, for two independent reasons.**
+
+*The remembered basemap defeated the new default.* ADR-040 made `canvas` the
+theme-following default, but the preference was stored under `misr.basemap` and
+anybody who had used the map before carried `"ocean"` in it — the previous
+default. Changing the default in code therefore changed nothing for the only
+person running the app. A remembered choice **should** beat a default; the bug
+was treating a value the operator never consciously chose as a choice. The key
+is versioned (`misr.basemap.v2`), which retires those once and remembers real
+choices from here.
+
+*Opacity does not make a light basemap dark.* Fading a bright plate toward the
+ground colour lowers its contrast without lowering its lightness much, so the
+land stayed the brightest thing on screen and the marks on top looked washed
+out. A raster layer also supports brightness, saturation and contrast, and those
+are the controls that turn a daylight cartography into a night one: pull the top
+of the brightness range down hard (0.38), drain most of the colour (-0.45), put
+a little contrast back (0.15) so the coastline survives the other two. Carried
+as theme tokens, applied only to sources declaring `dimInDark` — a basemap
+already drawn dark is left alone.
+
+**(c) "Map data not yet available" stamped across the water at high zoom.** Past
+its published levels the Esri ocean service does not 404, it returns **a picture
+that says the data is missing**, and a raster layer draws that like any other
+tile. There is no error to handle; the map has to stop asking. `maxzoom` on a
+raster source means exactly that — do not request above this level, upsample
+from it instead — so Ocean is capped at 9 and goes soft rather than papered with
+a legend. The number is **conservative and not measured**: this sandbox has no
+outbound network, so the level at which coverage actually stops could not be
+checked. If the bathymetry now blurs sooner than it needs to, that constant is
+the thing to raise.
+
+**Consequences.**
+
+* The layer key's Ocean hint says it goes soft past mid zoom, because a basemap
+  that blurs for a reason the operator cannot see is one they will report as
+  broken.
+* A second note key was about to read "predicted track" twice in the same chip;
+  the playback one is keyed "playback speed". Two rows sharing a key is how a
+  reader stops believing the key means anything.
+* Still unverified, and it is the same gap ADR-040 recorded: **no tile of any
+  kind has been seen to render.** Everything here was checked by reading the
+  style the app builds and the requests it issues, not by looking at imagery.
