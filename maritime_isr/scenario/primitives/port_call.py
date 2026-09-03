@@ -226,6 +226,22 @@ def build_port_call(vessel, port: str, *, arrive_from: tuple[float, float],
                      clear_to=anchorage_of(port))
     anch = _scatter(anchorage_of(port), rng, _ANCH_SCATTER_M,
                     must_be_sea=True, clear_to=berth)
+    # ATOMIC: either the scattered pair is mutually reachable, or BOTH revert.
+    #
+    # Checking each point against a fixed reference was not enough, and five
+    # regenerations went into learning why. `_scatter` falls back to its centre
+    # independently, so berth and anchorage could each be individually
+    # defensible and still leave a leg between them that nobody had verified.
+    # At JNPT, where the port coordinate is at sea and a point 350 m away is
+    # not, that leg went ashore.
+    #
+    # The pair is what has to be valid, so the pair is what is checked. The
+    # original coordinates are the one configuration known to work — the corpus
+    # was built on them before any scatter existed — so reverting both together
+    # is always safe, at the cost of no separation at that one port.
+    from ..searoute import crosses_land as _crosses
+    if _crosses(anch, berth) or _crosses(anchorage_of(port), anch):
+        berth, anch = PORTS[port], anchorage_of(port)
 
     # Route the approach around the coast rather than straight at the anchorage.
     # A direct line from a previous call anywhere down the coast crosses the
