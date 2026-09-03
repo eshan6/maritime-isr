@@ -12,6 +12,8 @@ from typing import Iterable
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from .ingest.landing import read_parquet_rows, read_parquet_table
+
 from .store import local_partition_path
 
 
@@ -39,6 +41,6 @@ def write_detections(rows: Iterable[dict], store: str = "detections") -> dict[st
 
 
 def _merge_dedup(path: Path, new_rows: list[dict]) -> tuple[list[dict], int]:
-    existing = pq.read_table(path).to_pylist() if path.exists() else []
+    existing = read_parquet_rows(path) if path.exists() else []
     seen = {r["detection_id"]: r for r in existing + new_rows}
     return list(seen.values()), len({r["detection_id"] for r in new_rows})
