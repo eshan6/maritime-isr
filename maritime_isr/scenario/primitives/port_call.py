@@ -192,7 +192,12 @@ def build_port_call(vessel, port: str, *, arrive_from: tuple[float, float],
         raise ValueError(f"unknown port {port!r}")
     # Each call gets its own water. See `_ANCH_SCATTER_M` — sharing one
     # coordinate is what produced five-day encounters at zero metres.
-    berth = _scatter(PORTS[port], rng, _BERTH_SCATTER_M, must_be_sea=False)
+    # Sea-checked like the anchorage. Berth coordinates sit hard against the
+    # quay, so a few hundred metres in the wrong direction is inland: scattering
+    # without the check put 9 positions on dry ground and failed `afloat`. When
+    # no water is found in six draws `_scatter` returns the centre, which is the
+    # original behaviour and always valid.
+    berth = _scatter(PORTS[port], rng, _BERTH_SCATTER_M, must_be_sea=True)
     anch = _scatter(anchorage_of(port), rng, _ANCH_SCATTER_M,
                     must_be_sea=True)
 
