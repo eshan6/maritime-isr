@@ -53,7 +53,9 @@ def anchorage_of(port: str) -> tuple[float, float]:
 
 def _laned(waypoints: list[tuple[float, float]],
            origin: tuple[float, float],
-           offset_m: float) -> list[tuple[float, float]]:
+           offset_m: float,
+           destination_pt: tuple[float, float] | None = None,
+           ) -> list[tuple[float, float]]:
     """Shift corridor waypoints sideways onto this hull's lane.
 
     **The offset belongs to the ROUTE, not to the track.** Displacing already
@@ -73,10 +75,30 @@ def _laned(waypoints: list[tuple[float, float]],
     A waypoint whose lane position would sit on land keeps its original
     position: separation is worth having, never at the price of routing a ship
     through a headland.
+
+    **An empty route still needs a lane, and missing that is why the first
+    version of this changed nothing.** `sea_route` returns no waypoints at all
+    whenever the direct line is already clear of land, which is most fleet
+    voyages — so displacing "the waypoints" displaced only the minority that
+    route around the coast, and the measured closest approach stayed at 22 m.
+    With nothing to shift, one is synthesised: a single mid-leg point on the
+    lane, which the integrator turns into a shallow dogleg out and back. That
+    is what a ship keeping to one side of a strait actually does.
     """
-    if not waypoints or abs(offset_m) < 1.0:
+    if abs(offset_m) < 1.0:
         return waypoints
     from ..searoute import crosses_land
+
+    if not waypoints:
+        if destination_pt is None:
+            return waypoints
+        brg = initial_bearing_deg(*origin, *destination_pt)
+        mid = interpolate(*origin, *destination_pt, 0.5)
+        side = (brg + (90.0 if offset_m >= 0.0 else -90.0)) % 360.0
+        cand = destination(*mid, side, abs(offset_m))
+        if crosses_land(origin, cand) or crosses_land(cand, destination_pt):
+            return waypoints
+        return [cand]
 
     out: list[tuple[float, float]] = []
     prev = origin
@@ -124,7 +146,7 @@ def build_port_call(vessel, port: str, *, arrive_from: tuple[float, float],
     from ..searoute import sea_route
     legs = [Leg("transit", target=w, speed_kn=vessel.service_kn)
             for w in _laned(sea_route(arrive_from, anch), arrive_from,
-                            lane_offset_m)]
+                            lane_offset_m, destination_pt=anch)]
     legs += [
         Leg("transit", target=anch, speed_kn=vessel.service_kn),
         Leg("station", duration_h=max(anchorage_hours, 0.2), radius_m=700.0),

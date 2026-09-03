@@ -6,7 +6,7 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "https://REPLACE-ME.hf.space/api/:path*"
+      "destination": "https://REPLACE-ME.onrender.com/api/:path*"
     },
     {
       "source": "/(.*)",

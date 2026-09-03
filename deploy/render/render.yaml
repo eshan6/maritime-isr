@@ -1,0 +1,57 @@
+# Render blueprint for the Maritime ISR demo API.
+#
+# WHY RENDER AND NOT THE OBVIOUS PLACES
+# -------------------------------------
+# Hugging Face moved the Docker SDK behind a paid plan, so the Dockerfile in
+# deploy/huggingface has nowhere free to run. Vercel's Python functions cap the
+# bundle at 250 MB unzipped and this API pulls pyarrow (156 MB), pandas (76 MB)
+# and numpy (45 MB) at import — 294 MB of dependencies before a byte of corpus.
+# Render's free tier is 512 MB of RAM with no credit card, and the API's
+# measured peak is 228 MB after serving the heaviest endpoints, so it fits with
+# room to spare.
+#
+# THE ONE REAL WEAKNESS, AND THE FIX
+# ----------------------------------
+# A free service spins down after 15 minutes idle and takes about a minute to
+# come back. For a demo opened in front of people that is the whole ballgame,
+# so `deploy/README.md` sets up a free uptime pinger to keep it awake. The free
+# allowance is 750 instance-hours a month, which is more than a calendar month,
+# so keeping one service warm around the clock costs nothing.
+#
+# CPU is 0.1 of a core. Locally the heaviest endpoint answers in 0.17 s; expect
+# meaningfully slower here and measure it rather than quoting the local number.
+
+services:
+  - type: web
+    name: maritime-isr-api
+    runtime: python
+    plan: free
+    region: singapore          # nearest region to the Arabian Sea AOI and to India
+    branch: main
+
+    # `[api]` only. The pans extra pulls reportlab/pypdf/pillow, which the
+    # SERVING path never uses — documents are generated on the laptop and
+    # landed, and the API only reads the landed rows.
+    buildCommand: |
+      pip install --upgrade pip
+      pip install -e ".[api]"
+      python deploy/render/fetch_corpus.py
+
+    # 0.0.0.0 rather than the laptop default of 127.0.0.1, or Render's proxy
+    # cannot reach the process and every request 502s.
+    startCommand: uvicorn maritime_isr.api.app:app --host 0.0.0.0 --port $PORT
+
+    healthCheckPath: /api/health
+
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11"
+      - key: MISR_STORE_BACKEND
+        value: local
+      - key: MISR_DATA_ROOT
+        value: /opt/render/project/src/data
+      # Where fetch_corpus.py pulls the corpus from. Set this in the Render
+      # dashboard to the GitHub Release asset URL — see deploy/README.md. It is
+      # not a secret; it is public synthetic data.
+      - key: MISR_CORPUS_URL
+        sync: false
