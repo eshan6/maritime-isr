@@ -232,17 +232,10 @@ def _has_sea_room(p: tuple[float, float]) -> bool:
 _LANE_MIN_M = 300.0
 _LANE_MAX_M = 2400.0
 
-#: The offset tapers with speed, and the band is wide ON PURPOSE. The offset is
-#: a position shift, so ramping it in over a short interval shows up as lateral
-#: velocity the vessel never had — slide a hull 2.4 km sideways over ten minutes
-#: and you have added fourteen knots of drift to a track the type classifier is
-#: trained on. Spread across a 3-to-10 knot acceleration the same shift becomes
-#: a gentle set onto the lane, which is what a ship joining a traffic separation
-#: scheme actually does. Below `_LANE_ZERO_KN` there is no offset at all: at a
-#: berth or on an anchor she belongs where the port call put her, and vessels
-#: lying close together in an anchorage is real rather than a defect.
-_LANE_ZERO_KN = 3.0
-_LANE_FULL_KN = 10.0
+#: The lane is handed to `build_port_call`, which moves the ROUTE waypoints and
+#: lets the integrator produce the motion. Displacing the integrated track
+#: instead was tried first and is unfixable — see `port_call._laned` for the
+#: mechanism and the 75-knot container ships that ended it.
 
 
 def lane_offset_m(key: str) -> float:
@@ -261,47 +254,6 @@ def lane_offset_m(key: str) -> float:
     return side * (_LANE_MIN_M + frac * (_LANE_MAX_M - _LANE_MIN_M))
 
 
-def _apply_lane(points, offset_m: float):
-    """Shift each point onto the hull's lane, perpendicular to her course.
-
-    Vectorised over the whole track: the land check is one masked call rather
-    than 800,000 of them, and a flat-earth displacement is exact to well under a
-    metre at these distances. Any point whose lane position would land on ground
-    keeps its original position — the lane is a convenience for realism, never a
-    licence to beach a ship.
-    """
-    if not points:
-        return points
-    import numpy as np
-
-    sog = np.array([p.sog_kn for p in points], dtype=float)
-    scale = np.clip((sog - _LANE_ZERO_KN) / (_LANE_FULL_KN - _LANE_ZERO_KN),
-                    0.0, 1.0)
-    d = offset_m * scale
-    moving = np.abs(d) > 1.0
-    if not moving.any():
-        return points
-
-    lat = np.array([p.lat for p in points], dtype=float)
-    lon = np.array([p.lon for p in points], dtype=float)
-    cog = np.array([p.cog_deg for p in points], dtype=float)
-    brg = np.radians((cog + np.where(d >= 0.0, 90.0, -90.0)) % 360.0)
-    dist = np.abs(d)
-    nlat = lat + (dist * np.cos(brg)) / 111_320.0
-    nlon = lon + (dist * np.sin(brg)) / (111_320.0
-                                         * np.cos(np.radians(lat)))
-    ok = moving
-    try:
-        from global_land_mask import globe
-        ok = moving & ~globe.is_land(nlat, nlon)
-    except ImportError:                                          # pragma: no cover
-        pass
-    for i, p in enumerate(points):
-        if ok[i]:
-            p.lat, p.lon = float(nlat[i]), float(nlon[i])
-    return points
-
-
 def emit_fleet(world: ScenarioWorld, key: str, points, rng, *,
                suppressions=None) -> None:
     """`common.emit`, but on the fleet's own random stream.
@@ -314,7 +266,6 @@ def emit_fleet(world: ScenarioWorld, key: str, points, rng, *,
     The only thing that differs is which stream the draws come from.
     """
     v = V(world, key)
-    points = _apply_lane(points, lane_offset_m(key))
     world.add_track(v.entity_id, points)
     if not v.ais_expected:
         return
@@ -339,9 +290,10 @@ def _call(world: ScenarioWorld, key: str, port: str, *, pos, t, rng,
     """
     if _room(world, t) < MIN_REMAINING_H:
         return None
+    lane = lane_offset_m(key)
     pts, spec = build_port_call(V(world, key), port, arrive_from=pos,
                                t_start=t, rng=rng, anchorage_hours=wait_h,
-                               berth_hours=berth_h)
+                               berth_hours=berth_h, lane_offset_m=lane)
     overrun_h = (pts[-1].t - (world.t1 - hours(2))).total_seconds() / 3600.0
     if overrun_h > 0.0:
         berth_h -= overrun_h
@@ -351,7 +303,7 @@ def _call(world: ScenarioWorld, key: str, port: str, *, pos, t, rng,
             return None
         pts, spec = build_port_call(V(world, key), port, arrive_from=pos,
                                    t_start=t, rng=rng, anchorage_hours=wait_h,
-                                   berth_hours=berth_h)
+                                   berth_hours=berth_h, lane_offset_m=lane)
     emit_fleet(world, key, pts, rng)
     add_port_visit(world, scenario_id, key, spec, declare=declare)
     return (pts[-1].lat, pts[-1].lon), pts[-1].t

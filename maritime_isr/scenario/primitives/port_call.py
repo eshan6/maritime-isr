@@ -25,8 +25,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from ..geography import (ANCHORAGES, PORTS, haversine_m, initial_bearing_deg,
-                         interpolate)
+from ..geography import (ANCHORAGES, PORTS, destination, haversine_m,
+                         initial_bearing_deg, interpolate)
 from .track import Leg, TrackPoint, VoyagePlan, generate_track
 
 
@@ -51,6 +51,51 @@ def anchorage_of(port: str) -> tuple[float, float]:
     return ANCHORAGES.get(port, PORTS[port])
 
 
+def _laned(waypoints: list[tuple[float, float]],
+           origin: tuple[float, float],
+           offset_m: float) -> list[tuple[float, float]]:
+    """Shift corridor waypoints sideways onto this hull's lane.
+
+    **The offset belongs to the ROUTE, not to the track.** Displacing already
+    integrated positions was tried and is unfixable: the shift is perpendicular
+    to instantaneous course, so on a turn the offset direction sweeps an arc and
+    the displaced point travels kilometres while the ship travels a few hundred
+    metres. `implied_speed_envelope` caught it immediately — container hulls
+    reaching 75 knots against a 23.5 knot maximum. Moving the waypoint instead
+    hands the integrator a smooth displaced path and lets it produce the motion,
+    so the result is physically valid by construction rather than by patching.
+
+    Only the corridor waypoints move. The anchorage, the berth and the outbound
+    target stay exactly where they are, so hulls converge on the real approach
+    the way they do in life, and the lane closes over the last leg — tens of
+    kilometres — rather than in a jump.
+
+    A waypoint whose lane position would sit on land keeps its original
+    position: separation is worth having, never at the price of routing a ship
+    through a headland.
+    """
+    if not waypoints or abs(offset_m) < 1.0:
+        return waypoints
+    from ..searoute import crosses_land
+
+    out: list[tuple[float, float]] = []
+    prev = origin
+    for i, w in enumerate(waypoints):
+        brg = initial_bearing_deg(*prev, *w)
+        side = (brg + (90.0 if offset_m >= 0.0 else -90.0)) % 360.0
+        # Taper the last corridor waypoint back in, so the hull is already
+        # rejoining the centreline before the anchorage leg begins.
+        scale = 0.5 if i == len(waypoints) - 1 else 1.0
+        cand = destination(*w, side, abs(offset_m) * scale)
+        prior = out[-1] if out else origin
+        if crosses_land(prior, cand) or crosses_land(cand, w):
+            out.append(w)
+        else:
+            out.append(cand)
+        prev = w
+    return out
+
+
 def build_port_call(vessel, port: str, *, arrive_from: tuple[float, float],
                     t_start: datetime, rng, anchorage_hours: float,
                     berth_hours: float,
@@ -58,6 +103,7 @@ def build_port_call(vessel, port: str, *, arrive_from: tuple[float, float],
                     skip_berth: bool = False,
                     initial_course_deg: float | None = None,
                     initial_sog_kn: float = 0.0,
+                    lane_offset_m: float = 0.0,
                     ) -> tuple[list[TrackPoint], PortCallSpec]:
     """Build a complete call. `skip_berth` gives floating storage / congestion.
 
@@ -77,7 +123,8 @@ def build_port_call(vessel, port: str, *, arrive_from: tuple[float, float],
     # Saurashtra peninsula, which is how half the corpus ended up on land.
     from ..searoute import sea_route
     legs = [Leg("transit", target=w, speed_kn=vessel.service_kn)
-            for w in sea_route(arrive_from, anch)]
+            for w in _laned(sea_route(arrive_from, anch), arrive_from,
+                            lane_offset_m)]
     legs += [
         Leg("transit", target=anch, speed_kn=vessel.service_kn),
         Leg("station", duration_h=max(anchorage_hours, 0.2), radius_m=700.0),
