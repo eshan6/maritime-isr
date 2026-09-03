@@ -24,6 +24,12 @@ The checks, and why each one earns its place:
   * **Encounter geometry coherent** — hulls no closer than their beams allow,
     no "transfer" that is really a crossing.
   * **Temporal** — everything inside the real corpus window.
+  * **Archetype motion** — the one check about *meaning* rather than physics.
+    A wider-fleet hull labelled `fishing` that moves like a merchant is
+    physically impeccable and analytically poisonous: the vessel-type model is
+    measured on this corpus using the declared class as its label, so a
+    mislabelled hull moves a number the product quotes. The label and the
+    motion are checked against each other.
 
 **One exemption mechanism, deliberately narrow.** C3 has to violate the implied-
 speed envelope; that is the scenario. It declares `physics_exemption` in its
@@ -63,6 +69,7 @@ RULE_IDENTITY = "identity_intervals"
 RULE_OBSERVABLE = "observable"
 RULE_VISIT_STRUCTURE = "port_visit_structure"
 RULE_AFLOAT = "afloat"
+RULE_ARCHETYPE = "archetype_motion"
 
 #: Speed tolerance over the class maximum. Position noise on a short interval
 #: can inflate an implied speed slightly, and rejecting that would be rejecting
@@ -168,6 +175,7 @@ def validate_world(world) -> ValidationReport:
     _check_h3_and_envelope(world, rep)
     _check_observable(world, rep, ent_scen)
     _check_visit_structure(world, rep)
+    _check_archetypes(world, rep)
 
     if world.clipped:
         rep.warnings.append(
@@ -677,3 +685,56 @@ def _check_h3_and_envelope(world, rep) -> None:
                 break
     rep.count(RULE_H3, n)
     rep.count(RULE_ENVELOPE, n)
+
+
+def _check_archetypes(world, rep) -> None:
+    """The wider fleet's motion must match the label her hull was minted with.
+
+    **This is the only check here that is about meaning rather than physics.**
+    Everything above asks whether the corpus is possible; this asks whether it
+    is honest. `tracks/vessel_type.py` infers a contact's class from motion
+    alone and is measured against this corpus using the declared class as its
+    label, so a hull minted `fishing` that steams a straight line at thirteen
+    knots is not harmless filler — it is a mislabelled training example, and it
+    moves the confusion matrix the product quotes when it says what it can and
+    cannot tell apart. Every other validator in this file would pass her: she is
+    inside her speed envelope, inside her turn limit, afloat and in the AOI. The
+    corpus would simply be quietly wrong.
+
+    So `fleet.ARCHETYPES` states, beside each trade, the kinematic envelope that
+    label is still true inside, and this walks every bulk fleet hull and checks
+    it. The bands are wide on purpose. They are not a tuning surface: a trawler
+    having a brisk day must pass, and a trawler behaving like a merchant must
+    not.
+
+    **A hull with no track at all is a violation, not a skip.** She exists in
+    the registry, in the graph and in the vessel list, and she is nowhere on the
+    map — which is worse than a mislabelled hull, because nothing downstream can
+    even notice. The overrun guards in `fleet_traffic` drop a *call* that will
+    not fit the window and record it in `world.clipped`; dropping a whole hull
+    is a different event and gets said out loud.
+
+    Measured on the integrated truth, which carries no measurement noise, so a
+    violation is a statement about the generator and never about the emitter.
+    """
+    from .fleet import ARCHETYPES, measure_motion
+
+    n = 0
+    for a in ARCHETYPES:
+        for i in range(a.count):
+            eid_ = f"vessel:{a.hull_key(i)}"
+            pts = world.tracks.get(eid_)
+            if not pts:
+                rep.add(RULE_ARCHETYPE, eid_,
+                        f"{a.key} hull has no track at all — she is a name in "
+                        f"the registry and a hole in the picture")
+                continue
+            n += 1
+            m = measure_motion(world.track_of(eid_))
+            bad = a.violations(m)
+            if bad:
+                rep.add(RULE_ARCHETYPE, eid_,
+                        f"declared {a.vessel_class} ({a.key}) but "
+                        + "; ".join(bad)
+                        + f" — the archetype promises: {a.motion}")
+    rep.count(RULE_ARCHETYPE, n)

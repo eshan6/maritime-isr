@@ -34,6 +34,7 @@ this graph is worth looking at yet.
 from __future__ import annotations
 
 import time
+from collections import Counter
 from datetime import datetime, timezone
 
 from ..ingest.landing import read_table
@@ -775,15 +776,22 @@ def add_ownership(store) -> int:
     if not _table_present(OWNERSHIP_TABLE):
         return 0
     n = 0
+    skipped: Counter[str] = Counter()
     for r in read_table(OWNERSHIP_TABLE):
         syn = _syn(r)
         src = _ownership_endpoint(r.get("src"), store, is_syn=syn)
         dst = _ownership_endpoint(r.get("dst"), store, is_syn=syn)
         if not src or not dst:
             continue
-        kind = r.get("edge_kind") or "owned-by"
-        if kind not in ("owned-by", "operated-by"):
-            kind = "owned-by"
+        declared = r.get("edge_kind") or "owned-by"
+        # Never silently promote a weaker relationship to a stronger one.
+        # `managed-by` used to fall through to `owned-by` here, which restated
+        # "technical manager, inferred from a shared address, confidence 0.55"
+        # as ownership — and because props was built from the coerced kind,
+        # the original was unrecoverable. Anything still unknown falls back to
+        # owned-by to stay landable, but records what it was asked for.
+        kind = declared if declared in ("owned-by", "operated-by",
+                                        "managed-by") else "owned-by"
         t0 = (_epoch(r.get("valid_from")) or _epoch(r.get("acquired_at"))
               or time.time())
         try:
@@ -792,13 +800,23 @@ def add_ownership(store) -> int:
                 confidence=float(r.get("confidence") or 0.8), observed_at=t0,
                 source=_src(r, "scenario-ownership"),
                 source_ref=str(r.get("source_ref") or f"{src}->{dst}"),
-                props=dict(edge_kind=kind, share=r.get("share")),
+                props=dict(edge_kind=kind, declared_kind=declared,
+                           share=r.get("share")),
                 is_synthetic=syn)
             n += 1
-        except ValueError:
-            # an endpoint type the edge spec forbids (e.g. org operated-by):
-            # skip rather than crash the whole populate.
+        except ValueError as exc:
+            # An endpoint type the edge spec forbids (e.g. org operated-by):
+            # skip rather than crash the whole populate — but SAY SO. Silently
+            # continuing is how 74 `managed-by` edges vanished without a word
+            # in the run output, and a graph quietly missing a whole class of
+            # relationship is worse than one that failed loudly.
+            skipped[f"{declared}: {exc}"] += 1
             continue
+    if skipped:
+        print(f"  [{OWNERSHIP_TABLE}] {sum(skipped.values())} edge(s) rejected "
+              f"by the edge spec and NOT landed:")
+        for reason, count in sorted(skipped.items(), key=lambda kv: -kv[1]):
+            print(f"      {count:>5}  {reason}")
     return n
 
 

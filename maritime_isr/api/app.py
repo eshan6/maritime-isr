@@ -23,6 +23,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from .. import assistant
+from . import analysis
 from . import graph_service as gsvc
 from . import models, report, service
 from .settings import settings
@@ -258,6 +259,105 @@ def create_app() -> FastAPI:
         if a is None:
             raise HTTPException(404, f"no subject {subject_id!r} on the list")
         return a
+
+    # ---- the rule modules, three-valued (ADR-032, 035, 036, 037) ---------
+    #
+    # Plain dicts, like `/voi`: a finding's `detail` is open-shaped by design —
+    # an IMO checksum carries digits, a paperwork contradiction carries the
+    # passage it was read from and a draught in metres — so a pydantic model
+    # would either flatten every check to a lowest common denominator or
+    # declare `dict` and validate nothing.
+    @api.get("/vessels/{vessel_id:path}/checks", dependencies=guard)
+    def vessel_checks(vessel_id: str) -> dict:
+        """Every rule-module verdict held about one subject, all three outcomes.
+
+        `contradiction`, `ok` and `not_checkable` are returned together and are
+        counted separately. Only the first ever became an alert, so until now
+        the other two never left the process — and a surface showing
+        contradictions alone presents silence as a clean bill of health, which
+        is precisely what ADR-032 (b) exists to prevent.
+        """
+        return analysis.vessel_checks(vessel_id)
+
+    @api.get("/checks/coverage", dependencies=guard)
+    def checks_coverage() -> dict:
+        """The three-way split of the row-wise checks over the whole corpus.
+
+        The number that matters is the third one. A check that is not checkable
+        on most of a corpus has told you almost nothing, and this is the only
+        place that is visible at the scale it happens.
+        """
+        return analysis.checks_coverage()
+
+    @api.get("/vessels/{vessel_id:path}/motion", dependencies=guard)
+    def vessel_motion(vessel_id: str,
+                      window_hours: float = Query(default=6.0, ge=1.0, le=48.0)
+                      ) -> dict:
+        """What she is doing from motion alone, whether that is normal here,
+        and where dead reckoning puts her next.
+
+        `unclassified` is a first-class activity, the area baseline is
+        three-valued with `None` meaning "we have not watched here enough to
+        have an opinion", and the projection ships its own caveat: it is an
+        expectation and deliberately not a suspicion factor.
+        """
+        return analysis.vessel_motion(vessel_id, window_hours=window_hours)
+
+    # ---- the contact nobody can name (ADR-033) ---------------------------
+    @api.get("/radar/contacts/{candidate_id}/profile", dependencies=guard)
+    def contact_profile(candidate_id: str) -> dict:
+        """Inferred type, activity and zone for one radar dark contact.
+
+        It PROFILES, it never re-decides darkness: the cascade owns that
+        verdict and it is carried through untouched.
+        """
+        p = analysis.contact_profile(candidate_id)
+        if p is None:
+            raise HTTPException(404, f"no radar contact {candidate_id!r}")
+        return p
+
+    # ---- the electro-optical loop (ADR-037) ------------------------------
+    #
+    # **There is no camera.** Every response from these two routes carries
+    # `simulated: true` and the disclosure string, and the UI is required to
+    # print it on the capture itself rather than in a footnote.
+    @api.get("/eo/captures", dependencies=guard)
+    def eo_captures(subject: Optional[str] = None,
+                    limit: int = Query(default=100, ge=1, le=1000)) -> dict:
+        """Landed captures, each with the reason the camera was pointed there."""
+        return analysis.eo_captures(subject_id=subject, limit=limit)
+
+    @api.get("/eo/summary", dependencies=guard)
+    def eo_summary() -> dict:
+        """What the loop did, per station and per band, and what it cannot do."""
+        return analysis.eo_summary()
+
+    # ---- what motion can and cannot separate (ADR-033) -------------------
+    @api.get("/analysis/vessel-type", dependencies=guard)
+    def vessel_type_model(compute: bool = False,
+                          max_vessels: int = Query(
+                              default=analysis.TYPE_MAX_VESSELS,
+                              ge=20, le=600)) -> dict:
+        """The merged vocabulary and the confusion matrix it was read off.
+
+        `compute=false` (the default) returns the contract and says no
+        measurement has been made. **It is a default and not a cache miss**: no
+        pipeline stage trains or lands a type model, so a measurement means
+        fitting one here, over the landed fleet, which is a measurement run and
+        not a query. The client asks for it deliberately; the result is then
+        cached for the life of the process.
+        """
+        return analysis.vessel_type_model(compute=compute,
+                                          max_vessels=max_vessels)
+
+    @api.get("/analysis/interactions", dependencies=guard)
+    def interaction_capability() -> dict:
+        """The four relative-motion behaviours, their gates, and what fired.
+
+        Zero findings on this corpus is the measured result and is reported as
+        one. That is a fact about the corpus, not a capability claim.
+        """
+        return analysis.interaction_capability()
 
     # ---- per-area baselines (ADR-032) ------------------------------------
     @api.get("/baselines", dependencies=guard)

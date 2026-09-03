@@ -38,6 +38,12 @@ import { anomalyLabel, edgeTypeLabel, familyColor, familyLabel, fmtDate,
          fmtDateTime, num, ANOMALY_META } from "../lib/format.js";
 import { EvidenceList, ExportButton, FamilyLegend, FindOnMap,
          MakeupBar } from "../components/bits.jsx";
+// The Section-3 capabilities that were built and never reached the screen:
+// the four rule modules with all three of their outcomes, what she is doing
+// from motion alone, the local baseline (whose third state covers most of the
+// sea), and the camera looks with the reason each was taken.
+import { CapturesPanel, ChecksPanel,
+         MotionPanel } from "../components/checks.jsx";
 
 function pct(x) {
   return `${Math.round(100 * (x || 0))}%`;
@@ -167,6 +173,10 @@ function AlertCard({ a, onDone, showSubject = true }) {
                   <span className="muted"> · confidence {num(h.confidence, 2)}</span>
                 )}
               </div>
+              {/* And what this system then did to those facts. Naming only the
+                  source carries a derived claim under its name, which is the
+                  source asserting something it never said. */}
+              {h.derivation && <div className="evi-derived">{h.derivation}</div>}
             </li>
           ))}
         </ul>
@@ -418,26 +428,26 @@ function Subject({ id, alerts, onDisposed }) {
         </table>
       </div>
 
-      <div className="card card-pad" style={{ marginTop: 12 }}>
-        <div style={{ fontWeight: 600, marginBottom: 4 }}>
-          Recommended actions
-        </div>
-        <div className="muted t-meta" style={{ marginBottom: 4 }}>
-          Proposed by the system. The decision is the operator's.
-        </div>
-        {v.recommendations.map((r) => (
-          <div key={r.action} style={{ marginTop: 10, opacity: r.feasible ? 1 : 0.6 }}>
-            <div>
-              <strong>{r.headline}</strong>{" "}
-              <span className="badge badge-neutral">{r.performed_by}</span>{" "}
-              {!r.feasible && <span className="badge badge-finding">not available</span>}
-            </div>
-            <div className="muted-2 t-meta">{r.rationale}</div>
-            {r.feasibility && <div className="muted t-meta">{r.feasibility}</div>}
-            <div className="muted t-meta">system capability: {r.system_capability}</div>
-          </div>
-        ))}
-      </div>
+      {/* The "Recommended actions" block was removed from this screen by
+          operator instruction: it was read as noise on a surface whose job is
+          to say what is known. The backend still builds `v.recommendations`
+          (assistant/recommend.py) and the API still returns it — the factor
+          catalog is keyed on those actions and the incident report prints
+          them. This is a visibility decision, not a capability deletion. */}
+
+      {/* The four rule modules, all three outcomes each. This is the half of
+          the build that had no way to the screen: only a contradiction ever
+          became an alert, so "we checked and it was fine" and "we could not
+          check" both stopped at the process boundary. */}
+      <ChecksPanel subjectId={v.subject_id} />
+
+      {/* What she is doing, whether that is normal in this cell, and where
+          dead reckoning puts her — with the caveat that departure from it is
+          deliberately not a suspicion factor. */}
+      <MotionPanel subjectId={v.subject_id} />
+
+      {/* Every capture is simulated and the frame says so. */}
+      <CapturesPanel subjectId={v.subject_id} />
 
       <div className="card card-pad" style={{ marginTop: 12 }}>
         <div style={{ fontWeight: 600, marginBottom: 4 }}>What is not known</div>

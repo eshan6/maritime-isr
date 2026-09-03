@@ -211,17 +211,36 @@ class GraphStore:
 
     # ---------------- ontology ----------------
     def _seed_ontology(self) -> None:
-        cur = self._con.execute("SELECT COUNT(*) FROM ontology")
-        if cur.fetchone()[0] == 0:
-            now = time.time()
-            for n in NODE_TYPES_V1:
+        """Register every declared node and edge type, additively.
+
+        This used to seed only when the table was empty, which made adding an
+        edge type a silent no-op on any graph that already existed: the new
+        kind never reached the registry, `validate_edge` rejected it, and
+        `from_landed` caught the ValueError and moved on. `managed-by` was
+        added and 74 edges disappeared with nothing in the run saying so.
+
+        Missing types are inserted on open instead. Existing rows are left
+        alone — a spec change is a migration and needs its own decision, so
+        this closes the "new kind is dropped" hole without quietly rewriting
+        the meaning of a kind already in use.
+        """
+        now = time.time()
+        have_nodes = self.node_registry()
+        have_edges = set(self.edge_registry())
+        added = 0
+        for n in NODE_TYPES_V1:
+            if n not in have_nodes:
                 self._con.execute(
                     "INSERT INTO ontology VALUES (?,?,?,?,?)",
                     (ONTOLOGY_VERSION, "node", n, "{}", now))
-            for name, spec in EDGE_TYPES_V1.items():
+                added += 1
+        for name, spec in EDGE_TYPES_V1.items():
+            if name not in have_edges:
                 self._con.execute(
                     "INSERT INTO ontology VALUES (?,?,?,?,?)",
                     (ONTOLOGY_VERSION, "edge", name, json.dumps(spec), now))
+                added += 1
+        if added:
             self._con.commit()
 
     def edge_registry(self) -> dict[str, dict]:

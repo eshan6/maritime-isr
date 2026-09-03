@@ -109,6 +109,40 @@ CLASS_PRIORS: dict[str, dict] = {
         draught_m=(5.5, 7.4, 9.0), dwt=(5_000, 12_000, 20_000),
         service_kn=(10.5, 12.5, 14.0), max_kn=15.0,
         accel_kn_per_min=0.40, rot_deg_per_s=0.70),
+    # Container ships run to a schedule, and the schedule is the reason they
+    # are fast: a liner service is sold on the sailing date, so the class runs
+    # 17-21 kn where a bulker of the same length runs 13. The class already
+    # exists in `eo.classify.PROTOTYPE_HULLS` and `eo.appearance.HULL_FORMS`;
+    # it was simply never mintable here, so the corpus had none.
+    "container": dict(
+        length_m=(150.0, 230.0, 330.0), beam_m=(22.0, 32.2, 45.0),
+        draught_m=(8.5, 11.5, 14.5), dwt=(15_000, 45_000, 95_000),
+        service_kn=(16.5, 19.0, 21.5), max_kn=23.5,
+        accel_kn_per_min=0.30, rot_deg_per_s=0.50),
+    # A harbour tug is 30 m of engine. She is slow over the ground and
+    # extraordinarily agile, which is the whole of her motion signature: tiny
+    # spread, low straightness, a turn rate an order of magnitude above any
+    # merchant's.
+    "tug": dict(
+        length_m=(20.0, 30.0, 42.0), beam_m=(8.0, 10.5, 13.0),
+        draught_m=(3.2, 4.5, 6.0), dwt=(200, 600, 1_200),
+        service_kn=(8.0, 11.0, 13.0), max_kn=14.0,
+        accel_kn_per_min=1.40, rot_deg_per_s=2.80),
+    # Platform supply vessel: a flat working deck aft, moderate transit speed,
+    # and hours of dynamic positioning alongside an installation. The station-
+    # keeping is what separates her from a small cargo ship of the same length.
+    "osv": dict(
+        length_m=(50.0, 72.0, 95.0), beam_m=(12.0, 16.0, 20.0),
+        draught_m=(4.0, 5.5, 7.0), dwt=(1_500, 3_500, 6_000),
+        service_kn=(10.0, 12.0, 14.0), max_kn=15.5,
+        accel_kn_per_min=0.90, rot_deg_per_s=1.60),
+    # A passenger ferry on a fixed run. Fast for her size, and she does the
+    # same twenty-mile leg over and over with a turnaround at each end.
+    "ferry": dict(
+        length_m=(55.0, 90.0, 140.0), beam_m=(12.0, 17.0, 23.0),
+        draught_m=(3.0, 4.5, 6.0), dwt=(800, 2_500, 6_000),
+        service_kn=(13.0, 16.0, 19.0), max_kn=21.0,
+        accel_kn_per_min=0.90, rot_deg_per_s=1.40),
     "fishing": dict(
         length_m=(18.0, 27.0, 42.0), beam_m=(5.0, 7.0, 9.5),
         draught_m=(2.2, 3.4, 4.5), dwt=(80, 250, 600),

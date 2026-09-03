@@ -1645,3 +1645,68 @@ showing "Map data not yet available".
 refresh has gone back to simulation-time pacing. A bright sea under a dark UI
 means either the stored basemap key is being read unversioned again, or the
 raster brightness tokens are not reaching the paint.
+
+---
+
+## A denser sea, prediction that works and still is not an alarm, and the paperwork read back (ADR-042)
+
+Four workstreams in one session, plus two overclaims found and closed.
+
+**The corpus is 674 hulls, not 253**, across twelve archetypes — container and
+general cargo on liner routes, product tankers, Aframax, VLCC, bulkers waiting
+off Kandla and Mundra, reefers, loitering trawlers, tugs, offshore supply,
+ferries, coastal dhows. Their *motion* matches their labels, checked by a new
+`archetype_motion` validator over all 394 bulk hulls, because
+`tracks/vessel_type.py` infers type from motion alone and a trawler steaming a
+straight line at 13 knots would poison the classifier it trains.
+
+**The anomaly base rate went down, on purpose**: 8.9% of hulls, from 19.8%.
+Every new bulk hull is boring. Expect measured precision numbers to FALL — the
+old corpus, with one hull in five guilty, flattered everything measured on it.
+
+**Route-aware forward projection (ADR-042)** is a genuinely better predictor —
+three-hour median error 4.70 → 2.91 nm, six-hour 16.56 → 9.92 — and is still
+not a suspicion factor, because precision runs 0.09–0.33 against a base rate of
+0.15 where ADR-004 needs 0.7. The gain is at the median and the cone is sized
+at p90, so a better prediction cannot tighten the cone.
+
+**381 port documents** on six real Indian port letterheads, in five formats,
+read back through the existing connector. Nothing here parses a document.
+
+**The graph stopped calling technical management "ownership"**, and stopped
+losing edges in silence when it did.
+
+### Run it
+
+```
+cd maritime-isr-live
+git pull
+pip install -e ".[dev,pans]"
+maritime-isr scenario generate
+maritime-isr graph-populate
+python tools/make_port_documents.py
+```
+
+Then start the API and the UI as usual.
+
+*Success:* `scenario generate` finishes in about five minutes and prints
+`674 total` with **14 of 14 validators passing**, including a line reading
+`archetype_motion ok 394 checked, 0 violation(s)`. `graph-populate` prints no
+`rejected by the edge spec` block. `make_port_documents.py` writes 381
+documents and reports **0 unread**, overall recall near 86%, and a resolution
+line reading roughly `308 correct hull, 3 WRONG hull, 70 declined to resolve`.
+In the UI the map is visibly crowded, the Vessels tab shows a risk score for
+every hull rather than "—", Watch shows a "What was checked" panel with three
+distinct outcomes (a dashed rule and "?" means *we could not check*, which is
+not the same as fine), and the Method tab exists.
+
+*Failure:* `scenario generate` ending in `NameError` means the run-report
+import regressed — the corpus itself will have landed fine. A `rejected by the
+edge spec` block from `graph-populate` means an edge kind is missing from the
+ontology and edges are being dropped; the block names which. Vessels showing
+"—" for most hulls means the risk-scoring bound is below the corpus size again.
+A recall figure near 43% for a single house style is the known Cochin layout
+gap (OQ-pans-1), not a new break.
+
+**All figures above are on the synthetic suite. Nothing here has run on the
+Oracle VM or against a live feed.**

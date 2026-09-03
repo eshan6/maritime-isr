@@ -18,10 +18,12 @@ from pathlib import Path
 
 from ..landing import land_table, stamp_envelope
 from .extract import extract_notification
+from .kinds import classify_document
 from .readers import ReaderUnavailable, read_document
 from .resolve import resolve_notification
 
-__all__ = ["TABLE", "SOURCE_ID", "read_inbox", "land_inbox", "FIELD_NAMES"]
+__all__ = ["TABLE", "SOURCE_ID", "read_inbox", "land_inbox", "land_rows",
+           "FIELD_NAMES"]
 
 TABLE = "arrival_notification"
 SOURCE_ID = "pans-inbox"
@@ -91,8 +93,17 @@ def _row_for(path: Path, registry, *, is_synthetic: bool) -> dict:
     fmt = _EXT_FORMAT[path.suffix.lower()]
     unread = None
     fields: dict = {}
+    kind = None
     try:
         passages = read_document(path)
+        # **What kind of paper this is, read off the page.** One mailbox holds
+        # more than notifications, and a departure report has no ETA box at
+        # all — so "not checkable" on its arrival window is the form's answer
+        # rather than the reader's failure. Without the kind those two are one
+        # column of nulls. `None` is kept when nothing recognises the title:
+        # guessing "pans" would put a form with no ETA box in the same bucket
+        # as one that has an ETA box and left it empty.
+        kind = classify_document(passages)
         fields = extract_notification(passages)
         # A PDF whose passages came from OCR is a scan, whatever its extension
         # says. Recording that distinction is the point of the per-passage
@@ -118,6 +129,7 @@ def _row_for(path: Path, registry, *, is_synthetic: bool) -> dict:
         notification_id=_notification_id(path),
         document_name=path.name,
         document_format=fmt,
+        document_kind=kind,
         vessel_id=vessel_id,
         resolved_by=how,
         resolution_confidence=round(conf, 3),
@@ -167,13 +179,31 @@ def _row_for(path: Path, registry, *, is_synthetic: bool) -> dict:
     return row
 
 
-def land_inbox(inbox, registry, *, is_synthetic: bool = False) -> dict:
-    """Read and land. Returns the `land_table` written-counts."""
-    rows = read_inbox(inbox, registry, is_synthetic=is_synthetic)
+def land_rows(rows) -> dict:
+    """Land rows that `read_inbox` already produced. `land_table`'s counts.
+
+    Separated from :func:`land_inbox` because reading an inbox is **expensive
+    and not idempotent in cost**: a scanned fax costs an OCR pass, and a caller
+    that wanted both the rows and them landed used to pay for every page twice —
+    once to look at the result, once for `land_inbox` to read the same directory
+    again from scratch. Reading is the slow half of this connector, so the seam
+    that lets a caller read once and land what it read is worth naming.
+
+    It does not re-read, re-resolve or re-stamp anything: the envelope was
+    stamped at read time against the file that was actually opened, and
+    re-deriving it here from a row would be inventing provenance for a document
+    this call never saw.
+    """
+    rows = list(rows)
     if not rows:
         return {}
     return land_table(rows, table=TABLE, key_fields=("notification_id",),
                       day_field="received_at")
+
+
+def land_inbox(inbox, registry, *, is_synthetic: bool = False) -> dict:
+    """Read and land. Returns the `land_table` written-counts."""
+    return land_rows(read_inbox(inbox, registry, is_synthetic=is_synthetic))
 
 
 def declared_fields(row: dict) -> dict:

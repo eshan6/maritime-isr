@@ -3847,3 +3847,118 @@ the thing to raise.
 * Still unverified, and it is the same gap ADR-040 recorded: **no tile of any
   kind has been seen to render.** Everything here was checked by reading the
   style the app builds and the requests it issues, not by looking at imagery.
+
+---
+
+## ADR-042 — Route-aware forward projection: built, measured, and still not a suspicion factor *(Accepted)*
+
+**2026-09-02. Follows ADR-032 (e).**
+
+**Context.** ADR-032 refused to promote forward projection and, unusually, named
+the fix it was declining to build: *"prediction has to be route-aware, and the
+zone layer's customary lanes (ADR-030) are what a corridor model would be fitted
+to."* That work has now been done. This ADR records what was built, what it is
+worth, and why the refusal stands anyway — because a refusal that survives the
+fix it asked for is worth more than the original refusal, and because the next
+person to have this idea is entitled to the measurement rather than the
+argument.
+
+**Decision — five parts.**
+
+**(a) The flow field is a transition model keyed on heading, not a histogram of
+courses.** The obvious construction — store, per H3 cell, the courses traffic
+steers there — was built first and **measured worse than dead reckoning**
+(held-out hulls, median error 1.45 nm against 0.82 at one hour, 5.20 against
+4.70 at three). The cause is structural, not a tuning miss: a cell containing a
+waypoint holds both the inbound and the outbound course, and asked "which of
+these is hers" an unconditioned field returns the one nearest her present
+heading — the inbound one — and steers her straight through the corner. The one
+place a route model must earn its keep is the one place that construction
+cannot.
+
+So the key is **(cell, incoming course octant)** and the value is where traffic
+*went next*: the bearing made good over the following six minutes and the speed
+made good at it. Res 6 (~6 km), eight octants, and a key speaks only with ≥20
+observations from **≥3 distinct hulls** — the observation floor alone is
+clearable by one densely-reporting vessel turning her private routing into
+"what traffic does here", which is the chip-versus-scene hazard one domain
+along. On the corpus: **602 cells, 1,196 modes.** The conditioning and its
+counterfactual are both pinned in `tests/test_route_prior.py`, on a synthetic
+two-way corridor where the correct answers are opposite.
+
+**(b) Four conditioners, and their contributions are unequal and measured.**
+The flow field carries the result. The **speed profile** — her own speed scaled
+by how the lane's speed here compares with the lane's speed where she started —
+is second and real (3 h median 3.59 nm without it, 2.91 with). **Vessel type**
+from `tracks/vessel_type.py`, motion-only so a radar contact gets the same
+answer, matters most for vessels working a ground: the fitted advance factor is
+1.0 for a merchant at every lead and **0.1 at three hours for a fishing
+vessel**, and applying the merchant number to a trawler is not a cone error, it
+is a wrong prediction with a cone drawn round it. The hull's **own history** is
+the weakest: available for about one projection in sixteen and worth under
+0.15 nm at every lead. It is kept because eight weeks is the wrong corpus to
+judge it on and because its causality cut — only passages that *ended* before
+the prediction was made — is the kind of guard that is far easier to build now
+than to retrofit.
+
+**(c) `not_checkable` means dead reckoning all the way down.** A walk with
+under 50% prior coverage returns `not_checkable`, and the projection then uses
+the straight line — position, drawn path, and the lane-tightness term in the
+cone. This was a *bug* when found: the code returned the part-bent path while
+the basis string claimed dead reckoning, and a hull merely crossing a corridor
+was swung onto it by the two cells she clipped. Measured off-lane at three
+hours, that made the route arm **worse than the dead reckoning it replaced**
+(median 4.72 nm against 3.01). `route_support` is three-valued —
+`own_history` / `fleet_prior` / `not_checkable` — for the same reason every
+other check in this system is: a prediction that quietly fell back and
+presented itself as route-aware is the worst of the three, because a consumer
+would trust it more than it deserves.
+
+**(d) The measurement is a module, not a script.**
+`tracks/prediction_eval.py` fits the model on a **hull-grouped** split (142 fit
+hulls, 96 scored, zero overlap), runs the ADR-032 sweep against either arm
+through the identical code path, and produces the position-error and plateau
+tables. Both arms carry a cone fitted against the predictor that will actually
+run — the alternative is a tuned model beating an untuned one and calling the
+difference route-awareness. On-lane and off-lane are decided by whether the
+flow field had support **at the moment of prediction**, a fact the predictor
+holds before it predicts; nothing in the harness reads `scenario_truth` except
+the precision measurement, which is reported as such.
+
+**(e) Forward projection is still NOT a suspicion factor, for three new
+reasons.** ADR-032's reason was that a tight cone flags everybody. That reason
+is now *obsolete* and should not be quoted: it was measured against a cone
+growing at a stated-but-never-fitted 1 nm per hour, where the measured rate is
+six to seven. Calibrate the cone honestly and the severity axis grades smoothly
+instead of falling off a cliff — a genuine plateau, at short and medium leads,
+in **both** arms. The reasons it still fails are different and worse:
+
+1. **Precision against the scenario's own answer key is at chance.** On held-out
+   hulls, counting a flag as correct if the hull carries *any* injected anomaly:
+   **0.09 to 0.33 against a base rate of 0.15**, at every operating point that
+   flags enough hulls to measure. ADR-004 requires ≥0.7.
+2. **The improvement is in the median and not in the tail.** Three-hour median
+   error falls 26% and the ninetieth percentile falls 6%; at six hours, 43% and
+   1%. The cone is sized at the ninetieth percentile, so a model that improves
+   where the cone is not cannot tighten the cone and cannot discriminate better.
+   It is a better **assertion**, which is a smaller claim than a better
+   detector and is the claim this ADR makes.
+3. **The route arm flags *more* of the fleet than dead reckoning at every
+   operating point**, because a better-centred prediction in a tighter cone
+   leaves the same fraction outside. Alert fatigue is not improved by this work.
+
+So `assistant/catalog.py` still has no `departure` entry and
+`test_projection_is_not_a_registered_suspicion_factor` still stands. What the
+projection is for is unchanged and now better: an assertion an operator can see
+with the predicted **curve** attached, a gap bridged along the road rather than
+along a heading (the on-lane six-hour median halves, which is where this pays),
+and an expected-versus-actual comparison called up on a subject already
+suspicious for another reason.
+
+**Every figure here is on the synthetic corpus**, whose vessels are routed
+through one deterministic coastal corridor by `scenario/searoute.py`. A flow
+field fitted to that traffic recovers the generator's own waypoints, so the
+route-aware arm is flattered by construction and the gap between the arms is an
+upper bound on the real one. The honest expectation for live data is that the
+flow field is thinner, coverage lower, and the gap smaller. Re-measure on the
+deploy host before any of it is stated externally.

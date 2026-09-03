@@ -8,7 +8,151 @@ session. `CLAUDE.md`, `ARCHITECTURE.md`, `DECISIONS.md` are stable contracts;
 > between status buckets, record what was verified vs assumed, log anything now
 > broken, and set "Next up." If you don't update it, the next session starts blind.
 
-**Last updated:** 2026-09-01 (tenth session) — **The projection stops falling
+**Last updated:** 2026-09-03 (eleventh session) — **A corpus three times the
+size and deliberately more boring, route-aware prediction that works and still
+is not an alarm, 381 real port documents read back through the connector, and
+the Section 3 capability finally on the screen.** Four workstreams. Two
+overclaims found and closed, one of them the system overclaiming about itself.
+
+**The corpus is 674 hulls, and the anomaly base rate went DOWN.** 253 → 674
+across twelve archetypes (container and general cargo on liner routes, product
+tankers, Aframax, VLCC, bulkers waiting off Kandla and Mundra, reefers,
+loitering trawlers, tugs, offshore supply, ferries, coastal dhows). Archetype
+motion is the load-bearing constraint, not decoration: `tracks/vessel_type.py`
+infers type from motion alone, so a hull labelled trawler that steams a
+straight line at 13 knots is a corrupt training example. A new
+`archetype_motion` validator checks all 394 bulk hulls and reports 0
+violations.
+
+**60 of 674 hulls (8.9%) carry an anomaly, down from 50 of 253 (19.8%).** All
+394 new bulk hulls are boring; every new anomaly sits in group W's 27
+hand-placed hulls, where 7 true anomalies are outnumbered by 9 purpose-built
+decoys. **The expected and correct consequence is that measured precision
+falls** — the old corpus, with one hull in five guilty, flattered every number
+measured against it.
+
+`scenario generate` exits 0 in 5m10s, 14/14 validators pass. `ais_position`
+232,581 → 816,356; `scenario_ownership` 133 → 628; `radar_dark_truth` 16 → 87.
+Graph: 674 vessel nodes, 421 `operated-by` edges, all 421 carrying confidence,
+`t_start`, source, source_ref and pipeline_version.
+
+**The graph was restating technical management as ownership, and hid it
+twice.** The corpus asserts `managed-by` at confidence 0.55 with the note
+*"inferred from a shared correspondence address — a candidate, never a
+finding"*. `from_landed` coerced all 74 to `owned-by`, the strongest claim the
+ontology can make about a hull, and because `props` was built from the coerced
+kind the original was unrecoverable. That is the overclaim CLAUDE.md §1 exists
+to prevent, committed by the system about its own data.
+
+Fixing the ontology changed nothing — the edges simply **disappeared** instead.
+`store._seed_ontology` only seeded when the ontology table was empty, so a
+graph that already existed never learned a new edge kind; `validate_edge` then
+rejected them and `from_landed` caught the ValueError and continued. **An
+entire class of relationship vanished and the run said nothing.** Seeding is
+additive now, and rejected edges are reported rather than swallowed. Verified:
+74 `managed-by` edges land, `owned-by` is 89 rather than 163.
+
+**Route-aware forward projection: built, measured, still not a suspicion
+factor (ADR-042).** ADR-032(e) named the fix it declined to build; it is now
+built. Held-out hulls, median position error: 3h **4.70 → 2.91 nm**, 6h
+**16.56 → 9.92 nm**, and −47% on lane at six hours.
+
+The decisive conditioner was **heading**, not vessel type or history. An
+unconditioned flow field measured *worse than dead reckoning* (3h 5.20 vs
+4.70), because a cell holding a waypoint holds both the inbound and the
+outbound course, and asked which is hers it returns the one nearest her present
+heading — the inbound one — and steers her straight through the corner. The
+hull's own history turned out to be the **weakest** of the four conditioners,
+available for about one projection in sixteen; it is kept because eight weeks
+is the wrong corpus to judge it on, and the module no longer implies it carries
+the result.
+
+**Not promoted, and the mechanism is why.** Precision 0.09–0.33 against a base
+rate of 0.15 — at or below chance — where ADR-004 requires 0.7. The gain is at
+the median (−26% to −43% at p50) and almost absent at the tail (−1% to −6% at
+p90), and **the cone is sized at p90**. A predictor that improves where the
+cone is not cannot tighten the cone and therefore cannot discriminate better.
+The route arm also flags *more* of the fleet than dead reckoning at every
+operating point. `test_projection_is_not_a_registered_suspicion_factor` stands
+unchanged.
+
+Two bugs found while measuring: `not_checkable` was not actually falling back
+to dead reckoning (off-lane harm at 3h was +57%, now +11%), and
+`fit_own_history` merged re-entries then emitted them twice, disarming the
+causality cut.
+
+**381 port documents, written and read back through the real connector.**
+Five formats (PDF, scanned PDF with no text layer, DOCX, XLSX, electronic), six
+kinds (PANS, arrival and departure reports, crew lists, cargo manifests, port
+clearances), six house styles on real letterheads — Deendayal Kandla, JNPA
+Nhava Sheva, Mundra, NMPA Mangalore, Cochin, agent. 224 honest against 157
+authored to lie in eight specific ways. The answer key is written **outside the
+inbox**, deliberately.
+
+**0 of 381 documents went unread. Overall field recall 85.7%** (2,872 of
+3,351). Per format: electronic 99.4%, docx 88.2%, xlsx 84.5%, pdf 79.6%,
+pdf_scan 76.7%.
+
+**The finding worth acting on: recall is not evenly distributed by house.**
+Four agencies read at 99%+; **Cochin reads at 43.1%** and Mangalore at 72.4%.
+The extractor is called format-blind and is, across formats — the spread there
+is 77% to 99%. It is *not* house-blind, and one agency's layout defeats it. The
+claim "a new source drops in without rework" is true for four houses out of
+six on this corpus. See OQ-pans-1.
+
+Resolution: **308 correct hull, 3 WRONG hull, 70 declined to resolve.** The
+refuse-rather-than-guess design holds at 70 declines, but three wrong
+resolutions is not zero and each one is a document attached to the wrong ship.
+Paperwork rules: 50 contradiction / 172 ok / 711 not_checkable. Against the
+answer key, `false_last_port` fired on only **15 of 27** authored lies and
+`missed_arrival_window` on 24 of 29 — a recall gap in the checks themselves,
+distinct from the extraction gap above.
+
+**Section 3 capability reaches the screen.** Every `anomaly/` rule returns
+three outcomes and only `contradiction` ever became an alert, so an officer
+could not tell "we checked her and she is fine" from "we could not check her
+at all". Eight read-only endpoints added, a Method view, per-subject panels in
+Watch, a profile panel on Radar. The three outcomes differ by **shape as well
+as hue** — dashed rule and "?" for `not_checkable` — because colour alone
+cannot carry a three-way distinction for a colour-blind reader. `npm run build`
+succeeds; `test_api_analysis.py` 14 passed, 2 skipped.
+
+**"Recommended actions" removed from Watch** by operator instruction. UI only:
+`assistant/recommend.py` still builds it, the API still returns it, the factor
+catalog is still keyed on those actions, the incident report still prints it.
+
+**Also fixed:** the Vessels risk-scoring bound was 500, chosen when the corpus
+held 253 hulls. At 674 it silently crossed over and ~600 hulls would have
+rendered "—" where they scored fine the week before, with nothing saying
+whether that was a regression or the deliberate large-corpus path. Now 2,000.
+
+**OPEN QUESTIONS added this session**
+
+* **OQ-pans-1. The extractor is format-blind but not house-blind.** Cochin
+  43.1%, Mangalore 72.4%, everyone else 99%+. Is this one layout quirk, or does
+  the passage model assume a label/value adjacency that some real forms will
+  not have? This decides whether "drops in without rework" survives contact
+  with a real agency.
+* **OQ-pans-2. Three documents resolved to the WRONG hull.** 70 declines is the
+  design working; 3 wrong is the design failing quietly. What did those three
+  share?
+* **OQ-pans-3. `false_last_port` caught 15 of 27 authored lies.** The check's
+  own recall, separate from extraction. Is the gap in the rule or in the track
+  it compares against?
+* **OQ-pred-1. Off-lane prediction is still ~11% worse than dead reckoning.**
+  Down from +57%, not to zero.
+* **OQ-pred-2. The corpus flatters the route arm by construction** — traffic is
+  generated through one deterministic coastal corridor, so a flow field fitted
+  to it recovers the generator's own waypoints. The measured gap is an upper
+  bound. Re-measure on real AIS before stating any of it externally.
+
+**Status, per CLAUDE.md §5: built and verified in sandbox; UNVERIFIED ON HOST.**
+The Oracle VM still does not exist. Every figure above is on the synthetic
+suite. No dark vessel has been detected on real data.
+
+---
+
+**Tenth session** — **The projection stops falling
 behind the ship, and dark actually goes dark.** Three reports against the
 shipped map (ADR-041), one of them a real defect with a mechanism worth
 remembering.

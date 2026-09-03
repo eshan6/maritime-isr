@@ -163,6 +163,34 @@ export const api = {
   voiCatalog: () => memo("voi-catalog", () => get("/voi/catalog")),
   voiAsk: (id, question) =>
     post(`/voi/${encodeURIComponent(id)}/ask`, { question }),
+  // ---- the rule modules, three-valued (ADR-032/035/036/037) ------------
+  // NOT memoised: an operator opens a subject, reads the checks, and may come
+  // back to her after a re-run. A cached "not checkable" would outlive the
+  // corpus that made it true.
+  vesselChecks: (id) => get(`/vessels/${encodeURIComponent(id)}/checks`),
+  // Activity, the local baseline, and the projection — three capabilities that
+  // all read motion and nothing else.
+  vesselMotion: (id, params) =>
+    get(`/vessels/${encodeURIComponent(id)}/motion`, params),
+  // The three-way split over the whole corpus. Memoised: it is a sweep over
+  // landed rows and cannot change while the server is up.
+  checksCoverage: () => memo("checks-coverage", () => get("/checks/coverage")),
+  // ---- the contact nobody can name (ADR-033) ---------------------------
+  contactProfile: (id) =>
+    get(`/radar/contacts/${encodeURIComponent(id)}/profile`),
+  // ---- the electro-optical loop (ADR-037) ------------------------------
+  // There is no camera. Every response carries `simulated: true` and the
+  // disclosure string, and the UI prints it on the capture itself.
+  eoCaptures: (params) => get("/eo/captures", params),
+  eoSummary: () => memo("eo-summary", () => get("/eo/summary")),
+  // ---- what motion can and cannot separate -----------------------------
+  // `compute` is deliberately opt-in and NOT memoised on this side: the server
+  // caches the measurement for the life of its process, and memoising the
+  // un-computed answer here would make the button do nothing on a second press.
+  vesselTypeModel: (params) => get("/analysis/vessel-type", params),
+  interactionCapability: () =>
+    memo("interactions", () => get("/analysis/interactions")),
+  baselines: (params) => get("/baselines", params),
   events: (params) => get("/events", params),
   // Per-H3-cell counts over the WHOLE corpus, not a page. The map uses this
   // instead of plotting every event, which on the real corpus both truncated

@@ -55,6 +55,7 @@ from maritime_isr.scenario.truth import (DECOY, DELIBERATE_MISS, TRUE_ANOMALY,
                                          ScenarioTruth)
 from maritime_isr.scenario.validate import validate_world
 
+
 REPO = Path(__file__).resolve().parent.parent
 
 
@@ -63,12 +64,8 @@ REPO = Path(__file__).resolve().parent.parent
 # --------------------------------------------------------------------------
 
 @pytest.fixture(scope="module")
-def world():
-    w = ScenarioWorld.new(7, CorpusProfile.load())
-    build_cast(w)
-    run_all(w)
-    w.identity.close_window(w.t1)
-    return w
+def world(build_world):
+    return build_world(7)
 
 
 # --------------------------------------------------------------------------
@@ -723,7 +720,7 @@ def test_mmsi_is_never_masked():
 
 
 @pytest.mark.slow
-def test_generation_is_robust_across_seeds():
+def test_generation_is_robust_across_seeds(build_world):
     """A corpus that only validates at one seed is not reproducible.
 
     Seed 8 overran the corpus window through background port calls, because the
@@ -737,10 +734,7 @@ def test_generation_is_robust_across_seeds():
     # care about, so the invariant is stated as agreement across seeds instead.
     ids: set[str] | None = None
     for seed in (7, 8, 11, 42):
-        w = ScenarioWorld.new(seed, CorpusProfile.load())
-        build_cast(w)
-        run_all(w)
-        w.identity.close_window(w.t1)
+        w = build_world(seed)
         rep = validate_world(w)
         assert rep.ok, f"seed {seed} failed validation:\n{rep.format()}"
         seen = {t.scenario_id for t in w.truth}

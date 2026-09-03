@@ -8,6 +8,7 @@ import { VesselPage } from "./views/VesselPage.jsx";
 import { GraphView } from "./views/GraphView.jsx";
 import { RadarView } from "./views/RadarView.jsx";
 import { WatchView } from "./views/WatchView.jsx";
+import { MethodView } from "./views/MethodView.jsx";
 
 //: Cycles system, light, dark. The label names what is on screen now, and the
 //: title says what the next press does, so the control is legible without
@@ -52,6 +53,13 @@ export function App() {
         <NavLink to="/radar" className={({ isActive }) => `navlink ${isActive ? "active" : ""}`}>Radar</NavLink>
         <NavLink to="/vessels" className={({ isActive }) => `navlink ${isActive ? "active" : ""}`}>Vessels</NavLink>
         <NavLink to="/graph" className={({ isActive }) => `navlink ${isActive ? "active" : ""}`}>Graph</NavLink>
+        {/* Not a sixth queue, and not a re-fragmentation of Watch. It carries
+            no ranked list, no alert and no disposition control. It answers the
+            question an operator asks once rather than every shift — what is
+            this able to tell me, and where does it stop — which is where the
+            model's own limits belong: the vocabulary it will not guess past,
+            the cells it has no opinion about, the checks it could not run. */}
+        <NavLink to="/method" className={({ isActive }) => `navlink ${isActive ? "active" : ""}`}>Method</NavLink>
         <div className="nav-spacer" />
         {health === "down" && (
           <span className="badge badge-finding" style={{ marginLeft: 10 }}>
@@ -74,6 +82,7 @@ export function App() {
           <Route path="/vessels" element={<VesselsView />} />
           <Route path="/vessels/:id" element={<VesselPage />} />
           <Route path="/graph" element={<GraphView />} />
+          <Route path="/method" element={<MethodView />} />
         </Routes>
       </div>
     </div>

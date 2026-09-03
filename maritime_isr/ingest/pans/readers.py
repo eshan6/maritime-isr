@@ -255,6 +255,20 @@ _ELECTRONIC_MAP = {
     "parties.crew": "crew_count",
 }
 
+#: Envelope keys that describe the *document* rather than the vessel. They are
+#: emitted as passages under labels no field answers to, so the kind classifier
+#: can read the portal's declared document type exactly as it reads a title
+#: block off a fax — and no field is invented from them.
+#:
+#: Without this the electronic path would be the one path where the kind had to
+#: come from a filename, which is the inference `_received_at` already had to
+#: unlearn: a value taken off the filesystem and a value read out of the payload
+#: are not the same evidence.
+_ELECTRONIC_ENVELOPE = {
+    "documentType": "Document Type",
+    "formReference": "Form Reference",
+}
+
 
 def read_electronic(path: Path) -> list[Passage]:
     """The portal feed, flattened to the same `Label: value` grammar.
@@ -268,6 +282,14 @@ def read_electronic(path: Path) -> list[Passage]:
     """
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     out: list[Passage] = []
+    # The envelope first, because a title block comes first on paper and the
+    # kind classifier only reads the head of a document.
+    for key, label in _ELECTRONIC_ENVELOPE.items():
+        value = payload.get(key)
+        if value in (None, ""):
+            continue
+        out.append(Passage(f"{label}: {value}", f"${key}", 1.0,
+                           "electronic_field"))
     for dotted, field_name in _ELECTRONIC_MAP.items():
         if "." in dotted:
             group, key = dotted.split(".")
