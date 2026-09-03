@@ -79,28 +79,45 @@ _STATION_RADIUS_M = 350.0
 
 
 def _scatter(centre: tuple[float, float], rng, span: tuple[float, float],
-             *, must_be_sea: bool) -> tuple[float, float]:
+             *, must_be_sea: bool,
+             clear_to: tuple[float, float] | None = None) -> tuple[float, float]:
     """A distinct spot near `centre`, drawn on the caller's seeded stream.
 
     Per *call* rather than per vessel, because a ship does not get the same
     square of water every time she visits — and two hulls that always anchored
     on the same pair of spots would trade one artefact for another.
+
+    **`clear_to` is not optional in practice, and leaving it out cost a
+    regeneration.** Checking only that the scattered POINT is at sea is not
+    enough: around JNPT and Nhava Sheva the coastline is a maze of creeks and
+    spits, so a spot 3 km from the anchorage centre can be perfectly wet and
+    still sit on the far side of a headland from the berth. The straight run-in
+    then ploughs across the land between them, and `afloat` reports a quarter of
+    the track ashore. Requiring the leg itself to be clear is what makes the
+    scatter safe — the point being wet only says the ship could float there, not
+    that she could get there.
     """
     lo, hi = span
-    for _ in range(6):
+    try:
+        from global_land_mask import globe
+    except ImportError:                                          # pragma: no cover
+        globe = None
+    from ..searoute import crosses_land
+
+    for _ in range(8):
         brg = rng.uniform(0.0, 360.0)
         # sqrt keeps the draw uniform over the annulus rather than crowding
         # the inner edge, which is where the collisions would come back.
         frac = math.sqrt(rng.uniform(0.0, 1.0))
         cand = destination(*centre, brg, lo + frac * (hi - lo))
-        if not must_be_sea:
-            return cand
-        try:
-            from global_land_mask import globe
-            if not bool(globe.is_land(cand[0], cand[1])):
-                return cand
-        except ImportError:                                      # pragma: no cover
-            return cand
+        if must_be_sea and globe is not None \
+                and bool(globe.is_land(cand[0], cand[1])):
+            continue
+        if clear_to is not None and crosses_land(cand, clear_to):
+            continue
+        return cand
+    # Nothing usable found: the original coordinate is always valid, because it
+    # is the one the corpus was built on before any of this existed.
     return centre
 
 
@@ -197,9 +214,10 @@ def build_port_call(vessel, port: str, *, arrive_from: tuple[float, float],
     # without the check put 9 positions on dry ground and failed `afloat`. When
     # no water is found in six draws `_scatter` returns the centre, which is the
     # original behaviour and always valid.
-    berth = _scatter(PORTS[port], rng, _BERTH_SCATTER_M, must_be_sea=True)
+    berth = _scatter(PORTS[port], rng, _BERTH_SCATTER_M, must_be_sea=True,
+                     clear_to=PORTS[port])
     anch = _scatter(anchorage_of(port), rng, _ANCH_SCATTER_M,
-                    must_be_sea=True)
+                    must_be_sea=True, clear_to=berth)
 
     # Route the approach around the coast rather than straight at the anchorage.
     # A direct line from a previous call anywhere down the coast crosses the
