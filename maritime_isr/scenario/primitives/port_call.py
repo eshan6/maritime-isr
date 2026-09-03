@@ -78,6 +78,37 @@ _BERTH_SCATTER_M = (90.0, 520.0)
 _STATION_RADIUS_M = 350.0
 
 
+#: Sample spacing for the leg checks below, metres. `searoute.crosses_land`
+#: scales its sampling to leg length with a floor of 64 samples, which on a
+#: 27 km anchorage-to-berth run works out at 246 m between points. The land
+#: spit beside the JNPT berth is about that wide, so consecutive samples
+#: straddled it and the check reported the leg clear while the integrator
+#: walked a fifth of a container ship's track up a quay.
+#:
+#: The scatter validates short legs in the tightest water in the AOI, so it
+#: needs a finer instrument than the ocean-crossing router does. 40 m is well
+#: under the land mask's own resolution, and these legs are short enough that
+#: a few hundred extra samples cost nothing. `crosses_land` is deliberately
+#: left alone: raising its density globally would change which ocean passages
+#: get detoured, and re-routing the whole corpus is not a thing to do as a
+#: side effect of fixing a berth.
+_LEG_SAMPLE_M = 40.0
+
+
+def _leg_clear(a: tuple[float, float], b: tuple[float, float]) -> bool:
+    """True when the straight line a->b is water at 40 m resolution."""
+    try:
+        import numpy as np
+        from global_land_mask import globe
+    except ImportError:                                          # pragma: no cover
+        return True
+    metres = haversine_m(*a, *b)
+    n = max(16, min(20000, int(metres / _LEG_SAMPLE_M) + 2))
+    lat = np.linspace(a[0], b[0], n)
+    lon = np.linspace(a[1], b[1], n)
+    return not bool(globe.is_land(lat, lon).any())
+
+
 def _scatter(centre: tuple[float, float], rng, span: tuple[float, float],
              *, must_be_sea: bool,
              clear_to: tuple[float, float] | None = None) -> tuple[float, float]:
@@ -113,7 +144,7 @@ def _scatter(centre: tuple[float, float], rng, span: tuple[float, float],
         if must_be_sea and globe is not None \
                 and bool(globe.is_land(cand[0], cand[1])):
             continue
-        if clear_to is not None and crosses_land(cand, clear_to):
+        if clear_to is not None and not _leg_clear(cand, clear_to):
             continue
         return cand
     # Nothing usable found: the original coordinate is always valid, because it
@@ -196,6 +227,7 @@ def build_port_call(vessel, port: str, *, arrive_from: tuple[float, float],
                     initial_course_deg: float | None = None,
                     initial_sog_kn: float = 0.0,
                     lane_offset_m: float = 0.0,
+                    _no_scatter: bool = False,
                     ) -> tuple[list[TrackPoint], PortCallSpec]:
     """Build a complete call. `skip_berth` gives floating storage / congestion.
 
@@ -222,10 +254,13 @@ def build_port_call(vessel, port: str, *, arrive_from: tuple[float, float],
     # at sea but a point 350 m away is not, so that line went ashore and
     # `afloat` reported a fifth of the track on land. Anchoring the berth to
     # the original waiting area makes the fallback safe by construction.
-    berth = _scatter(PORTS[port], rng, _BERTH_SCATTER_M, must_be_sea=True,
-                     clear_to=anchorage_of(port))
-    anch = _scatter(anchorage_of(port), rng, _ANCH_SCATTER_M,
-                    must_be_sea=True, clear_to=berth)
+    if _no_scatter:
+        berth, anch = PORTS[port], anchorage_of(port)
+    else:
+        berth = _scatter(PORTS[port], rng, _BERTH_SCATTER_M, must_be_sea=True,
+                         clear_to=anchorage_of(port))
+        anch = _scatter(anchorage_of(port), rng, _ANCH_SCATTER_M,
+                        must_be_sea=True, clear_to=berth)
     # ATOMIC: either the scattered pair is mutually reachable, or BOTH revert.
     #
     # Checking each point against a fixed reference was not enough, and five
@@ -240,7 +275,7 @@ def build_port_call(vessel, port: str, *, arrive_from: tuple[float, float],
     # was built on them before any scatter existed — so reverting both together
     # is always safe, at the cost of no separation at that one port.
     from ..searoute import crosses_land as _crosses
-    if _crosses(anch, berth) or _crosses(anchorage_of(port), anch):
+    if not _leg_clear(anch, berth) or not _leg_clear(anchorage_of(port), anch):
         berth, anch = PORTS[port], anchorage_of(port)
 
     # Route the approach around the coast rather than straight at the anchorage.
@@ -287,6 +322,40 @@ def build_port_call(vessel, port: str, *, arrive_from: tuple[float, float],
                 *anch, *arrive_from,
                 min(1.0, 80.0 * 1852.0 / max(d, 1.0)))
     legs.append(Leg("transit", target=out_target, speed_kn=vessel.service_kn))
+
+    # LAST GUARD: walk the assembled legs and check every transit for land.
+    #
+    # Checking the pair (anchorage, berth) was still not enough, and this is the
+    # third correction to the same mistake — each time I validated the legs I had
+    # thought of rather than the legs the plan actually contains. What was going
+    # ashore at JNPT is the DEPARTURE: the berth sits on a coastline with land
+    # from 090 through 180, and moving it a few hundred metres swings the outbound
+    # line across the headland. Nothing validated that leg, in this change or
+    # before it.
+    #
+    # So the check is now over the built plan rather than over the inputs I
+    # happened to consider, and when it fails BOTH scattered points revert to the
+    # originals and the plan is rebuilt from them. The originals are the one
+    # configuration the corpus was generated on for its whole life, so the
+    # fallback needs no separate proof.
+    #
+    # The lesson, recorded because it cost five regenerations: validate the
+    # artifact, not the ingredients.
+    if (berth, anch) != (PORTS[port], anchorage_of(port)):
+        here = arrive_from
+        for leg in legs:
+            target = getattr(leg, "target", None)
+            if target is not None:
+                if not _leg_clear(here, target):
+                    return build_port_call(
+                        vessel, port, arrive_from=arrive_from, t_start=t_start,
+                        rng=rng, anchorage_hours=anchorage_hours,
+                        berth_hours=berth_hours, depart_to=depart_to,
+                        skip_berth=skip_berth,
+                        initial_course_deg=initial_course_deg,
+                        initial_sog_kn=initial_sog_kn,
+                        lane_offset_m=lane_offset_m, _no_scatter=True)
+                here = target
 
     plan = VoyagePlan(
         start=arrive_from, start_time=t_start,
