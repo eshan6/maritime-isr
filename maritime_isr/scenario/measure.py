@@ -189,6 +189,69 @@ def hull_anomaly_families() -> "object":
                        n_truth_rows=rows, n_unmapped_entities=unmapped)
 
 
+def hull_anomaly_intervals() -> "object":
+    """The same answer key, but keeping **when** each scenario ran.
+
+    :func:`hull_anomaly_families` answers "is this hull in a scenario", which is
+    the only question a whole-track measurement can ask. A measurement whose
+    unit is a fixed window has to ask a sharper one — "was this hull in a
+    scenario *during these twelve hours*" — because a hull carrying a three-hour
+    rendezvous inside a three-hundred-hour track is ordinary for almost all of
+    it, and scoring those ordinary windows as positives would credit a detector
+    for silence and punish it for correctness in the same breath.
+
+    ``t_start``/``t_end`` are the scenario's own bounds, so the interval is as
+    tight as the generator made it and no tighter — several families (``Z1``,
+    ``D2``) legitimately run the whole corpus window. That looseness costs
+    recall, never precision: a window inside the interval where the scripted
+    behaviour had not yet begun counts as a positive the detector may miss, and
+    never as a false alarm it is blamed for.
+
+    Same boundary as :func:`hull_anomaly_families`: the reader is here because
+    this is the only module allowed to touch ``scenario_truth``, and the
+    arithmetic is in :mod:`tracks.prediction_eval`, which the isolation check
+    treats as detection code.
+    """
+    from ..tracks.prediction_eval import TruthIntervals
+
+    spans: dict[str, list] = {}
+    fams: dict[str, set] = {}
+    unmapped = 0
+    rows = 0
+    by_vid: dict[str, list[str]] = {}
+    for r in read_table("gfw_vessel_identity"):
+        vid, mmsi = r.get("vessel_id"), r.get("mmsi")
+        if vid and mmsi not in (None, ""):
+            by_vid.setdefault(str(vid), []).append(str(int(mmsi)))
+
+    for r in load_truth():
+        if r.get("truth_class") != TRUE_ANOMALY:
+            continue
+        rows += 1
+        family = str(r.get("scenario_family") or "")
+        a, b = _ts(r.get("t_start")), _ts(r.get("t_end"))
+        for entity in str(r.get("entity_ids") or "").split(","):
+            entity = entity.strip()
+            if not entity.startswith("vessel:"):
+                continue
+            hulls = by_vid.get(entity)
+            if not hulls:
+                unmapped += 1
+                continue
+            for h in hulls:
+                fams.setdefault(h, set()).add(family)
+                # An unbounded row is taken as covering all time: refusing to
+                # place it would silently drop the scenario from the answer key.
+                spans.setdefault(h, []).append(
+                    (family,
+                     float("-inf") if a is None else a,
+                     float("inf") if b is None else b))
+    return TruthIntervals(
+        families={k: frozenset(v) for k, v in fams.items()},
+        intervals={k: tuple(v) for k, v in spans.items()},
+        n_truth_rows=rows, n_unmapped_entities=unmapped)
+
+
 def measure(store, *, slack_hours: float = 36.0) -> list[ScenarioOutcome]:
     """Score every scenario against the alerts the pipeline actually raised.
 

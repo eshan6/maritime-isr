@@ -350,3 +350,171 @@ def test_wilson_is_not_the_normal_interval_at_the_edges():
     assert lo < 0.75, "ten of ten is not proof of a precision above 0.75"
     lo2, hi2 = pe.wilson(100, 100)
     assert lo2 > lo, "a hundred of a hundred should say more than ten of ten"
+
+
+# ---------------------------------------------------------------------------
+# 6. the fixed-length window — the unit that removes the length confound
+# ---------------------------------------------------------------------------
+#
+# Scored per hull over a whole track, the scenario corpus separates anomalous
+# hulls from ordinary ones with an AUC of ~0.88 on *observation length alone*:
+# its scripted cast is generated for the duration of its scenario and its
+# background fleet runs the whole corpus window. Every feature inherits that
+# separation, and none of it survives contact with real AIS, where every hull
+# broadcasts continuously. These tests hold the fix in place.
+
+
+def _long_track(hours=48.0, **kw):
+    """One hull running the corridor for `hours`, so she yields many windows."""
+    nm = 12.0 * hours
+    return _Track(_walk_legs(CORNER_LAT, CORNER_LON, [(90.0, nm)], **kw),
+                  track_id="long", mmsi=9001)
+
+
+def test_every_scored_window_is_the_same_length(corner_field):
+    """The property the whole restructure rests on.
+
+    If windows vary in length, length is back in the measurement and any
+    feature correlated with it is separating on the generator's casting
+    decisions rather than on behaviour.
+    """
+    ws = nv.windows_of(_long_track(hours=48.0), corner_field,
+                       window_hours=12.0)
+    assert len(ws) >= 3
+    for w in ws:
+        assert (nv.MIN_WINDOW_SPAN_FRACTION * 12.0
+                <= w.observed_span_hours <= 12.0 + 1e-6)
+
+
+def test_a_ragged_tail_is_dropped_rather_than_scored_short(corner_field):
+    """A 20-hour track gives one 12-hour window, not one window and a stub.
+
+    Keeping the stub is how "fixed length" quietly becomes "nominal length":
+    the stubs are systematically shorter for hulls that broadcast briefly,
+    which is exactly the population the confound lives in.
+    """
+    ws = nv.windows_of(_long_track(hours=20.0), corner_field,
+                       window_hours=12.0)
+    assert len(ws) == 1
+    assert ws[0].observed_span_hours >= nv.MIN_WINDOW_SPAN_FRACTION * 12.0
+
+
+def test_a_hull_watched_longer_gets_more_windows_not_a_longer_one(corner_field):
+    """The bias is reversed into the safe direction.
+
+    A hull watched for four days contributes eight chances to look odd and one
+    watched for twelve hours contributes one, so a signal that still separates
+    is not separating on how long she was observed.
+    """
+    short = nv.windows_of(_long_track(hours=12.0), corner_field,
+                          window_hours=12.0)
+    long_ = nv.windows_of(_long_track(hours=96.0), corner_field,
+                          window_hours=12.0)
+    assert len(long_) > len(short)
+    spans = [w.observed_span_hours for w in short + long_]
+    assert max(spans) - min(spans) < 12.0 * (1 - nv.MIN_WINDOW_SPAN_FRACTION)
+
+
+def test_off_road_support_does_not_require_the_field_to_have_a_lane(corner_field):
+    """The gate defect this measurement was nearly reported through.
+
+    A vessel out where the fleet does not go produces almost no *checkable*
+    fixes precisely because she is out there. Gating her whole window on
+    twenty checkable fixes deletes her, and the surviving windows are then
+    reported as the population — the off-road signal measured on the hulls it
+    was never meant to judge. Support for `off_road_fraction` must therefore
+    count the off-road fixes too.
+    """
+    off = nv.Window(hull="h", track_id="t", t0=0.0, t1=1.0, n_fixes=200,
+                    n_scored=120, n_checkable=1, n_off_road=119)
+    assert off.checkable                      # she moved plenty
+    assert off.support("off_road_fraction") == 120
+    assert off.support("course_sigma_p90") == 1
+    rule = nv.Rule(name="off road", conditions=(("off_road_fraction", ">", 0.5),))
+    assert nv.flag(off, rule).status == nv.FLAGGED
+
+
+def test_a_feature_without_support_is_not_checkable_never_quiet(corner_field):
+    """Three-valued to the end: a question we could not ask is not a pass."""
+    thin = nv.Window(hull="h", track_id="t", t0=0.0, t1=1.0, n_fixes=200,
+                     n_scored=120, n_checkable=3, n_off_road=0,
+                     course_sigma_p90=0.1)
+    rule = nv.Rule(name="surprise",
+                   conditions=(("course_sigma_p90", ">", 5.0),))
+    assert nv.flag(thin, rule).status == nv.NOT_CHECKABLE
+
+    idle = nv.Window(hull="h", track_id="t", t0=0.0, t1=1.0, n_fixes=200,
+                     n_scored=2, n_checkable=0)
+    assert not idle.checkable
+    assert nv.flag(idle, rule).status == nv.NOT_CHECKABLE
+
+
+def test_a_hull_is_positive_only_while_her_scenario_is_running():
+    """Window labels are time-aware, and that is not a refinement.
+
+    A three-hour rendezvous inside a three-hundred-hour track leaves her
+    ordinary for the rest of it. Labelling every one of her windows positive
+    would score a correct silence as a miss and reward a detector that fired on
+    her constantly.
+    """
+    ti = pe.TruthIntervals(families={"7": frozenset({"dark_transfer"})},
+                           intervals={"7": (("dark_transfer", 100.0, 200.0),)})
+    assert ti.covers("7", 150.0, 160.0)
+    assert ti.covers("7", 190.0, 260.0)        # overlap, not containment
+    assert not ti.covers("7", 300.0, 400.0)
+    assert not ti.covers("8", 150.0, 160.0)
+    assert not ti.covers("7", 150.0, 160.0,
+                         families=frozenset({"paperwork"}))
+
+
+def test_the_confound_check_sees_a_planted_length_confound():
+    """`span_flatness` is only worth running if it can fail.
+
+    Planted: every short window anomalous, every long one not — the shape the
+    per-hull measurement actually had. A flat report on this input would mean
+    the check could never have caught the thing it was written for.
+    """
+    class W:
+        def __init__(self, hull, t0, span):
+            self.hull, self.t0, self.t1 = hull, t0, t0 + span
+            self.track_id = "t"
+            self._span = span
+
+        def value(self, k):
+            return self._span
+
+    short = [W(f"a{i}", i * 1000.0, 5.0) for i in range(20)]
+    long_ = [W(f"b{i}", i * 1000.0, 50.0) for i in range(20)]
+    truth = pe.TruthIntervals(
+        families={w.hull: frozenset({"dark_transfer"}) for w in short},
+        intervals={w.hull: (("dark_transfer", -1e18, 1e18),) for w in short})
+    rows = pe.span_flatness(short + long_, truth, n_strata=2)
+    assert rows[0]["positive_rate"] == 1.0
+    assert rows[1]["positive_rate"] == 0.0
+
+    # …and reports flat when the confound is genuinely absent.
+    mixed = pe.TruthIntervals(
+        families={w.hull: frozenset({"dark_transfer"})
+                  for w in short[:10] + long_[:10]},
+        intervals={w.hull: (("dark_transfer", -1e18, 1e18),)
+                   for w in short[:10] + long_[:10]})
+    flat = pe.span_flatness(short + long_, mixed, n_strata=2)
+    assert flat[0]["positive_rate"] == flat[1]["positive_rate"] == 0.5
+
+
+def test_window_scoring_keeps_declined_windows_in_the_denominator():
+    """A rule that answers for a fifth of the windows has a fifth of the
+    recall, and the denominator must show it rather than shrinking to the
+    windows the rule happened to like."""
+    ws = [nv.Window(hull=str(i), track_id="t", t0=0.0, t1=1.0, n_fixes=50,
+                    n_scored=50, n_checkable=50) for i in range(10)]
+    truth = pe.TruthIntervals(
+        families={"0": frozenset({"dark_transfer"}),
+                  "1": frozenset({"dark_transfer"})},
+        intervals={"0": (("dark_transfer", -1e18, 1e18),),
+                   "1": (("dark_transfer", -1e18, 1e18),)})
+    s = pe.score_windows([ws[0]], windows=ws, truth=truth, label="one")
+    assert s.unit == "window"
+    assert s.n_hulls == 10 and s.n_positive == 2
+    assert s.n_flagged == 1 and s.n_true_positive == 1
+    assert s.recall == 0.5

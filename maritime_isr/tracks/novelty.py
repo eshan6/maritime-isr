@@ -93,7 +93,8 @@ __all__ = [
     "profile_tracks", "windows_of", "hull_windows", "flag",
     "MIN_SPREAD_DEG", "MIN_LANE_KN", "UNDERWAY_KN", "OFFSHORE_KM",
     "NEIGHBOURHOOD_RING", "MIN_NEIGHBOURHOOD_OBS", "ON_ROAD", "OFF_ROAD",
-    "UNWATCHED", "WINDOW_HOURS", "MIN_WINDOW_CHECKABLE", "FLAGGED", "QUIET",
+    "UNWATCHED", "WINDOW_HOURS", "MIN_WINDOW_CHECKABLE", "MIN_WINDOW_SCORED",
+    "MIN_WINDOW_SPAN_FRACTION", "FLAGGED", "QUIET",
     "NOT_CHECKABLE", "caveat",
 ]
 
@@ -166,11 +167,17 @@ UNWATCHED = "unwatched"
 #: finding that arrives after she has sailed.
 WINDOW_HOURS = 12.0
 
-#: Fewest checkable fixes a window needs before the flow field may be said to
-#: have an opinion about it. Below this the window is ``not_checkable`` — never
-#: "quiet". A fraction computed over three fixes is 0, 1/3, 2/3 or 1, and a
-#: threshold on that is a threshold on nothing.
+#: Fewest fixes standing behind a *feature* before a threshold on it means
+#: anything. A fraction computed over three fixes is 0, 1/3, 2/3 or 1, and a
+#: threshold on that is a threshold on nothing. Applied per feature through
+#: :meth:`Window.support`, never to the window as a whole.
 MIN_WINDOW_CHECKABLE = 20
+
+#: Fewest underway fixes a window needs before any question may be asked of it.
+#: This is the window-level floor, and it counts fixes where she was *making
+#: way* rather than fixes the flow field had a lane for — see
+#: :meth:`Window.checkable` for why that distinction was a defect worth fixing.
+MIN_WINDOW_SCORED = 20
 
 FLAGGED = "flagged"
 QUIET = "quiet"
@@ -589,3 +596,353 @@ def profile_tracks(tracks: Sequence, field: TrafficField, *, hull_of=None
     for tr in tracks:
         by_hull[str(hull_of(tr))].append(tr)
     return {h: profile_hull(v, field, hull=h) for h, v in by_hull.items()}
+
+
+# --------------------------------------------------------------------------
+# the window — the unit that removes the observation-length confound
+# --------------------------------------------------------------------------
+
+#: How much of a window's nominal length must actually carry fixes before the
+#: window may be scored.
+#:
+#: This is what makes "fixed length" true rather than nominal. Without it the
+#: last window of every track is a stub of arbitrary length, the stubs are
+#: shorter for hulls that broadcast briefly, and the very confound the window
+#: exists to remove walks back in through the ragged edge. At 0.8 every scored
+#: window spans between 9.6 and 12 hours, and :func:`span_flatness` is what
+#: checks that the residual 20% carries no signal.
+MIN_WINDOW_SPAN_FRACTION = 0.8
+
+
+@dataclass(frozen=True)
+class Window:
+    """One fixed-length slice of one track, and what she did inside it.
+
+    The fields mirror :class:`HullMotionProfile` deliberately — the same
+    quantities, measured over a fixed twelve hours instead of over however long
+    the corpus happened to watch her. Reading the two side by side is how the
+    confound is demonstrated rather than asserted: a feature whose separation
+    is observation length loses it here, and a feature that separates on
+    behaviour keeps it.
+
+    Like the profile, this **reports and does not decide**. :func:`flag` owns
+    the operating point.
+    """
+    hull: str
+    track_id: str
+    t0: float
+    t1: float
+    n_fixes: int = 0
+    observed_span_hours: float = 0.0
+
+    n_scored: int = 0
+    n_checkable: int = 0
+    n_off_road: int = 0
+    n_unwatched: int = 0
+
+    course_sigma_p50: Optional[float] = None
+    course_sigma_p90: Optional[float] = None
+    frac_course_sigma_gt2: Optional[float] = None
+    frac_course_sigma_gt4: Optional[float] = None
+    speed_log_p10: Optional[float] = None
+    speed_log_p90: Optional[float] = None
+    frac_speed_slow: Optional[float] = None
+    frac_speed_fast: Optional[float] = None
+
+    sog_median: Optional[float] = None
+    straightness: Optional[float] = None
+    offshore_km_median: Optional[float] = None
+    stopped_offshore_hours: float = 0.0
+    longest_gap_hours: float = 0.0
+
+    @property
+    def check_coverage(self) -> Optional[float]:
+        return (self.n_checkable / self.n_scored) if self.n_scored else None
+
+    @property
+    def off_road_fraction(self) -> Optional[float]:
+        d = self.n_checkable + self.n_off_road
+        return (self.n_off_road / d) if d else None
+
+    @property
+    def checkable(self) -> bool:
+        """Whether she moved enough in this window to be worth any opinion.
+
+        Deliberately about ``n_scored`` — fixes where she was making way — and
+        **not** about ``n_checkable``, which counts only the fixes the flow
+        field had a lane for. Gating the whole window on the latter was a real
+        defect in the first version of this measurement, and it is worth
+        naming: it silently deleted exactly the windows the off-road signal
+        exists to judge. A vessel out where the fleet does not go produces
+        almost no checkable fixes *because* she is out there, so requiring
+        twenty of them before she may be assessed throws away the evidence and
+        then reports the survivors as the population.
+
+        Per-feature support is :meth:`support`; this is only the floor below
+        which nothing at all can be said.
+        """
+        return self.n_scored >= MIN_WINDOW_SCORED
+
+    #: What each feature's number is actually computed from. A threshold is
+    #: only as good as the count under it, and the counts differ by feature:
+    #: a course-surprise percentile rests on the fixes the field could speak
+    #: for, while "how much of her watched water was off the road" rests on the
+    #: watched fixes, on-road and off-road together.
+    _SUPPORT = {
+        "off_road_fraction": ("n_checkable", "n_off_road"),
+        "course_sigma_p50": ("n_checkable",),
+        "course_sigma_p90": ("n_checkable",),
+        "frac_course_sigma_gt2": ("n_checkable",),
+        "frac_course_sigma_gt4": ("n_checkable",),
+        "speed_log_p10": ("n_checkable",),
+        "speed_log_p90": ("n_checkable",),
+        "frac_speed_slow": ("n_checkable",),
+        "frac_speed_fast": ("n_checkable",),
+        "check_coverage": ("n_scored",),
+    }
+
+    def support(self, name: str) -> int:
+        """How many fixes stand behind ``name`` in this window.
+
+        Features not named in :data:`_SUPPORT` are read off her raw positions
+        (straightness, stops, gaps, speed over ground) and are backed by every
+        fix in the window.
+        """
+        parts = self._SUPPORT.get(name)
+        if parts is None:
+            return int(self.n_fixes)
+        return int(sum(getattr(self, p) for p in parts))
+
+    def value(self, name: str) -> Optional[float]:
+        """One named feature, whether it is a field or a derived property."""
+        v = getattr(self, name, None)
+        return None if v is None else float(v)
+
+    def as_dict(self) -> dict:
+        d = {"hull": self.hull, "track_id": self.track_id,
+             "t0": self.t0, "t1": self.t1, "n_fixes": self.n_fixes,
+             "observed_span_hours": round(self.observed_span_hours, 3),
+             "n_scored": self.n_scored, "n_checkable": self.n_checkable,
+             "n_off_road": self.n_off_road, "n_unwatched": self.n_unwatched,
+             "check_coverage": (None if self.check_coverage is None
+                                else round(self.check_coverage, 3)),
+             "off_road_fraction": (None if self.off_road_fraction is None
+                                   else round(self.off_road_fraction, 3))}
+        for k in ("course_sigma_p50", "course_sigma_p90",
+                  "frac_course_sigma_gt2", "frac_course_sigma_gt4",
+                  "speed_log_p10", "speed_log_p90", "frac_speed_slow",
+                  "frac_speed_fast", "sog_median", "straightness",
+                  "offshore_km_median", "stopped_offshore_hours",
+                  "longest_gap_hours"):
+            v = getattr(self, k)
+            d[k] = None if v is None else round(float(v), 4)
+        return d
+
+
+def windows_of(track, field: TrafficField, *, hull: Optional[str] = None,
+               window_hours: float = WINDOW_HOURS,
+               min_span_fraction: float = MIN_WINDOW_SPAN_FRACTION,
+               surprises: Optional[Sequence[FixSurprise]] = None
+               ) -> list["Window"]:
+    """Cut one track into consecutive fixed-length windows and measure each.
+
+    Windows are tiled from the track's first fix, do not overlap, and are kept
+    only when fixes actually span ``min_span_fraction`` of the nominal length.
+    They are tiled from her own start rather than from a global clock because a
+    global grid would hand every track a ragged leading stub as well as a
+    trailing one, halving the yield to buy an alignment nothing here depends
+    on.
+
+    The per-fix surprises are computed **once for the whole track** and then
+    bucketed, so the cost of windowing does not multiply the cost of scoring,
+    and every window sees exactly the surprises the whole-track profile saw.
+    """
+    arr = rp._track_arrays(track)
+    if arr is None:
+        return []
+    t, lat, lon, sog, _ = arr
+    if len(t) < 2:
+        return []
+    if hull is None:
+        m = getattr(track, "mmsi", None)
+        hull = (str(m) if m is not None
+                else str(getattr(track, "track_key", None)
+                         or getattr(track, "track_id", "")))
+    track_id = str(getattr(track, "track_id", "") or "")
+
+    if surprises is None:
+        surprises = fix_surprises(track, field)
+    fx_t = np.asarray([f.t for f in surprises], dtype=float)
+
+    dist = _offshore_km(lat, lon)
+    step = float(window_hours) * 3600.0
+    t_start, t_end = float(t[0]), float(t[-1])
+    out: list[Window] = []
+
+    edge = t_start
+    while edge < t_end:
+        hi = edge + step
+        i0 = int(np.searchsorted(t, edge, side="left"))
+        i1 = int(np.searchsorted(t, hi, side="left"))
+        edge = hi
+        if i1 - i0 < 2:
+            continue
+        span_h = (float(t[i1 - 1]) - float(t[i0])) / 3600.0
+        if span_h < min_span_fraction * float(window_hours):
+            continue
+
+        w_lat, w_lon = lat[i0:i1], lon[i0:i1]
+        w_sog, w_t = sog[i0:i1], t[i0:i1]
+        w_dist = dist[i0:i1]
+
+        travelled = 0.0
+        longest_gap = 0.0
+        stopped_h = 0.0
+        for k in range(len(w_t) - 1):
+            travelled += rp._hav_m(w_lat[k], w_lon[k], w_lat[k + 1],
+                                   w_lon[k + 1])
+            dt_h = (w_t[k + 1] - w_t[k]) / 3600.0
+            longest_gap = max(longest_gap, dt_h)
+            if 0 < dt_h <= 2.0 and (np.isfinite(w_sog[k]) and w_sog[k] < 1.0
+                                    and np.isfinite(w_dist[k])
+                                    and w_dist[k] >= OFFSHORE_KM):
+                stopped_h += dt_h
+        net = rp._hav_m(w_lat[0], w_lon[0], w_lat[-1], w_lon[-1])
+
+        j0 = int(np.searchsorted(fx_t, float(t[i0]), side="left"))
+        j1 = int(np.searchsorted(fx_t, float(t[i1 - 1]), side="right"))
+        sigmas: list[float] = []
+        speeds: list[float] = []
+        n_scored = n_off = n_unw = 0
+        for f in surprises[j0:j1]:
+            n_scored += 1
+            if f.checkable:
+                sigmas.append(f.course_sigma)
+                speeds.append(f.speed_log_ratio)
+            elif f.road == OFF_ROAD:
+                n_off += 1
+            else:
+                n_unw += 1
+
+        sogs = [float(s) for s in w_sog if np.isfinite(s)]
+        offs = [float(x) for x in w_dist if np.isfinite(x)]
+        a_sig = np.asarray(sigmas, dtype=float)
+        a_spd = np.asarray(speeds, dtype=float)
+
+        out.append(Window(
+            hull=str(hull), track_id=track_id, t0=float(t[i0]),
+            t1=float(t[i1 - 1]), n_fixes=i1 - i0,
+            observed_span_hours=span_h,
+            n_scored=n_scored, n_checkable=len(sigmas),
+            n_off_road=n_off, n_unwatched=n_unw,
+            course_sigma_p50=_q(sigmas, 50), course_sigma_p90=_q(sigmas, 90),
+            frac_course_sigma_gt2=(float(np.mean(a_sig > 2.0))
+                                   if len(a_sig) else None),
+            frac_course_sigma_gt4=(float(np.mean(a_sig > 4.0))
+                                   if len(a_sig) else None),
+            speed_log_p10=_q(speeds, 10), speed_log_p90=_q(speeds, 90),
+            frac_speed_slow=(float(np.mean(a_spd < math.log(0.5)))
+                             if len(a_spd) else None),
+            frac_speed_fast=(float(np.mean(a_spd > math.log(2.0)))
+                             if len(a_spd) else None),
+            sog_median=(float(np.median(sogs)) if sogs else None),
+            straightness=(float(net / travelled) if travelled > 1.0 else None),
+            offshore_km_median=(float(np.median(offs)) if offs else None),
+            stopped_offshore_hours=stopped_h,
+            longest_gap_hours=longest_gap))
+    return out
+
+
+def hull_windows(tracks: Sequence, field: TrafficField, *, hull_of=None,
+                 **kw) -> dict[str, list["Window"]]:
+    """Every hull's tracks, cut into windows, keyed by hull."""
+    if hull_of is None:
+        def hull_of(t):                                   # noqa: E306
+            m = getattr(t, "mmsi", None)
+            if m is not None:
+                return str(m)
+            return str(getattr(t, "track_key", None)
+                       or getattr(t, "track_id", ""))
+    out: dict[str, list[Window]] = defaultdict(list)
+    for tr in tracks:
+        h = str(hull_of(tr))
+        out[h].extend(windows_of(tr, field, hull=h, **kw))
+    return dict(out)
+
+
+# --------------------------------------------------------------------------
+# the rule, and the three-valued verdict
+# --------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Rule:
+    """A named conjunction of thresholds on window features.
+
+    A rule rather than a fitted model, deliberately. A classifier trained on
+    this corpus's labels would be fitted to one deterministic route generator
+    and its weights would carry over to real AIS as nothing at all; worse, its
+    score would be unreadable, and an operator who cannot see why a window was
+    flagged cannot review the flag — which is the whole of ADR-004's precision
+    policy. Every threshold here was chosen on the **dev** split and is stated
+    as a constant so the next person can move it and see what moves.
+    """
+    name: str
+    #: ``(feature, ">"|"<", threshold)`` — all must hold.
+    conditions: tuple
+    note: str = ""
+
+    def reasons(self, w: "Window") -> Optional[list[str]]:
+        """The conditions met, or ``None`` if a value was missing.
+
+        A missing value is *not* a failed condition: it is a question that
+        could not be asked, and the caller turns it into ``not_checkable``.
+        """
+        out = []
+        for feature, op, thr in self.conditions:
+            v = w.value(feature)
+            if (v is None or not np.isfinite(v)
+                    or w.support(feature) < MIN_WINDOW_CHECKABLE):
+                return None
+            if (v > thr) if op == ">" else (v < thr):
+                out.append(f"{feature}={v:.3g} {op} {thr:g}")
+            else:
+                return []
+        return out
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """``flagged`` / ``quiet`` / ``not_checkable`` for one window."""
+    window: "Window"
+    status: str
+    rule: str = ""
+    reasons: tuple = ()
+
+    @property
+    def flagged(self) -> bool:
+        return self.status == FLAGGED
+
+    def as_dict(self) -> dict:
+        return {"hull": self.window.hull, "t0": self.window.t0,
+                "t1": self.window.t1, "status": self.status,
+                "rule": self.rule, "reasons": list(self.reasons),
+                "caveat": caveat()}
+
+
+def flag(window: "Window", rule: Rule) -> Verdict:
+    """Apply one rule to one window, three-valued.
+
+    A window the field could not speak for is ``not_checkable`` and is never
+    folded into ``quiet``. "We could not check" is an answer here for the same
+    reason it is one in :mod:`anomaly.paperwork`: counting an unaskable
+    question as a pass is how a detector reports coverage it does not have.
+    """
+    if not window.checkable:
+        return Verdict(window=window, status=NOT_CHECKABLE, rule=rule.name)
+    r = rule.reasons(window)
+    if r is None:
+        return Verdict(window=window, status=NOT_CHECKABLE, rule=rule.name)
+    if r:
+        return Verdict(window=window, status=FLAGGED, rule=rule.name,
+                       reasons=tuple(r))
+    return Verdict(window=window, status=QUIET, rule=rule.name)

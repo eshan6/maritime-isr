@@ -63,6 +63,9 @@ __all__ = [
     "Split3", "hull_split_3way", "TruthLabels",
     "Score", "score_flags", "sweep_threshold", "wilson",
     "MOTION_EXPRESSED_FAMILIES", "format_scores",
+    # the fixed-length-window measurement that replaced the per-hull one
+    "TruthIntervals", "window_key", "score_windows", "sweep_window_threshold",
+    "hull_level_from_windows", "span_flatness", "format_flatness",
 ]
 
 #: The five (lead hours, persistence gate, severity) points ADR-032 published.
@@ -291,6 +294,51 @@ class TruthLabels:
         return out
 
 
+@dataclass
+class TruthIntervals(TruthLabels):
+    """The answer key with the scenario's clock kept, for window scoring.
+
+    Inert in exactly the way :class:`TruthLabels` is — the reader is
+    :func:`scenario.measure.hull_anomaly_intervals` and the mapping is handed
+    in. What this adds is the ability to ask "was she in a scenario *then*",
+    which is the only sound question once the scored unit is a window rather
+    than a whole track.
+
+    Why it matters that windows are labelled by time and not merely by hull:
+    a rendezvous lasting three hours inside a three-hundred-hour track makes
+    ordinary passage-making in the other 297. Labelling every one of those
+    windows positive would count a correct silence as a miss, deflate recall,
+    and — far worse — reward a detector that fires constantly on that hull.
+    """
+    #: hull -> ``((family, t_start_epoch_s, t_end_epoch_s), …)``
+    intervals: dict[str, tuple] = field(default_factory=dict)
+
+    def covers(self, hull: str, t0: float, t1: float, *,
+               families: Optional[frozenset] = None) -> bool:
+        """Does any scenario for this hull overlap ``[t0, t1]``?
+
+        Overlap, not containment: a window that catches the last hour of a
+        rendezvous saw the rendezvous.
+        """
+        for fam, a, b in self.intervals.get(str(hull), ()):
+            if families is not None and fam not in families:
+                continue
+            if a <= t1 and t0 <= b:
+                return True
+        return False
+
+    def positive_windows(self, windows: Iterable, *,
+                         families: Optional[frozenset] = None) -> set:
+        """Which of ``windows`` sit inside a scenario, keyed by identity."""
+        return {window_key(w) for w in windows
+                if self.covers(w.hull, w.t0, w.t1, families=families)}
+
+
+def window_key(w) -> tuple:
+    """A window's identity: which hull, which track, which slice of clock."""
+    return (str(w.hull), str(getattr(w, "track_id", "")), round(float(w.t0), 3))
+
+
 # ---------------------------------------------------------------------------
 # precision, with an interval on it
 # ---------------------------------------------------------------------------
@@ -327,6 +375,11 @@ class Score:
     n_positive: int
     n_flagged: int
     n_true_positive: int
+    #: What one row of the denominator *is*. ``"hull"`` for the whole-track
+    #: measurement ADR-042 ran; ``"window"`` for the fixed-length one that
+    #: replaced it. Carried on the score because a precision means a different
+    #: thing per unit and the two must never be read as the same number.
+    unit: str = "hull"
 
     @property
     def base_rate(self) -> float:
@@ -357,6 +410,7 @@ class Score:
     def as_dict(self) -> dict:
         lo, hi = self.precision_ci
         return {"label": self.label, "target": self.target,
+                "unit": self.unit,
                 "n_hulls": self.n_hulls, "n_positive": self.n_positive,
                 "base_rate": round(self.base_rate, 3),
                 "n_flagged": self.n_flagged,
@@ -410,6 +464,150 @@ def sweep_threshold(values: dict, *, hulls: Iterable[str], truth: TruthLabels,
                                label=f"{name} >= {thr:g}", families=families,
                                target=target))
     return out
+
+
+def score_windows(flagged: Iterable, *, windows: Sequence,
+                  truth: "TruthIntervals", label: str,
+                  families: Optional[frozenset] = None,
+                  target: str = "all anomalies") -> Score:
+    """Score flagged **windows** against the time-aware answer key.
+
+    The denominator is every window offered to the rule, including the ones it
+    declined — same discipline as :func:`sweep_threshold`, one unit down. A
+    rule that only answers for a fifth of the windows has at most a fifth of
+    the recall, and that has to be visible.
+    """
+    keys = {window_key(w) for w in windows}
+    flag_keys = {window_key(w) for w in flagged} & keys
+    pos = truth.positive_windows(windows, families=families)
+    return Score(label=label, target=target, unit="window",
+                 n_hulls=len(keys), n_positive=len(pos),
+                 n_flagged=len(flag_keys),
+                 n_true_positive=len(flag_keys & pos))
+
+
+def sweep_window_threshold(windows: Sequence, feature: str, *,
+                           truth: "TruthIntervals",
+                           thresholds: Sequence[float],
+                           families: Optional[frozenset] = None,
+                           target: str = "all anomalies",
+                           require_checkable: bool = True) -> list[Score]:
+    """Sweep one window feature across thresholds.
+
+    ``require_checkable`` keeps the three-valued discipline: a window the flow
+    field could not speak for is never flagged, and stays in the denominator as
+    a window the rule declined rather than being quietly dropped.
+
+    Support is asked of the **feature**, not of the window, through
+    :meth:`novelty.Window.support`. Gating every feature on the count of
+    checkable fixes deleted the off-road windows that the off-road feature
+    exists to judge; the fix is recorded here because it changed the measured
+    numbers, not merely the code.
+    """
+    from .novelty import MIN_WINDOW_CHECKABLE
+
+    out: list[Score] = []
+    for thr in thresholds:
+        flagged = []
+        for w in windows:
+            if require_checkable and not w.checkable:
+                continue
+            if w.support(feature) < MIN_WINDOW_CHECKABLE:
+                continue
+            v = w.value(feature)
+            if v is not None and math.isfinite(v) and v >= thr:
+                flagged.append(w)
+        out.append(score_windows(flagged, windows=windows, truth=truth,
+                                 label=f"{feature} >= {thr:g}",
+                                 families=families, target=target))
+    return out
+
+
+def hull_level_from_windows(flagged: Iterable, *, windows: Sequence,
+                            truth: TruthLabels, label: str,
+                            min_windows: int = 1,
+                            families: Optional[frozenset] = None,
+                            target: str = "all anomalies") -> Score:
+    """Roll a window rule up to the hull the operator actually sees.
+
+    A hull is flagged when at least ``min_windows`` of her windows were. This
+    number is **not** comparable with the window-level precision above it and
+    is reported beside it rather than instead of it: rolling up hands a hull
+    watched for forty windows forty chances to trip the rule and a hull watched
+    for one exactly one, so hull-level precision carries an observation-length
+    bias of its own — in the opposite, conservative direction to the one the
+    windowing removed.
+    """
+    counts: dict[str, int] = defaultdict(int)
+    for w in flagged:
+        counts[str(w.hull)] += 1
+    hulls = {str(w.hull) for w in windows}
+    flagged_hulls = {h for h, c in counts.items()
+                     if c >= min_windows and h in hulls}
+    return score_flags(flagged_hulls, hulls=hulls, truth=truth, label=label,
+                       families=families, target=target)
+
+
+def span_flatness(windows: Sequence, truth: "TruthIntervals", *,
+                  by: str = "observed_span_hours", n_strata: int = 4,
+                  families: Optional[frozenset] = None) -> list[dict]:
+    """Is the positive rate flat across strata of ``by``? — the confound check.
+
+    This is the test the whole restructure exists to pass. Scored per hull over
+    a whole track, this corpus separates anomalous hulls from ordinary ones
+    with an AUC of about 0.88 **on observation length alone**, because its
+    scripted cast is generated for the duration of its scenario and its
+    background fleet runs the entire corpus window. Any feature correlated with
+    observation length inherits that separation for free and carries none of it
+    to real AIS, where every hull broadcasts continuously.
+
+    A flat positive rate across strata of ``by`` is what says the quantity is
+    no longer doing the separating. It is run on ``observed_span_hours`` to
+    show the windowing worked, and on ``n_windows_in_hull``, ``check_coverage``
+    and ``offshore_km_median`` to look for a replacement confound — because
+    removing one and inheriting another would be the same mistake with a
+    longer paper trail.
+    """
+    vals = []
+    for w in windows:
+        v = w.value(by) if hasattr(w, "value") else None
+        if v is None and isinstance(w, dict):
+            v = w.get(by)
+        vals.append((v, w))
+    usable = [(v, w) for v, w in vals if v is not None and math.isfinite(v)]
+    if not usable:
+        return []
+    usable.sort(key=lambda kv: kv[0])
+    pos = truth.positive_windows([w for _, w in usable], families=families)
+    n = len(usable)
+    out = []
+    for i in range(n_strata):
+        lo, hi = (i * n) // n_strata, ((i + 1) * n) // n_strata
+        chunk = usable[lo:hi]
+        if not chunk:
+            continue
+        k = sum(1 for _, w in chunk if window_key(w) in pos)
+        a, b = wilson(k, len(chunk))
+        out.append({"stratum": i + 1, "by": by,
+                    "range": [round(chunk[0][0], 3), round(chunk[-1][0], 3)],
+                    "n_windows": len(chunk), "n_positive": k,
+                    "positive_rate": round(k / len(chunk), 4),
+                    "rate_ci95": [round(a, 4), round(b, 4)]})
+    return out
+
+
+def format_flatness(rows: Sequence[dict], *, title: str = "") -> str:
+    """The confound check as a table, with intervals so flat is checkable."""
+    out = [title] if title else []
+    out.append("| stratum | range | windows | positives | positive rate | "
+               "95% CI |")
+    out.append("|---|---|---|---|---|---|")
+    for r in rows:
+        lo, hi = r["rate_ci95"]
+        out.append(f"| {r['stratum']} | {r['range'][0]:g}–{r['range'][1]:g} | "
+                   f"{r['n_windows']} | {r['n_positive']} | "
+                   f"{r['positive_rate']:.4f} | {lo:.4f}–{hi:.4f} |")
+    return "\n".join(out)
 
 
 def format_scores(scores: Sequence[Score], *, title: str = "") -> str:
