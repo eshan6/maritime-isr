@@ -214,8 +214,16 @@ def build_port_call(vessel, port: str, *, arrive_from: tuple[float, float],
     # without the check put 9 positions on dry ground and failed `afloat`. When
     # no water is found in six draws `_scatter` returns the centre, which is the
     # original behaviour and always valid.
+    # The berth is checked against the ORIGINAL anchorage, not against the
+    # scattered one, and that ordering is the whole point. `_scatter` falls
+    # back to its centre when no draw works, and the fallback is not itself
+    # checked — so an anchorage that fell back to centre while the berth had
+    # moved left a run-in nobody had verified. At JNPT the port coordinate is
+    # at sea but a point 350 m away is not, so that line went ashore and
+    # `afloat` reported a fifth of the track on land. Anchoring the berth to
+    # the original waiting area makes the fallback safe by construction.
     berth = _scatter(PORTS[port], rng, _BERTH_SCATTER_M, must_be_sea=True,
-                     clear_to=PORTS[port])
+                     clear_to=anchorage_of(port))
     anch = _scatter(anchorage_of(port), rng, _ANCH_SCATTER_M,
                     must_be_sea=True, clear_to=berth)
 
