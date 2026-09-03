@@ -1,8 +1,12 @@
 """`python -m maritime_isr.api` — run the local API with uvicorn.
 
-Binds to 127.0.0.1 only. This is a laptop demo surface (ADR-013), never exposed
-beyond localhost; the token in `settings` is a convenience, not a security
-boundary.
+Binds to 127.0.0.1 by DEFAULT — a laptop demo surface (ADR-013). The host and
+port are env-overridable because the Hugging Face Space has to bind 0.0.0.0:7860
+to be reachable at all; see `deploy/huggingface/Dockerfile`.
+
+So this is no longer localhost-only in every deployment, and the token in
+`settings` was never a security boundary in any of them. The public Space is
+acceptable because its corpus is synthetic, not because the token guards it.
 """
 from __future__ import annotations
 

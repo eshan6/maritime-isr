@@ -38,12 +38,33 @@ def _prov(source_ref: str, acquired_at) -> dict:
 
 
 def _table(rows: list[dict], schema: pa.Schema) -> pa.Table:
+    """Build the arrow table, coercing timestamps to the unit the schema names.
+
+    pandas carries datetimes at nanosecond precision. Every timestamp column in
+    `schemas/` is declared `timestamp("us")`, and Arrow refuses a cast that
+    would drop a fraction rather than silently rounding it — so a single
+    `t_start` landing on a non-whole microsecond aborted the whole track build
+    with `Casting from timestamp[ns] to timestamp[us] would lose data`. That
+    took out `build-tracks`, and with it dark vessels, alerts and the assistant.
+
+    The schema is the authority on precision, so the truncation is made
+    explicit here rather than left to a cast that can only crash. Sub-
+    microsecond precision on a vessel fix is meaningless in any case: AIS
+    reports to the second, and these values are arithmetic artefacts of
+    interpolating between them, not measurements.
+    """
     if not rows:
         return schema.empty_table()
     df = pd.DataFrame(rows)
     for f in schema.names:
         if f not in df.columns:
             df[f] = None
+    for field in schema:
+        if not pa.types.is_timestamp(field.type):
+            continue
+        col = df[field.name]
+        if pd.api.types.is_datetime64_any_dtype(col):
+            df[field.name] = col.dt.floor(field.type.unit)
     return pa.Table.from_pandas(df[schema.names], schema=schema,
                                 preserve_index=False)
 

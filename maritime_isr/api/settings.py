@@ -1,10 +1,16 @@
 """API settings — local-only serving, token auth, dev-frontend CORS.
 
-This is a demo surface for a laptop, not a public service. The token is a
-shared secret read from the environment, and CORS is opened only to the local
-dev frontend origins. Both are deliberately simple; ADR-013 keeps the whole
-system on one machine with no deploy host, so there is no multi-tenant auth to
-build here yet.
+This began as a demo surface for a laptop. It is now also served publicly from
+a Hugging Face Docker Space, which changes what these defaults mean and does
+not change what they *do*: the token still ships to the browser, so it protects
+nothing from anyone who opens the page.
+
+The deploy is acceptable only because the corpus is entirely synthetic. There
+is still no multi-tenant auth here, and a real feed would need one built first.
+
+CORS is opened only to the local dev frontend origins, and the public deploy
+does not widen it: Vercel proxies `/api` server-side, so the browser sees one
+origin and never issues a cross-origin request at all.
 """
 from __future__ import annotations
 
@@ -12,8 +18,17 @@ import os
 from dataclasses import dataclass, field
 
 #: Default dev token. Overridden by MISR_API_TOKEN. A default exists so the demo
-#: runs out of the box on the laptop; it is not a secret and must be changed if
-#: this is ever exposed beyond localhost (it is not, today).
+#: runs out of the box on the laptop.
+#:
+#: **It is not a security boundary, and since the Hugging Face deploy it is no
+#: longer true that this only runs on localhost.** The browser has to send this
+#: token, so it ships inside the page the API serves — a token the client must
+#: know is a token the public knows. Changing it does not make a deployed Space
+#: private; it only stops a stale bookmark working.
+#:
+#: What actually makes the deploy acceptable is that every row it serves is
+#: synthetic (CLAUDE.md §4.6). Do not put a real feed behind this without
+#: building real auth first.
 DEFAULT_TOKEN = "maritime-isr-dev"
 
 #: Origins the Vite/React dev server runs on. Kept explicit rather than "*" so a
