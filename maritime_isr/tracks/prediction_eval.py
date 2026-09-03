@@ -59,6 +59,10 @@ __all__ = [
     "hull_split", "fit_model", "sweep", "position_errors", "SweepRow",
     "ErrorRow", "format_sweep", "format_errors", "SWEEP_COMBOS",
     "SEVERITY_GRID", "ERROR_LEADS_H", "CAVEAT",
+    # the three-way protocol, and the scoring the answer key is fed into
+    "Split3", "hull_split_3way", "TruthLabels",
+    "Score", "score_flags", "sweep_threshold", "wilson",
+    "MOTION_EXPRESSED_FAMILIES", "format_scores",
 ]
 
 #: The five (lead hours, persistence gate, severity) points ADR-032 published.
@@ -144,6 +148,290 @@ def hull_split(tracks: Sequence, *, fit_fraction: float = 0.6, seed: int = 7,
                  fit_tracks=[t for t in tracks if hull_of(t) in fit],
                  score_tracks=[t for t in tracks if hull_of(t) in score],
                  seed=seed)
+
+
+# ---------------------------------------------------------------------------
+# the three-way split — fit / dev / test
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Split3:
+    """Three disjoint sets of hulls, and what each is allowed to be used for.
+
+    Two-way was not enough, and this project has now been burned by it twice.
+    ADR-032 fitted a severity threshold on the corpus it reported from;
+    ADR-042 kept a held-out set but still chose which operating points to
+    *print* after seeing them. Either way the number reported has been looked
+    at, and a number you have looked at is a number you have fitted to.
+
+    So:
+
+    * **fit** — the flow field, the occupancy map, every calibration. Nothing
+      else may be fitted anywhere else.
+    * **dev** — every design choice and every threshold. Look at it as often as
+      you like; that is what it is for.
+    * **test** — opened **once**, at the end. Whatever it says is the result. If
+      it is opened twice, the document that reports the number has to say so in
+      the same sentence.
+
+    The split is on the **hull**, so every track a hull produced lands on the
+    same side, and the sets are checked disjoint rather than assumed.
+    """
+    fit_hulls: frozenset
+    dev_hulls: frozenset
+    test_hulls: frozenset
+    fit_tracks: list
+    dev_tracks: list
+    test_tracks: list
+    seed: int
+
+    def __post_init__(self):
+        pairs = (("fit", "dev", self.fit_hulls & self.dev_hulls),
+                 ("fit", "test", self.fit_hulls & self.test_hulls),
+                 ("dev", "test", self.dev_hulls & self.test_hulls))
+        for a, b, overlap in pairs:
+            if overlap:
+                raise ValueError(
+                    f"{len(overlap)} hull(s) in both {a} and {b} — a hull on "
+                    f"two sides of this split lets the model memorise her and "
+                    f"report the memory as a measurement")
+
+    def report(self) -> dict:
+        return {
+            "n_fit_hulls": len(self.fit_hulls),
+            "n_dev_hulls": len(self.dev_hulls),
+            "n_test_hulls": len(self.test_hulls),
+            "n_fit_tracks": len(self.fit_tracks),
+            "n_dev_tracks": len(self.dev_tracks),
+            "n_test_tracks": len(self.test_tracks),
+            "overlap": 0,
+            "seed": self.seed,
+            "rule": ("split by hull, never by track; fit trains, dev chooses "
+                     "every threshold, test is opened once and reported"),
+        }
+
+
+def hull_split_3way(tracks: Sequence, *, fit_fraction: float = 0.4,
+                    dev_fraction: float = 0.3, seed: int = 7,
+                    hull_of: Optional[Callable] = None) -> Split3:
+    """Divide the corpus by hull into fit / dev / test.
+
+    The remainder after ``fit_fraction`` and ``dev_fraction`` is the test set,
+    so the three always sum to the whole and no hull is silently dropped.
+
+    **40/30/30 rather than the more usual 60/20/20, and the reason is where the
+    binding constraint actually is.** ADR-042 fitted a serviceable flow field on
+    142 hulls; 40% of this corpus is ~270, comfortably past the point where a
+    field over one deterministic corridor stops improving. What that corpus did
+    *not* have was enough scored hulls for a precision to mean anything — its
+    §7 has rows computed on one to six flagged hulls. Statistical power is
+    scarce here and fitting data is not, so the split spends the surplus where
+    it buys something.
+    """
+    hull_of = hull_of or _hull_of
+    hulls = sorted({hull_of(t) for t in tracks})
+    rng = random.Random(seed)
+    rng.shuffle(hulls)
+    n = len(hulls)
+    a = max(1, int(n * fit_fraction))
+    b = a + max(1, int(n * dev_fraction))
+    fit, dev, test = (frozenset(hulls[:a]), frozenset(hulls[a:b]),
+                      frozenset(hulls[b:]))
+    pick = lambda s: [t for t in tracks if hull_of(t) in s]   # noqa: E731
+    return Split3(fit_hulls=fit, dev_hulls=dev, test_hulls=test,
+                  fit_tracks=pick(fit), dev_tracks=pick(dev),
+                  test_tracks=pick(test), seed=seed)
+
+
+# ---------------------------------------------------------------------------
+# the answer key — harness only
+# ---------------------------------------------------------------------------
+
+#: The injected anomaly families a **motion-only** detector could in principle
+#: express. A bad IMO check digit, a hidden beneficial owner, a paperwork
+#: mismatch and a camera disagreement are real anomalies and are invisible to a
+#: rule that reads positions, so scoring a motion signal against them measures
+#: the corpus's composition rather than the signal. Both targets are reported —
+#: this one because it is the honest ceiling, the other because it is what an
+#: operator will ask about.
+MOTION_EXPRESSED_FAMILIES = frozenset({
+    "dark_transfer", "behavioural_geographic", "spoofing",
+})
+
+
+@dataclass
+class TruthLabels:
+    """Which hulls carry an injected anomaly — a container, deliberately inert.
+
+    **The answer key is not read here.** This module lives under ``tracks/``,
+    which the build's isolation check treats as detection code, and rightly:
+    a detector with the answer key measures nothing. So the reader lives in
+    :func:`scenario.measure.hull_anomaly_families` — the one module allowed to
+    name that table — and hands the mapping in. This class only holds it and
+    counts against it, which is arithmetic and not evidence.
+
+    Constructing one by hand in a test is therefore the normal way to exercise
+    scoring, and needs no corpus.
+    """
+    #: hull -> the families of TRUE_ANOMALY it is named in
+    families: dict[str, frozenset] = field(default_factory=dict)
+    n_truth_rows: int = 0
+    n_unmapped_entities: int = 0
+
+    def anomalous(self, hulls: Iterable[str], *,
+                  families: Optional[frozenset] = None) -> set[str]:
+        """Which of ``hulls`` carry an anomaly (optionally, of these families)."""
+        out = set()
+        for h in hulls:
+            f = self.families.get(str(h))
+            if not f:
+                continue
+            if families is None or (f & families):
+                out.add(str(h))
+        return out
+
+
+# ---------------------------------------------------------------------------
+# precision, with an interval on it
+# ---------------------------------------------------------------------------
+
+def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    """95% Wilson score interval for k successes in n trials.
+
+    Wilson rather than the textbook normal interval because the normal one is
+    wrong exactly where this measurement lives — small n and a proportion near
+    0 or 1 — and reports intervals that run past 1.0. With n below about ten the
+    interval is so wide that the point estimate should not be quoted at all,
+    which is the point of printing it (ADR-042 §7).
+    """
+    if n <= 0:
+        return (0.0, 1.0)
+    p = k / n
+    d = 1.0 + z * z / n
+    c = (p + z * z / (2 * n)) / d
+    h = (z / d) * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n))
+    return (max(0.0, c - h), min(1.0, c + h))
+
+
+@dataclass(frozen=True)
+class Score:
+    """One operating point, scored against one target, with its counts.
+
+    ``n_flagged`` travels with ``precision`` everywhere, because a precision
+    over a handful of hulls is noise and reporting it as a result is the exact
+    failure ADR-042 named.
+    """
+    label: str
+    target: str
+    n_hulls: int
+    n_positive: int
+    n_flagged: int
+    n_true_positive: int
+
+    @property
+    def base_rate(self) -> float:
+        return self.n_positive / self.n_hulls if self.n_hulls else 0.0
+
+    @property
+    def precision(self) -> Optional[float]:
+        return (self.n_true_positive / self.n_flagged) if self.n_flagged else None
+
+    @property
+    def recall(self) -> Optional[float]:
+        return (self.n_true_positive / self.n_positive) if self.n_positive else None
+
+    @property
+    def lift(self) -> Optional[float]:
+        p, b = self.precision, self.base_rate
+        return (p / b) if (p is not None and b) else None
+
+    @property
+    def precision_ci(self) -> tuple[float, float]:
+        return wilson(self.n_true_positive, self.n_flagged)
+
+    @property
+    def too_few_to_report(self) -> bool:
+        """Fewer than ten flagged hulls — the point estimate is noise."""
+        return self.n_flagged < 10
+
+    def as_dict(self) -> dict:
+        lo, hi = self.precision_ci
+        return {"label": self.label, "target": self.target,
+                "n_hulls": self.n_hulls, "n_positive": self.n_positive,
+                "base_rate": round(self.base_rate, 3),
+                "n_flagged": self.n_flagged,
+                "n_true_positive": self.n_true_positive,
+                "precision": (None if self.precision is None
+                              else round(self.precision, 3)),
+                "precision_ci95": [round(lo, 3), round(hi, 3)],
+                "recall": (None if self.recall is None
+                           else round(self.recall, 3)),
+                "lift": (None if self.lift is None else round(self.lift, 2)),
+                "too_few_to_report": self.too_few_to_report}
+
+
+def score_flags(flagged: Iterable[str], *, hulls: Iterable[str],
+                truth: TruthLabels, label: str,
+                families: Optional[frozenset] = None,
+                target: str = "all anomalies") -> Score:
+    """Score one set of flagged hulls against the answer key.
+
+    ``hulls`` is the whole population scored, so a hull nobody flagged still
+    counts in the base rate — the alternative silently redefines the denominator
+    and makes every precision look better than it is.
+    """
+    hulls = {str(h) for h in hulls}
+    flagged = {str(h) for h in flagged} & hulls
+    positive = truth.anomalous(hulls, families=families)
+    return Score(label=label, target=target, n_hulls=len(hulls),
+                 n_positive=len(positive), n_flagged=len(flagged),
+                 n_true_positive=len(flagged & positive))
+
+
+def sweep_threshold(values: dict, *, hulls: Iterable[str], truth: TruthLabels,
+                    thresholds: Sequence[float], name: str = "score",
+                    families: Optional[frozenset] = None,
+                    target: str = "all anomalies") -> list[Score]:
+    """Score one scalar per hull at a range of thresholds.
+
+    ``values`` maps hull to a score, and a hull **absent** from it is one the
+    signal could not speak for. Those are never flagged and never silently
+    dropped from the population: they stay in the denominator as hulls the rule
+    declined, which is what makes the recall figure honest — a rule that only
+    answers for a third of the fleet has at most a third of the recall, and a
+    denominator quietly restricted to the answerable hulls would hide that.
+    """
+    hulls = {str(h) for h in hulls}
+    out: list[Score] = []
+    for thr in thresholds:
+        flagged = {str(h) for h, v in values.items()
+                   if str(h) in hulls and v is not None and v >= thr}
+        out.append(score_flags(flagged, hulls=hulls, truth=truth,
+                               label=f"{name} >= {thr:g}", families=families,
+                               target=target))
+    return out
+
+
+def format_scores(scores: Sequence[Score], *, title: str = "") -> str:
+    """Operating points as a markdown table, counts and interval attached."""
+    out = [title] if title else []
+    out.append("| operating point | target | hulls flagged | of which anomalous "
+               "| precision | 95% CI | recall | base rate | lift |")
+    out.append("|---|---|---|---|---|---|---|---|---|")
+    for s in scores:
+        lo, hi = s.precision_ci
+        p = "—" if s.precision is None else f"{s.precision:.2f}"
+        if s.too_few_to_report and s.precision is not None:
+            p = f"*{s.precision:.2f}*"
+        r = "—" if s.recall is None else f"{s.recall:.2f}"
+        lf = "—" if s.lift is None else f"{s.lift:.1f}x"
+        out.append(f"| {s.label} | {s.target} | {s.n_flagged} | "
+                   f"{s.n_true_positive} | {p} | {lo:.2f}–{hi:.2f} | {r} | "
+                   f"{s.base_rate:.2f} | {lf} |")
+    out.append("")
+    out.append("*Italic precision* is computed on fewer than ten flagged "
+               "hulls and is noise, not a result.")
+    return "\n".join(out)
 
 
 # ---------------------------------------------------------------------------

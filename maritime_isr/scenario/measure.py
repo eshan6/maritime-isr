@@ -136,6 +136,59 @@ def alias_map() -> dict[str, str]:
     return out
 
 
+def hull_anomaly_families() -> "object":
+    """hull (MMSI, as a string) -> the anomaly families she is named in.
+
+    The answer key in the shape a per-hull measurement wants, and it lives here
+    for one structural reason: this is the only module allowed to read
+    ``scenario_truth``, and the consumer —
+    :mod:`tracks.prediction_eval` — lives under ``tracks/``, which the build's
+    isolation check treats as detection code. So the reader is here, the
+    arithmetic is there, and the answer key crosses that boundary as a plain
+    mapping the caller passes in rather than as something a detector could
+    reach for.
+
+    **Only ``TRUE_ANOMALY`` rows.** A decoy is a scenario a correct system
+    should stay quiet about and a deliberate miss is a capability boundary;
+    counting either as a hit would reward a detector for firing on the two
+    things this corpus exists to prove it does not.
+
+    The hull key is the MMSI because that is what a built AIS track groups on
+    (``prediction_eval._hull_of``). A vessel that changed MMSI mid-window has
+    several, and each of them maps to the families of the scenario she is in —
+    which is the honest answer: under either identity, that hull is the one the
+    scenario was injected into.
+    """
+    from ..tracks.prediction_eval import TruthLabels
+
+    fams: dict[str, set] = {}
+    unmapped = 0
+    rows = 0
+    by_vid: dict[str, list[str]] = {}
+    for r in read_table("gfw_vessel_identity"):
+        vid, mmsi = r.get("vessel_id"), r.get("mmsi")
+        if vid and mmsi not in (None, ""):
+            by_vid.setdefault(str(vid), []).append(str(int(mmsi)))
+
+    for r in load_truth():
+        if r.get("truth_class") != TRUE_ANOMALY:
+            continue
+        rows += 1
+        family = str(r.get("scenario_family") or "")
+        for entity in str(r.get("entity_ids") or "").split(","):
+            entity = entity.strip()
+            if not entity.startswith("vessel:"):
+                continue
+            hulls = by_vid.get(entity)
+            if not hulls:
+                unmapped += 1
+                continue
+            for h in hulls:
+                fams.setdefault(h, set()).add(family)
+    return TruthLabels(families={k: frozenset(v) for k, v in fams.items()},
+                       n_truth_rows=rows, n_unmapped_entities=unmapped)
+
+
 def measure(store, *, slack_hours: float = 36.0) -> list[ScenarioOutcome]:
     """Score every scenario against the alerts the pipeline actually raised.
 
