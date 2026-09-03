@@ -638,3 +638,37 @@ the repo functions is a couple of hours' work; none of them writes to the repo.
 Unit tests for the new code are in `tests/test_novelty.py` (23 tests), including
 `test_the_confound_check_sees_a_planted_length_confound` — the check is verified
 able to *fail*, so a flat report is evidence.
+
+### 9.1 Test-suite state, including three reds that are not from this work
+
+Full suite: **1,101 passed, 3 failed, 41 skipped** (23 min). The directly
+affected files are green — `test_novelty.py` + `test_predictive.py` = 83 passed,
+and `test_scenario.py`'s truth-isolation tests = 4 passed, including
+`test_novelty_and_its_harness_never_read_the_answer_key` over both modified
+`tracks/` modules.
+
+The three failures are **land-routing in the scenario generator**, not this work:
+
+| test | failure |
+|---|---|
+| `test_scenario.py::test_generation_is_robust_across_seeds` | `afloat` violation |
+| `test_scenario.py::test_validators_pass_on_the_generated_world` | `afloat: vessel:fl_box_03 — 20% of this track is on land` |
+| `test_map_graph_loading.py::test_motion_window_is_the_ais_extent_not_the_corpus_extent` | depends on landed corpus state |
+
+Two independent reasons to attribute them elsewhere:
+
+1. **STATE.md already records this failure class as pre-existing** (§"A red slow
+   test that predates this work"), verified against a clean worktree at an
+   earlier commit — a land-routing gap in the Gulf of Kutch, marked
+   `@pytest.mark.slow`, which is why it passes unnoticed in ordinary runs.
+2. **Nothing imports the modules this session changed.** An AST/​source scan of
+   `maritime_isr/` finds no importer of `scenario.measure`, `tracks.novelty` or
+   `tracks.prediction_eval` outside those files themselves. (`validate.py`'s two
+   apparent hits are `fleet.measure_motion` and `encounter.measure_rendezvous`
+   — different modules that merely contain the substring.) Every edit this
+   session was additive: new functions, new classes, and one defaulted field
+   (`Score.unit`). There is no path by which they place a generated track on land.
+
+Not fixed here, for the reason STATE.md gives: it is scenario-route generation,
+and fixing it blind would be guesswork. Flagged so the next session is not
+surprised by three reds and does not attribute them to the window machinery.
