@@ -279,7 +279,7 @@ def _room(world: ScenarioWorld, t) -> float:
 
 def _call(world: ScenarioWorld, key: str, port: str, *, pos, t, rng,
           wait_h: float, berth_h: float, scenario_id: str = "FL",
-          declare: bool = True):
+          declare: bool = True, skip_berth: bool = False):
     """One port call, landed, or None when the window has no room for it.
 
     Returns (position, time) to continue from. The overrun guard is the one
@@ -293,7 +293,8 @@ def _call(world: ScenarioWorld, key: str, port: str, *, pos, t, rng,
     lane = lane_offset_m(key)
     pts, spec = build_port_call(V(world, key), port, arrive_from=pos,
                                t_start=t, rng=rng, anchorage_hours=wait_h,
-                               berth_hours=berth_h, lane_offset_m=lane)
+                               berth_hours=berth_h, lane_offset_m=lane,
+                               skip_berth=skip_berth)
     overrun_h = (pts[-1].t - (world.t1 - hours(2))).total_seconds() / 3600.0
     if overrun_h > 0.0:
         berth_h -= overrun_h
@@ -303,7 +304,8 @@ def _call(world: ScenarioWorld, key: str, port: str, *, pos, t, rng,
             return None
         pts, spec = build_port_call(V(world, key), port, arrive_from=pos,
                                    t_start=t, rng=rng, anchorage_hours=wait_h,
-                                   berth_hours=berth_h, lane_offset_m=lane)
+                                   berth_hours=berth_h, lane_offset_m=lane,
+                                   skip_berth=skip_berth)
     emit_fleet(world, key, pts, rng)
     add_port_visit(world, scenario_id, key, spec, declare=declare)
     return (pts[-1].lat, pts[-1].lon), pts[-1].t
@@ -597,8 +599,24 @@ def _ferry(world, key, rng, i):
     twenty minutes and goes again, which is what makes the repetition visible at
     all.
     """
-    a_name, b_name = FERRY_RUNS[i % len(FERRY_RUNS)]
-    a, b = harbour_mooring(a_name), harbour_mooring(b_name)
+    # Pick a run whose crossing is actually water. A ferry builds her own legs
+    # rather than going through `build_port_call`, so the leg guard there never
+    # sees her — and the Mumbai/JNPT pair steams straight across the harbour
+    # headland. `sea_route` does not rescue it either: on a 20 km leg its
+    # sampling is ~244 m and the headland is about that wide, so it reports the
+    # crossing clear. Checked at 40 m instead, and a run that is not water is
+    # skipped rather than sailed: losing one harbour route costs the corpus far
+    # less than a ferry driving over Nhava Sheva twenty times.
+    from ..primitives.port_call import _leg_clear
+    runs = FERRY_RUNS[i % len(FERRY_RUNS):] + FERRY_RUNS[:i % len(FERRY_RUNS)]
+    for a_name, b_name in runs:
+        a, b = harbour_mooring(a_name), harbour_mooring(b_name)
+        if _leg_clear(a, b):
+            break
+    else:
+        world.clipped.append(
+            f"fleet {key}: no ferry run with a clear crossing — hull skipped")
+        return
     v = V(world, key)
     t = week(1, hours=(i % 24) * 12 + rng.uniform(0, 6))
     pos, target = a, b
@@ -622,9 +640,15 @@ def _ferry(world, key, rng, i):
     # The berth is short for the same reason the turnarounds are: a ten-hour
     # dwell at the end swamps twenty crossings and puts the median back at zero.
     for port in (a_name, b_name):
+        # `skip_berth`: she waits off the terminal instead of mooring on the
+        # quay coordinate. This is `harbour_mooring`'s own argument applied
+        # where it was being ignored — a harbour ferry's whole track is inside
+        # one port, so the handful of alongside points the 1 km land mask reads
+        # as shore are a fifth of HER track rather than a rounding error on a
+        # merchant's three-week voyage. That is what put fl_ferry_00 18% ashore.
         got = _call(world, key, port, pos=pos, t=t + hours(rng.uniform(1, 4)),
                     rng=rng, wait_h=rng.uniform(0.2, 1.0),
-                    berth_h=rng.uniform(2.0, 5.0))
+                    berth_h=rng.uniform(2.0, 5.0), skip_berth=True)
         if got is None:
             return
         pos, t = got
