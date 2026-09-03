@@ -42,12 +42,14 @@ git lfs version >/dev/null 2>&1 || fail \
 
 [ -d data/conformed ] || fail \
     "data/conformed is missing -- there is no corpus to ship.
-   Generate it first:
+   Generate it first, IN THIS ORDER (see deploy/README.md -- the order is
+   load-bearing, graph-populate must come AFTER build-tracks or the graph
+   never sees the encounters and the alert queue comes out empty):
        maritime-isr scenario generate
-       maritime-isr graph-populate
        maritime-isr build-tracks
        maritime-isr radar correlate --write
-       maritime-isr baselines derive"
+       maritime-isr baselines derive
+       maritime-isr graph-populate"
 
 [ -f frontend/dist/index.html ] || fail \
     "frontend/dist is missing -- the built UI is not there.

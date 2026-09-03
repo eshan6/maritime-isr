@@ -175,12 +175,30 @@ all.
 
 ## When your data changes
 
-Rerun the pipeline locally, rebuild the UI, and push again:
+**The order of these commands matters and is not obvious.** `graph-populate`
+reads what the earlier steps landed, so it has to run *last*. Run it too early
+and everything still exits 0 — but the graph never sees the vessel encounters,
+the alert rules find nothing to fire on, and the Watch screen comes out empty
+with no error anywhere explaining why. That is exactly how this bit us.
+
+```
+maritime-isr scenario generate          # the world: vessels, positions, truth
+maritime-isr build-tracks               # positions -> tracks and encounters
+maritime-isr radar correlate --write    # radar picture against AIS (slow, ~35 min)
+maritime-isr baselines derive           # what normal looks like per area
+maritime-isr graph-populate             # LAST: reads everything above
+```
+
+Then rebuild the UI and push:
 
 ```
 cd frontend && npm run build && cd ..
 bash deploy/push_to_space.sh YOUR-USERNAME/maritime-isr-api
 ```
+
+*Success:* `maritime-isr alerts` prints at least one alert. If it prints
+nothing, the graph did not see the encounters — check that `graph-populate` ran
+after `build-tracks`, not before.
 
 Vercel redeploys itself whenever you push to GitHub. The Space does not — it
 only changes when you run that script.
