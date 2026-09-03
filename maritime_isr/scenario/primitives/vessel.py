@@ -26,9 +26,17 @@ from dataclasses import dataclass, field
 from ..identifiers import mint_imo, mint_mmsi
 
 #: Every class the generator can build. Order is fixed so a seeded run is stable.
+#:
+#: **Appended to, never reordered.** The four classes after `naval` were added
+#: when the corpus was widened (see `scenario/fleet.py`): a picture of the
+#: Arabian Sea that contains no container ship, no harbour tug, no offshore
+#: supply vessel and no ferry is not a thin picture, it is a wrong one — and a
+#: type classifier trained on a fleet that has never seen a tug will confidently
+#: call the first one it meets a fishing boat.
 CLASSES = (
     "VLCC", "Suezmax", "Aframax", "product_tanker", "bulker", "reefer",
     "general_cargo", "fishing", "dhow", "naval",
+    "container", "tug", "osv", "ferry",
 )
 
 #: Classes that carry liquid cargo — the ones an STS transfer scenario can use

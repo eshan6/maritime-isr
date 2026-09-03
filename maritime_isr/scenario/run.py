@@ -26,8 +26,7 @@ import pyarrow.parquet as pq
 from ..config import DATA_ROOT, GRAPH_DB_NAME
 from ..ingest.landing import (conformed_dir, read_table, split_real_synthetic,
                               table_day_partitions)
-from .cast import (FISHING_FLEET_SIZE, PRINCIPALS, RADAR_PRINCIPALS,
-                   build_cast)
+from .cast import build_cast, cohorts, expected_vessel_count
 from .identifiers import assert_no_collisions, reserve_against_corpus
 from .land import ALL_TABLES, land_world
 from .profile import CorpusProfile
@@ -72,7 +71,14 @@ def generate(seed: int = 7, *, land: bool = True, radar: bool = True,
     # around them. Done here rather than inside the mint functions because it
     # reads the landed tables once, and because the operator has to be told:
     # hull assignment depends on the corpus present at generation time.
-    taken = reserve_against_corpus()
+    #
+    # The profile is handed over so that the reservation and the collision
+    # guard below consult the *same* set of real identifiers. Where there is no
+    # landed corpus — every sandbox, and the operator's laptop before ingest —
+    # only the profile knows which reserved-band numbers a real transmitter has
+    # broadcast, and a guard that checks against a set it never reserved against
+    # fails the build instead of preventing the clash.
+    taken = reserve_against_corpus(profile=profile)
     if taken["imos"] or taken["mmsis"]:
         print(f"[scenario] {len(taken['imos'])} reserved IMO(s) and "
               f"{len(taken['mmsis'])} reserved MMSI(s) are already used by the "
@@ -244,10 +250,22 @@ def format_generation(res: GenerationResult) -> str:
                  f"deliberate misses {s['deliberate_misses']}")
     lines.append(f"  expected to fire: {s['expected_to_fire']}")
     lines.append("")
-    lines.append(f"cast          : {len(PRINCIPALS)} principal vessel(s) + "
-                 f"{FISHING_FLEET_SIZE} fishing-fleet vessel(s) + "
-                 f"{len(RADAR_PRINCIPALS)} coastal-radar vessel(s) "
-                 f"= {len(w.vessels)} total")
+    # Every cohort, summed, and then reconciled against the hulls that actually
+    # exist. The old line named three of the ten groups and then wrote
+    # "= N total", so the arithmetic printed in the operator's face had not
+    # closed since the commercial fleet was added and was out by four hundred
+    # once the wider fleet was. A report whose own sum is wrong teaches its
+    # reader to skim it, and skimming this report is how a silent corruption
+    # gets through — so the mismatch is stated rather than left to be noticed.
+    lines.append("cast")
+    for label, n in cohorts():
+        lines.append(f"  {label:<28}{n:>10,}")
+    expected = expected_vessel_count()
+    lines.append(f"  {'= total':<28}{expected:>10,}")
+    if expected != len(w.vessels):
+        lines.append(f"  MISMATCH: {len(w.vessels):,} hull(s) were actually "
+                     f"minted — a cohort is missing from `cast.cohorts()` or a "
+                     f"hull was minted outside one")
     lines.append("")
 
     lines.append("BUILT (in memory)")

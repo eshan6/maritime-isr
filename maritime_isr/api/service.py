@@ -157,7 +157,15 @@ def list_vessels(*, flag: Optional[str] = None, sanctioned: Optional[bool] = Non
     # for the 9,184-vessel real one. On a large corpus, score only the vessels
     # worth scoring (alerted or sanctioned); the rest render "—". A small corpus
     # gets the full, cached index so every scenario vessel shows a number.
-    if len(current) <= 500:
+    #
+    # The bound is 2,000, not 500. 500 was chosen when the synthetic corpus held
+    # 253 hulls; at 674 it silently crossed over, and the Vessels tab started
+    # rendering "—" for ~600 hulls that had scored fine the week before. That
+    # reads as a regression rather than as a deliberate large-corpus path, and
+    # nothing in the run said which had happened. 2,000 keeps the whole
+    # synthetic corpus on the full path with room to grow, and still leaves the
+    # 9,184-vessel real corpus on the sparse one, which is who the guard is for.
+    if len(current) <= 2000:
         risk = gsvc.risk_index()
     else:
         interesting = set(sanctions.keys()) | gsvc.alert_subjects()

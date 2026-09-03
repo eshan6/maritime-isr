@@ -22,6 +22,7 @@ from collections import deque
 from contextlib import contextmanager
 from typing import Iterator, Sequence
 
+from ..assistant.attribution import describe as describe_attribution
 from ..assistant.attribution import origin_of
 from ..config import GRAPH_DB_NAME, TRAVERSAL_MAX_NODES, cfg
 from ..graph import GraphStore
@@ -579,6 +580,20 @@ def neighbourhood(vessel_id: str, hops: int = 1) -> dict | None:
 # alerts
 # --------------------------------------------------------------------------
 
+def _attr(hop: dict, props: dict) -> dict:
+    """`origin` and `derivation` for one evidence hop.
+
+    `source_ref` is where the derived cases are recognised — `events` and
+    `ownership_chains` are internal storage, not places anyone outside could
+    look — so it is read off the hop or its props before falling back to the
+    source id alone.
+    """
+    return describe_attribution({
+        "source_id": hop.get("source"),
+        "source_ref": hop.get("source_ref") or props.get("source_ref"),
+    })
+
+
 def _evidence_hops(evidence: list) -> list[dict]:
     hops = []
     for h in evidence or []:
@@ -586,6 +601,7 @@ def _evidence_hops(evidence: list) -> list[dict]:
             hops.append({"detail": str(h), "props": {}})
             continue
         props = h.get("props", {}) if isinstance(h.get("props"), dict) else {}
+        attr = _attr(h, props)
         hops.append({
             "edge": h.get("edge") or h.get("edge_type"),
             "src": h.get("src"),
@@ -600,7 +616,12 @@ def _evidence_hops(evidence: list) -> list[dict]:
             # operator to trust a module name. `origin` is the answer to "and
             # who says that", which is the question they are actually asking
             # when they read an accusation.
-            "origin": origin_of(h.get("source")),
+            "origin": attr["origin"],
+            # And what this system then did to those facts. `origin` alone
+            # attributes a derived claim to the feed it was read from, which is
+            # the source asserting something it never said — the second half of
+            # the split ADR-038 draws.
+            "derivation": attr["derivation"],
             "detail": h.get("detail") or props.get("detail"),
             "props": props,
         })

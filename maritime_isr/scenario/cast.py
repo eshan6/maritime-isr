@@ -31,7 +31,7 @@ from datetime import timedelta
 
 from .identifiers import mint_sanctions_ref
 from .primitives.org import Organization
-from . import commercial
+from . import commercial, fleet
 from .primitives.vessel import make_vessel
 from .world import T0, ScenarioWorld, week
 
@@ -138,9 +138,17 @@ def build_organizations(world: ScenarioWorld) -> None:
     # The commercial fleet's operators, including the designated minority.
     # Added after the named ones so their sanctions serials never renumber.
     commercial.build_commercial_orgs(world, designation_day=designation_day)
-    commercial.commercial_sanction_entries(
+    n_commercial = commercial.commercial_sanction_entries(
         world, designation_day=designation_day,
         first_serial=len(named_designations) + 1)
+
+    # ...and the wider fleet's operators after those, for the same reason a
+    # third time: a listing serial is part of an entry id an operator may quote,
+    # so a new group of companies must never renumber an existing designation.
+    fleet.build_fleet_orgs(world, designation_day=designation_day)
+    fleet.fleet_sanction_entries(
+        world, designation_day=designation_day,
+        first_serial=len(named_designations) + 1 + n_commercial)
 
 
 # --------------------------------------------------------------------------
@@ -577,6 +585,14 @@ def build_vessels(world: ScenarioWorld) -> None:
         )
         world.add_vessel(v)
 
+    # ...and the wider fleet after even that, from its own derived stream, for
+    # the fifth instance of the same reason and the first at a scale where it
+    # would have been unrecoverable: four hundred hulls minted through
+    # `world.rng` would have re-rolled every background vessel behind them and
+    # made every previously measured figure in this project incomparable. See
+    # `fleet.build_fleet_vessels`.
+    fleet.build_fleet_vessels(world, used_names)
+
     # What a handful of hulls broadcast about their own type, before the
     # registry is written from it. Order matters here too and in the same
     # direction as the IMO break below: the registry records the *declared*
@@ -772,12 +788,43 @@ def build_ownership(world: ScenarioWorld) -> None:
         own(vkey, ORG_OPAQUE_AE, conf=0.55, notes="A2 chain, common charterer")
 
     commercial.build_commercial_ownership(world)
+    fleet.build_fleet_ownership(world)
 
 
 def build_cast(world: ScenarioWorld) -> None:
     build_organizations(world)
     build_vessels(world)
     build_ownership(world)
+
+
+def cohorts() -> list[tuple[str, int]]:
+    """(label, hull count) for every group the cast mints, in minting order.
+
+    **Exists so the generation report can be checked rather than read.** The
+    report used to print three of the eight groups and then `= N total`, and the
+    two numbers had not agreed since the commercial fleet was added: it said
+    "74 principal + 40 fishing + 6 coastal-radar = 253 total", which is a
+    reconciliation failure printed in the operator's face on every run. A report
+    whose own arithmetic does not close teaches the reader to skim it, and this
+    project's whole defence against silent corruption is a report somebody
+    actually checks. `run.format_generation` now sums this list and says so.
+    """
+    return [
+        ("principal cast", len(PRINCIPALS)),
+        ("fishing-fleet decoy", FISHING_FLEET_SIZE),
+        ("commercial fleet", commercial.fleet_size()),
+        ("coastal-radar cast", len(RADAR_PRINCIPALS)),
+        ("zone cast", len(ZONE_PRINCIPALS)),
+        ("factor cast", len(FACTOR_PRINCIPALS)),
+        ("paperwork cast", len(PAPERWORK_PRINCIPALS)),
+        ("late additions", len(LATE_ADDITIONS)),
+        ("wider fleet (archetypes)", fleet.bulk_size()),
+        ("wider fleet (group W)", len(fleet.SCENARIO_HULLS)),
+    ]
+
+
+def expected_vessel_count() -> int:
+    return sum(n for _, n in cohorts())
 
 
 def principal_keys(role: str | None = None) -> list[str]:

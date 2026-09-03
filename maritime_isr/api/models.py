@@ -232,6 +232,13 @@ class EvidenceHop(BaseModel):
     #: was being set on the dict and silently discarded on serialisation, so
     #: alert cards kept printing the raw module id they were meant to replace.
     origin: Optional[str] = None
+    #: What this system then DID to those facts (ADR-038). Empty when a record
+    #: was landed as-is, populated whenever we computed, compared, joined or
+    #: inferred. Declared here for the same reason `origin` had to be: a
+    #: response model that omits a field does not error, it deletes — so the
+    #: derivation was being set and silently dropped on the way out, and the
+    #: alert card could only ever show half the attribution.
+    derivation: Optional[str] = None
     detail: Optional[str] = None
     props: dict = {}
 

@@ -60,7 +60,8 @@ from .readers import normalise_ws
 __all__ = ["extract_notification", "FIELD_PATTERNS", "EXTRA_SYNONYMS",
            "UNSUPPORTED_LABELS", "parse_eta", "parse_imo", "parse_crew",
            "parse_call_sign", "squash", "OCR_CONFUSIONS", "ABSENT_METHOD",
-           "is_declared_absence"]
+           "UNREADABLE_METHOD", "SHAPED_FIELDS",
+           "is_declared_absence", "is_heading_pair"]
 
 
 #: Characters OCR substitutes for one another, folded before label matching.
@@ -191,6 +192,24 @@ UNSUPPORTED_LABELS: tuple[str, ...] = (
     "Agent Address", "Agent's Address", "Owner Address", "Owner's Address",
     "Agent Contact", "Agent Telephone", "Agent Email", "Owner Contact",
     "Address", "Telephone", "Email", "Fax", "Contact Number", "Mobile",
+    # the columns of a crew list and a cargo manifest. Every one of these is a
+    # *heading*, and every one of them sits next to another heading in the row
+    # a spreadsheet reader hands back — so they are refused for the same reason
+    # "Draught on Arrival" is: the value beside them is not the value we would
+    # be recording. "Nationality" is deliberately NOT here: it is how several
+    # agencies spell the vessel's flag, and refusing it would lose that field
+    # across the corpus to protect a crew table. `is_heading_pair` is what
+    # protects the crew table, and it does so without giving up a real label.
+    "Family Name", "Given Names", "Surname", "Rank", "Rating", "Capacity",
+    "Duty", "Date of Birth", "Place of Birth", "Passport No.",
+    "Passport Number", "Seaman's Book No.", "Nature of Identity Document",
+    "No.", "Sl. No.", "Serial No.", "Item", "Marks & Nos.", "Marks and Numbers",
+    "No. of Packages", "Number and Kind of Packages", "Kind of Packages",
+    "Gross Weight", "Net Weight", "Measurement", "Bill of Lading No.",
+    "B/L No.", "Container No.", "Seal No.",
+    # ports and dates the new kinds of paper carry that we do not model
+    "Port of Clearance", "Port Cleared", "Clearance Granted On",
+    "Date of Clearance", "Port of Survey", "Place of Issue",
     # everything else a form asks for
     "Purpose of Call", "Nature of Call", "Number of Passengers", "Passengers",
     "No. of Passengers", "Security Level", "ISSC", "ISSC Certificate",
@@ -585,6 +604,13 @@ _ABSENCE_WORDS = frozenset((
 #: Method suffix on a field the form explicitly declined to answer.
 ABSENT_METHOD = "declared_absent"
 
+#: Method suffix on a **shaped** field whose text the parser could not read as
+#: that shape at all. Distinct from :data:`ABSENT_METHOD` — "the agent wrote
+#: NIL" and "we found something on the IMO line and it was not an IMO" are
+#: different facts about a document, and a serving layer that showed them the
+#: same way would tell an operator the form was silent when it was not.
+UNREADABLE_METHOD = "unreadable"
+
 
 def is_declared_absence(raw) -> bool:
     """Did the agent write "nothing here", as opposed to leaving it blank?
@@ -624,11 +650,59 @@ def _clean_text(raw: str) -> Optional[str]:
     return v or None
 
 
+def is_heading_pair(label: str, value: str) -> bool:
+    """Is this a label beside another label — a table's heading row?
+
+    **A value that is itself a field name is not an answer.** A crew list is a
+    ruled table, and a spreadsheet reader walking it pairs every cell with its
+    neighbour: the heading row of an IMO FAL Form 5 arrives as
+    ``"Rank: Nationality"``, and "Nationality" is a label this module knows —
+    it is how half the agencies in the corpus spell the vessel's flag. Read
+    naively, a crew list sets the flag of the ship to the string "Date of
+    Birth".
+
+    The refusal is *format-blind and label-driven*, which is the only shape it
+    is allowed to have. A crew-list branch in the reader would be a
+    source-specific hack in a module whose entire purpose is that there are
+    none (CLAUDE.md §4.5): the same trap is in a Word table, in a PDF's ruled
+    columns and in a manifest's heading row, and one rule covers all of them.
+
+    Both sides must be *exactly* recognised labels — the containment pass is
+    not used — because a real value can easily contain a field word ("Oceanic
+    Agency Ltd", "Port Said"), and refusing those would lose answers to protect
+    against a problem they do not have. A value carrying a digit is never a
+    heading: "Crew: 22" survives, and so does a date.
+    """
+    if not value or any(c.isdigit() for c in value):
+        return False
+    return _recognised(label) and _recognised(value)
+
+
 _PARSERS = {
     "imo": parse_imo,
     "crew_count": parse_crew,
     "call_sign": parse_call_sign,
 }
+
+#: Fields with a **defined shape** — a seven-digit hull number, an integer, a
+#: radio call sign. Text that is not that shape is not a low-confidence reading
+#: of the field; it is not the field.
+#:
+#: This matters because of one line that appears on a real form. The IMO's own
+#: arrival declaration is titled *"IMO FAL Form 1 (General Declaration —
+#: Arrival)"*, and the extractor read the word IMO at the head of it as the
+#: label, the rest of the title as the value, and landed
+#: ``imo = "Arrival) | Ref. No. ARR-0025"`` at confidence 0.485 on documents
+#: that carried no IMO at all — an identifier **invented from a letterhead**,
+#: in the column a resolver consults first. Thirty-two documents in one
+#: measured run of 381 carried one.
+#:
+#: Free text keeps the old behaviour and should: a cargo description the
+#: parser cannot normalise is still what the agent wrote, and an operator can
+#: read it. "Some text we could not parse" is a usable answer for a cargo and a
+#: dangerous one for a hull number, and the difference is exactly whether the
+#: field has a shape to be wrong about.
+SHAPED_FIELDS = frozenset(_PARSERS)
 
 
 #: Fields whose value is a date/time. Both go through `parse_eta`, which is
@@ -825,6 +899,8 @@ def extract_notification(passages) -> dict:
             if field is None and i == 0 and carry:
                 field = _label_of(f"{carry} {label_raw}", exact_only=True)
             if field is None:
+                continue
+            if is_heading_pair(label_raw, value_raw):
                 continue
             held = out.get(field)
             if held is not None and held.value is not None:

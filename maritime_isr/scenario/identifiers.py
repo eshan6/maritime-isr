@@ -118,7 +118,8 @@ def _nth_unblocked(first: int, n: int, blocked: set[int]) -> int:
     return v
 
 
-def reserve_against_corpus(real_imos=None, real_mmsis=None) -> dict:
+def reserve_against_corpus(real_imos=None, real_mmsis=None, *,
+                           profile=None) -> dict:
     """Exclude reserved-band numbers a real corpus on this machine already uses.
 
     **The reserved bands are a reservation, not a fact about other people's
@@ -140,14 +141,35 @@ def reserve_against_corpus(real_imos=None, real_mmsis=None) -> dict:
     does mean hull assignment depends on the corpus present at generation time,
     which is why this returns a report the caller is expected to print rather
     than doing it silently.
+
+    **`profile` must be the same profile `assert_no_collisions` will use.**
+    Reserving and checking have to consult the *same* set of real identifiers or
+    the pair is not a guard at all: it reserves against one universe and then
+    fails the build against a larger one. That is exactly what happened when the
+    corpus was widened. In a sandbox there is no landed corpus, so the reserve
+    step found nothing and blocked nothing, while the collision check fell back
+    to the corpus profile and its 108 reserved-band IMOs — numbers a real GFW
+    transmitter had broadcast. At 253 hulls the serials stopped below the first
+    of them and nobody noticed; at 674 hulls serial 525 landed exactly on
+    1005253 and generation became impossible at every seed. The asymmetry was
+    the bug, not the growth: passing the profile here makes the two steps agree
+    by construction rather than by luck about how many hulls there are.
     """
     global _BLOCKED_IMO_PREFIXES, _BLOCKED_MMSIS
+    source = "landed corpus"
     if real_imos is None and real_mmsis is None:
         found = _real_identifiers_from_corpus()
-        if found is None:
+        if found is not None:
+            real_imos, real_mmsis, ofac = found
+        elif profile is not None:
+            source = f"corpus profile ({profile.origin})"
+            real_imos = set(profile.real_imos())
+            real_mmsis = set(profile.real_mmsis())
+            ofac = set(profile.ofac_imos())
+        else:
             _BLOCKED_IMO_PREFIXES, _BLOCKED_MMSIS = set(), set()
-            return {"source": "no landed corpus", "imos": [], "mmsis": []}
-        real_imos, real_mmsis, ofac = found
+            return {"source": "nothing (no corpus, no profile)",
+                    "imos": [], "mmsis": []}
         real_imos = set(real_imos) | set(ofac)
 
     imos = set()
@@ -169,7 +191,7 @@ def reserve_against_corpus(real_imos=None, real_mmsis=None) -> dict:
             mmsis.add(m)
 
     _BLOCKED_IMO_PREFIXES, _BLOCKED_MMSIS = imos, mmsis
-    return {"source": "landed corpus",
+    return {"source": source,
             "imos": sorted(p * 10 + imo_check_digit(p) for p in imos),
             "mmsis": sorted(mmsis)}
 

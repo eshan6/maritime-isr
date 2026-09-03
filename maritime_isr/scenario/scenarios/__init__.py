@@ -15,6 +15,7 @@ from __future__ import annotations
 from . import background, commercial_traffic, decoys, group_a, group_b
 from . import group_c, group_d, group_e, group_f, group_o, group_p, group_r
 from . import group_z
+from . import fleet_traffic, group_w
 from . import misses
 
 #: Execution order. Background first, then the spine's early identity events,
@@ -45,6 +46,24 @@ ALL = (
     *group_o.SCENARIOS,
     *decoys.SCENARIOS,
     *misses.SCENARIOS,
+    # The wider fleet runs after every named group and before the paperwork.
+    #
+    # **After**, for the fifth instance of the argument above and the strongest
+    # one: every hull it touches is new and unshared, and — unlike the groups
+    # above — it draws from its own derived RNG rather than `world.rng`, so
+    # inserting it here leaves the existing choreography byte-identical rather
+    # than merely equivalent. Appending four hundred hulls through the shared
+    # stream would have re-rolled the whole corpus behind them (see
+    # `scenario/fleet.py`).
+    #
+    # **Before the paperwork**, and that is load-bearing: `group_p` files one
+    # pre-arrival notification per port call in the window, so a fleet that
+    # arrived after it had run would land four hundred berthings with no
+    # notification on file — which is precisely the P3 contradiction, fired
+    # four hundred times by our own ordering rather than by anything a vessel
+    # did.
+    *fleet_traffic.SCENARIOS,
+    *group_w.SCENARIOS,
     # The paperwork group runs LAST and that is load-bearing, not stylistic:
     # it builds one notification per port call and therefore needs every port
     # call the corpus will ever contain to exist already. Running it earlier

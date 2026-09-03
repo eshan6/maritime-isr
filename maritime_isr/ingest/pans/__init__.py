@@ -26,8 +26,11 @@ difference genuinely lives.
 from __future__ import annotations
 
 from .extract import extract_notification, FIELD_PATTERNS
+from .kinds import classify_document, kind_label
 from .readers import Passage, READERS, read_document, reader_availability
 from .resolve import resolve_notification
+from .service import vessel_documents
 
 __all__ = ["Passage", "READERS", "read_document", "reader_availability",
-           "extract_notification", "FIELD_PATTERNS", "resolve_notification"]
+           "extract_notification", "FIELD_PATTERNS", "resolve_notification",
+           "classify_document", "kind_label", "vessel_documents"]

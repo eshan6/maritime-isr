@@ -971,3 +971,134 @@ p:last-child { margin-bottom: 0; }
 }
 .evq-card.is-settled { opacity: 0.72; }
 .evq-card.is-settled:hover { opacity: 1; }
+
+/* ---- three-valued outcomes ---------------------------------------------
+ *
+ * `contradiction`, `ok` and `not_checkable` are three answers, not two and a
+ * shade. Collapsing the third into the second reports a corpus nobody could
+ * check as a corpus that passed, which is the failure ADR-032 (b) exists to
+ * prevent — so the three are separated by SHAPE as well as by hue: a filled
+ * mark, an outlined mark, and a dashed one. Colour alone would not carry it;
+ * three of the family hues on this surface already sit under 3:1 contrast, and
+ * a reader with a colour deficiency would see two states where there are
+ * three. Every colour is a token. */
+.outcome {
+  display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto;
+  padding: 1px 8px; border-radius: 10px; font-size: var(--fs-micro);
+  font-weight: var(--w-bold); letter-spacing: 0.02em; white-space: nowrap;
+  border: 1px solid transparent;
+}
+.outcome .glyph { font-weight: var(--w-bold); }
+.outcome-contradiction {
+  color: var(--red); background: var(--red-weak); border-color: var(--red);
+}
+.outcome-ok {
+  color: var(--green); background: transparent; border-color: var(--green);
+}
+.outcome-not_checkable {
+  color: var(--ink-3); background: transparent;
+  border-color: var(--border-strong); border-style: dashed;
+}
+.outcome-error {
+  color: var(--amber); background: var(--amber-weak); border-color: var(--amber);
+}
+
+/* One check, as a row. The left rule repeats the outcome so a column of them
+ * can be scanned without reading every pill. */
+.chk { padding: 9px 0 9px 12px; border-left: 3px solid var(--border); }
+.chk + .chk { border-top: 1px solid var(--border); }
+.chk-contradiction { border-left-color: var(--red); }
+.chk-ok { border-left-color: var(--green); }
+.chk-not_checkable { border-left-style: dashed; border-left-color: var(--border-strong); }
+.chk-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.chk-name {
+  font-size: var(--fs-meta); color: var(--ink-2); font-variant-numeric: tabular-nums;
+}
+.chk-statement { color: var(--ink); line-height: 1.5; margin-top: 4px; }
+.chk-detail {
+  font-size: var(--fs-meta); color: var(--ink-2); margin-top: 4px;
+  padding-left: 10px; border-left: 2px solid var(--border); line-height: 1.5;
+}
+
+/* The three-way tally. A bar, because the shape of the split is the finding:
+ * a check that is "not checkable" on nine tenths of a corpus has told you
+ * almost nothing, and a table of three numbers hides that. */
+.tri { display: flex; height: 9px; border-radius: 5px; overflow: hidden;
+  background: var(--surface-2); gap: 1px; }
+.tri > i { display: block; min-width: 2px; }
+.tri .i-contradiction { background: var(--red); }
+.tri .i-ok { background: var(--green); }
+.tri .i-not_checkable {
+  background: repeating-linear-gradient(
+    45deg, var(--border-strong) 0 3px, var(--surface-2) 3px 6px);
+}
+.tri-key { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 6px;
+  font-size: var(--fs-meta); color: var(--ink-2); }
+.tri-key b { font-variant-numeric: tabular-nums; color: var(--ink); }
+
+/* ---- attribution: who says so, and what we then did --------------------- */
+.attrib { font-size: var(--fs-meta); color: var(--ink-2); margin-top: 6px; }
+.attrib .who { color: var(--ink); }
+.attrib-derived {
+  font-size: var(--fs-micro); color: var(--ink-3); margin-top: 3px;
+  padding-left: 10px; border-left: 2px solid var(--border); line-height: 1.45;
+}
+
+/* ---- a capture with no picture behind it -------------------------------
+ *
+ * There is no camera. The frame carries that on itself rather than in a
+ * footnote, because a rectangle where a photograph belongs is read as a
+ * photograph. The hatching is the point: it says "no image" at a glance and it
+ * survives both themes because it is drawn from tokens. */
+.capture { border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 0; margin-bottom: 10px; overflow: hidden; }
+.capture-frame {
+  height: 74px; display: flex; align-items: center; justify-content: center;
+  background: repeating-linear-gradient(
+    135deg, var(--surface-2) 0 8px, var(--surface) 8px 16px);
+  border-bottom: 1px solid var(--border);
+}
+.capture-stamp {
+  border: 1px dashed var(--amber); color: var(--amber);
+  background: var(--amber-weak); border-radius: var(--radius-sm);
+  padding: 3px 10px; font-size: var(--fs-micro); font-weight: var(--w-bold);
+  letter-spacing: 0.08em; text-transform: uppercase;
+}
+.capture-body { padding: 9px 11px; }
+.capture-why {
+  font-size: var(--fs-meta); color: var(--ink-2); margin-top: 6px;
+  padding-left: 10px; border-left: 2px solid var(--fam-imagery);
+  line-height: 1.5;
+}
+
+/* ---- the confusion matrix ---------------------------------------------- */
+.matrix-wrap { overflow-x: auto; }
+.matrix { border-collapse: collapse; font-size: var(--fs-micro);
+  font-variant-numeric: tabular-nums; }
+.matrix th, .matrix td {
+  border: 1px solid var(--border); padding: 4px 7px; text-align: right;
+  white-space: nowrap;
+}
+.matrix th { color: var(--ink-2); font-weight: var(--w-med);
+  background: var(--surface); }
+.matrix th.rowhead { text-align: left; }
+.matrix td.zero { color: var(--ink-3); }
+.matrix td.diag { background: var(--green-weak); color: var(--ink);
+  font-weight: var(--w-bold); }
+.matrix td.off { background: var(--red-weak); color: var(--ink); }
+
+/* A merged group: the classes motion cannot pull apart, named together. */
+.merged {
+  display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  border: 1px dashed var(--border-strong); border-radius: var(--radius-sm);
+  padding: 4px 9px; margin: 0 6px 6px 0; font-size: var(--fs-meta);
+  color: var(--ink-2);
+}
+.merged b { color: var(--ink); }
+
+/* ---- the method page ---------------------------------------------------- */
+.method-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 12px;
+}
+.stack > * + * { margin-top: 12px; }

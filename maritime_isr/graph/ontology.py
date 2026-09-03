@@ -66,6 +66,16 @@ EDGE_TYPES_V1: dict[str, dict] = {
                           half_life_days=365.0, kind="state"),
     "operated-by":   dict(src=["vessel"], dst=["organization", "person"],
                           half_life_days=270.0, kind="state"),
+    # Technical management is NOT ownership and must not be stored as it. A
+    # manager is often inferred from a shared correspondence address — a
+    # candidate, never a finding — and the corpus asserts it at ~0.55 while
+    # asserting an operator at 0.8. Without a kind of its own the edge was
+    # being coerced to `owned-by`, which restated a weak inference as the
+    # strongest claim the ontology can make about a hull, and lost the
+    # original beyond recovery. Shorter half-life than operated-by: a
+    # management contract rotates more readily than an operating one.
+    "managed-by":    dict(src=["vessel"], dst=["organization", "person"],
+                          half_life_days=180.0, kind="state"),
     "flagged-to":    dict(src=["vessel"], dst=["flag_state"],
                           half_life_days=730.0, kind="state"),
     # `contact` appears on the source side of the three sensed-behaviour edges

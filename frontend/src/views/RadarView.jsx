@@ -17,6 +17,7 @@
 //     stamped forty times stops being read after the second.
 import { useEffect, useState } from "react";
 import { api } from "../api.js";
+import { Outcome, SourceLine } from "../components/checks.jsx";
 import { fmtDateTime, num } from "../lib/format.js";
 
 //: Human wording for every verdict the cascade can return. A raw enum in the
@@ -177,7 +178,10 @@ function ContactCard({ c, compact = false }) {
         marginBottom: 10,
         padding: "11px 13px",
         opacity: compact ? 0.82 : 1,
-        borderLeft: `3px solid ${v.tone === "finding" ? "#b0221b" : "#98a4ae"}`,
+        // Tokens, not literals. These two were a hardcoded red and grey, so
+        // the card kept a light-theme rule down the side of a dark screen.
+        borderLeft: `3px solid ${
+          v.tone === "finding" ? "var(--red)" : "var(--border-strong)"}`,
       }}
     >
       <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
@@ -227,8 +231,10 @@ function ContactCard({ c, compact = false }) {
           style={{
             marginTop: 9,
             padding: "8px 10px",
-            background: "rgba(176,34,27,0.07)",
-            border: "1px solid rgba(176,34,27,0.25)",
+            // Both were rgba() literals of the light theme's red, so this
+            // panel stayed a pale pink smear on a dark screen.
+            background: "var(--red-weak)",
+            border: "1px solid var(--red)",
             borderRadius: 5,
           }}
           className="t-meta prose"
@@ -238,6 +244,101 @@ function ContactCard({ c, compact = false }) {
           {fmtDateTime(c.went_dark_at)}, position {num(c.went_dark_lat, 4)},{" "}
           {num(c.went_dark_lon, 4)}. radar held her continuously across the
           transition.
+        </div>
+      )}
+
+      <ContactProfile candidateId={c.candidate_id} />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// The sentence Area 3 exists to produce.
+//
+// *"'Unidentified contact' is a position. 'Probable fishing vessel, loitering,
+// no transponder, inside territorial waters' is intelligence."* Everything
+// needed for it was already held and had never been assembled onto one object,
+// and once it was, it was reachable only from Python.
+//
+// It PROFILES and it never re-decides darkness. The cascade owns that verdict
+// and the card above prints it; this adds a description, and every part it
+// could not establish is listed rather than dropped.
+// ---------------------------------------------------------------------------
+function ContactProfile({ candidateId }) {
+  const [open, setOpen] = useState(false);
+  const [p, setP] = useState(null);
+  const [err, setErr] = useState(null);
+
+  useEffect(() => {
+    if (!open || p || err) return;
+    let live = true;
+    api
+      .contactProfile(candidateId)
+      .then((r) => live && setP(r))
+      .catch((e) => live && setErr(String(e.message || e)));
+    return () => {
+      live = false;
+    };
+  }, [open, candidateId, p, err]);
+
+  if (!candidateId) return null;
+  return (
+    <div style={{ marginTop: 9 }}>
+      <button className="btn-link" onClick={() => setOpen((o) => !o)}>
+        {open ? "hide description" : "what can be said about her"}
+      </button>
+      {open && !p && !err && <div className="muted t-meta">Loading…</div>}
+      {open && err && (
+        <div className="chk chk-not_checkable" style={{ marginTop: 6 }}>
+          <div className="chk-head">
+            <Outcome value="error" />
+          </div>
+          <div className="chk-statement">
+            The description could not be loaded. {err} The cascade&apos;s verdict
+            above is unaffected.
+          </div>
+        </div>
+      )}
+      {open && p && (
+        <div style={{ marginTop: 6 }}>
+          {p.available ? (
+            <>
+              <div className="t-med" style={{ lineHeight: 1.5 }}>
+                {p.statement}
+              </div>
+              <div className="muted t-meta" style={{ marginTop: 4 }}>
+                {p.activity && (
+                  <>
+                    activity {p.activity.replace(/_/g, " ")} at confidence{" "}
+                    {num(p.activity_confidence, 2)}.{" "}
+                  </>
+                )}
+                {p.activity_reason}
+              </div>
+              {p.gaps?.length > 0 && (
+                <div className="chk chk-not_checkable" style={{ marginTop: 8 }}>
+                  <div className="chk-head">
+                    <Outcome value="not_checkable" />
+                    <span className="chk-name">
+                      what could not be established
+                    </span>
+                  </div>
+                  <ul className="prose t-meta" style={{ margin: "5px 0 0",
+                                                        paddingLeft: 18 }}>
+                    {p.gaps.map((g, i) => (
+                      <li key={i}>{g}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              <div className="muted t-meta" style={{ marginTop: 6 }}>
+                {p.profiles_not_detects}
+              </div>
+              <SourceLine origin={p.origin} derivation={p.derivation} />
+            </>
+          ) : (
+            <div className="muted t-meta">{p.note}</div>
+          )}
         </div>
       )}
     </div>
