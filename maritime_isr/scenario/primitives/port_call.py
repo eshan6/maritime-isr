@@ -22,6 +22,7 @@ every event.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -49,6 +50,58 @@ class PortCallSpec:
 def anchorage_of(port: str) -> tuple[float, float]:
     """The waiting area for a port, or the port itself if none is recorded."""
     return ANCHORAGES.get(port, PORTS[port])
+
+
+#: How far from the nominal anchorage centre a hull actually brings up, and how
+#: far along the quay her berth sits.
+#:
+#: **A port is not a point, and treating it as one was the whole defect.**
+#: `anchorage_of` returns one coordinate and `PORTS[port]` returns one
+#: coordinate, so every hull calling at Kandla anchored at the identical spot
+#: and moored at the identical spot, each drifting inside the same 700 m
+#: station circle. The result was encounters at *exactly 0.0 metres* lasting up
+#: to 7,225 minutes — five days of two ships occupying the same water. Measured
+#: across the corpus: 25,000 encounters with a tenth-percentile closest approach
+#: of 21 m, which is a collision rather than a rendezvous, and which would teach
+#: any encounter rule to fire on ordinary port traffic.
+#:
+#: A real anchorage is kilometres across and every hull swings on her own
+#: circle. The scatter is wider than the station radius on purpose: with the
+#: radius at 350 m, two hulls have to be brought up within 700 m of each other
+#: before their circles can touch at all.
+_ANCH_SCATTER_M = (400.0, 3500.0)
+#: Berths are close together — adjacent ships a couple of hundred metres apart
+#: is real and should stay in the corpus. What must not stay is zero.
+_BERTH_SCATTER_M = (90.0, 520.0)
+#: Was 700 m. Halved so the scatter above actually separates the swinging
+#: circles rather than merely moving their centres.
+_STATION_RADIUS_M = 350.0
+
+
+def _scatter(centre: tuple[float, float], rng, span: tuple[float, float],
+             *, must_be_sea: bool) -> tuple[float, float]:
+    """A distinct spot near `centre`, drawn on the caller's seeded stream.
+
+    Per *call* rather than per vessel, because a ship does not get the same
+    square of water every time she visits — and two hulls that always anchored
+    on the same pair of spots would trade one artefact for another.
+    """
+    lo, hi = span
+    for _ in range(6):
+        brg = rng.uniform(0.0, 360.0)
+        # sqrt keeps the draw uniform over the annulus rather than crowding
+        # the inner edge, which is where the collisions would come back.
+        frac = math.sqrt(rng.uniform(0.0, 1.0))
+        cand = destination(*centre, brg, lo + frac * (hi - lo))
+        if not must_be_sea:
+            return cand
+        try:
+            from global_land_mask import globe
+            if not bool(globe.is_land(cand[0], cand[1])):
+                return cand
+        except ImportError:                                      # pragma: no cover
+            return cand
+    return centre
 
 
 def _laned(waypoints: list[tuple[float, float]],
@@ -137,8 +190,11 @@ def build_port_call(vessel, port: str, *, arrive_from: tuple[float, float],
     """
     if port not in PORTS:
         raise ValueError(f"unknown port {port!r}")
-    berth = PORTS[port]
-    anch = anchorage_of(port)
+    # Each call gets its own water. See `_ANCH_SCATTER_M` — sharing one
+    # coordinate is what produced five-day encounters at zero metres.
+    berth = _scatter(PORTS[port], rng, _BERTH_SCATTER_M, must_be_sea=False)
+    anch = _scatter(anchorage_of(port), rng, _ANCH_SCATTER_M,
+                    must_be_sea=True)
 
     # Route the approach around the coast rather than straight at the anchorage.
     # A direct line from a previous call anywhere down the coast crosses the
@@ -149,7 +205,8 @@ def build_port_call(vessel, port: str, *, arrive_from: tuple[float, float],
                             lane_offset_m, destination_pt=anch)]
     legs += [
         Leg("transit", target=anch, speed_kn=vessel.service_kn),
-        Leg("station", duration_h=max(anchorage_hours, 0.2), radius_m=700.0),
+        Leg("station", duration_h=max(anchorage_hours, 0.2),
+            radius_m=_STATION_RADIUS_M),
     ]
     if not skip_berth:
         legs += [
