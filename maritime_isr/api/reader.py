@@ -57,6 +57,14 @@ CONFORMED_TABLES = (
     "gfw_loitering",
     "gfw_port_visits",
     "gfw_ais_gaps",
+    # Coastal radar track reports (ADR-028). Registered so the serving layer can
+    # decimate them in SQL: unregistered, `/radar/tracks` had to read the landed
+    # table whole through the ingest layer — 468,713 rows as Python dicts to
+    # return 0.72 MB of JSON, 561 MB resident and a 1.3 GB peak, which is over
+    # the deploy host's entire allowance. This is the third time a table missing
+    # from this tuple has cost real debugging; the first two were silent wrong
+    # answers, this one took the service down.
+    "radar_track_report",
     "sanctioned_vessel_matches",
     "sar_imaging_opportunity",
     "scenario_detections",

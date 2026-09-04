@@ -6,9 +6,26 @@
 # deploy/huggingface has nowhere free to run. Vercel's Python functions cap the
 # bundle at 250 MB unzipped and this API pulls pyarrow (156 MB), pandas (76 MB)
 # and numpy (45 MB) at import — 294 MB of dependencies before a byte of corpus.
-# Render's free tier is 512 MB of RAM with no credit card, and the API's
-# measured peak is 228 MB after serving the heaviest endpoints, so it fits with
-# room to spare.
+# Render's free tier is 512 MB of RAM with no credit card, and the API fits —
+# but only since the serving layer stopped materialising whole tables.
+#
+# MEMORY, MEASURED RATHER THAN ASSUMED
+# ------------------------------------
+# The 228 MB this file used to quote was measured before the fleet tripled and
+# was wrong in a way that mattered: `/radar/tracks` and `/voi/workload` each
+# read a 468,713-row table into Python to return a fraction of it, costing
+# ~560 MB apiece and peaking at 1.3 GB. Either one killed the instance on the
+# first request. Both now decimate and count in SQL.
+#
+# What remains scales with how many requests run at once — about 65 MB each
+# over a ~250 MB floor — so `MISR_MAX_CONCURRENT_QUERIES` bounds it. Measured
+# on the scenario corpus, with the bound in force:
+#
+#     1 viewer -> 318 MB     3 viewers -> 356 MB     10 viewers -> 415 MB
+#
+# The bound is what makes those numbers flat instead of linear; without it six
+# concurrent requests reached 650 MB. A cap in the browser cannot do this job,
+# because it is per-page and two viewers simply double it.
 #
 # THE ONE REAL WEAKNESS, AND THE FIX
 # ----------------------------------
@@ -53,6 +70,12 @@ services:
         value: local
       - key: MISR_DATA_ROOT
         value: /opt/render/project/src/data
+      # The memory ceiling, and the dial to turn if the service is still
+      # OOM-killed: lowering this to 1 serialises queries and costs latency,
+      # which is survivable in a way that being restarted mid-demo is not.
+      # Raise it on a host with more than 512 MB.
+      - key: MISR_MAX_CONCURRENT_QUERIES
+        value: "2"
       # Where fetch_corpus.py pulls the corpus from. Set this in the Render
       # dashboard to the GitHub Release asset URL — see deploy/README.md. It is
       # not a secret; it is public synthetic data.

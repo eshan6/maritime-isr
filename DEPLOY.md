@@ -134,3 +134,14 @@ building real authentication first.
 **Speed.** Locally the heaviest screen answers in 0.17 s. Render's free tier
 gives a tenth of a CPU, so it will be slower — measure it once it is up rather
 than quoting the local number to anyone.
+
+**Memory is the binding constraint, not CPU.** The free instance has 512 MB and
+the API's measured peak is 318 MB for one viewer, 415 MB for ten. That headroom
+exists because `MISR_MAX_CONCURRENT_QUERIES` caps how many queries run at once
+(each costs about 65 MB); without it, six concurrent requests reached 650 MB and
+the instance was killed and restarted.
+
+*Failure — a "exceeded its memory limit" email from Render:* set
+`MISR_MAX_CONCURRENT_QUERIES` to `1` in the Render dashboard (Environment → the
+variable → Save). It serialises queries, so the map fills in more slowly, and
+that is the trade being made deliberately. No redeploy of code is needed.

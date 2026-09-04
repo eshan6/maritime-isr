@@ -54,6 +54,30 @@ class ApiSettings:
     #: the whole ais_position table (100k+ rows) into a response.
     max_page: int = 1000
 
+    #: How many blocking handlers may run at once. This is a MEMORY bound, not
+    #: a throughput knob, and it is the only one that holds when more than one
+    #: person opens the map — a limit in the browser is per-page, so two viewers
+    #: double it and ten viewers overwhelm any client-side cap.
+    #:
+    #: Measured on the scenario corpus, the map's opening burst costs about
+    #: 65 MB per request in flight over a ~250 MB floor:
+    #:
+    #:     1 -> 317 MB    2 -> 389 MB    3 -> 447 MB    4 -> 516 MB    6 -> 650 MB
+    #:
+    #: The free deploy host allows 512 MB, and the published corpus is about a
+    #: quarter larger than the one those numbers came from, which lands
+    #: concurrency 3 just over the line and leaves 2 with real headroom. Hence
+    #: the default. Raise it on a host with more memory — it costs nothing but
+    #: memory, and on 0.1 of a CPU the requests were queueing behind each other
+    #: regardless.
+    #:
+    #: Only handlers declared `def` are governed by this; `async def` ones run
+    #: on the event loop and are deliberately outside it, which is what keeps
+    #: /health answering while the queue is full.
+    max_concurrent_queries: int = field(
+        default_factory=lambda: max(
+            1, int(os.getenv("MISR_MAX_CONCURRENT_QUERIES", "2") or 2)))
+
     def header_name(self) -> str:
         return "X-API-Token"
 
