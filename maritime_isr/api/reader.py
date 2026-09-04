@@ -30,6 +30,7 @@ from typing import Iterator
 import duckdb
 
 from ..config import cfg
+from .settings import settings
 
 #: Conformed tables the API knows how to surface. A table absent from disk is
 #: simply not registered — the endpoints degrade to empty rather than 500.
@@ -178,6 +179,22 @@ def open_reader() -> Iterator[Reader]:
         con.execute("SET disabled_optimizers='statistics_propagation'")
     except duckdb.Error:
         pass
+    # Tell DuckDB what it actually has. Its own defaults are read from the
+    # machine — 80% of total RAM and one thread per core — which inside a
+    # container is a measurement of the host, not of this process's share. On
+    # the 512 MB deploy host that meant a buffer pool sized for gigabytes, and
+    # the container was OOM-killed while every individual query still looked
+    # modest. Set before any query runs, on every connection, because the pool
+    # is per-connection.
+    for stmt in (f"SET memory_limit='{settings.duckdb_memory_limit}'",
+                 f"SET threads={int(settings.duckdb_threads)}"):
+        try:
+            con.execute(stmt)
+        except duckdb.Error:
+            # An unparseable override should degrade to DuckDB's default rather
+            # than take the endpoint down — the default is wrong here, but a
+            # 500 on every query is worse than wrong.
+            continue
     reader = Reader(con)
     reader._present = _register(con)
     try:

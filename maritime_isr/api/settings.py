@@ -78,6 +78,37 @@ class ApiSettings:
         default_factory=lambda: max(
             1, int(os.getenv("MISR_MAX_CONCURRENT_QUERIES", "2") or 2)))
 
+    #: What DuckDB is allowed to hold, and how many threads it may spawn.
+    #:
+    #: **DuckDB sizes both from the MACHINE, not from the container's share of
+    #: it.** Left alone it reads total system RAM and claims 80% as its buffer
+    #: pool — on a 16 GB host that is 10.6 GiB — and takes one thread per host
+    #: core. Inside a 512 MB container on a large shared host that is a promise
+    #: the kernel will not honour: the buffer pool grows toward a limit that
+    #: does not exist, and the container is OOM-killed with the query still
+    #: looking reasonable from the inside.
+    #:
+    #: This is why bounding query CONCURRENCY alone did not stop the restarts.
+    #: A cap on how many queries run at once does nothing about how much one
+    #: query believes it may keep.
+    #:
+    #: Sized to leave room for the ~165 MB the interpreter and pyarrow occupy
+    #: before a byte is queried. Over the limit DuckDB spills to
+    #: `temp_directory` rather than failing, so the cost of it being too low is
+    #: latency, not an error.
+    #: 128 MB, measured: the map's whole opening burst and every other tab
+    #: complete without a single failure at 64 MB, so this is roughly double
+    #: what the queries actually need and still leaves the 512 MB host a wide
+    #: margin over the ~165 MB interpreter floor. The default must be right on
+    #: its own — a blueprint's env vars are only applied when the blueprint
+    #: re-syncs, not on a code redeploy, so a value that has to be typed into a
+    #: dashboard to be safe is a value that will be missing when it matters.
+    duckdb_memory_limit: str = field(
+        default_factory=lambda: os.getenv("MISR_DUCKDB_MEMORY_LIMIT", "128MB"))
+    duckdb_threads: int = field(
+        default_factory=lambda: max(
+            1, int(os.getenv("MISR_DUCKDB_THREADS", "2") or 2)))
+
     def header_name(self) -> str:
         return "X-API-Token"
 

@@ -141,7 +141,25 @@ exists because `MISR_MAX_CONCURRENT_QUERIES` caps how many queries run at once
 (each costs about 65 MB); without it, six concurrent requests reached 650 MB and
 the instance was killed and restarted.
 
-*Failure — a "exceeded its memory limit" email from Render:* set
-`MISR_MAX_CONCURRENT_QUERIES` to `1` in the Render dashboard (Environment → the
-variable → Save). It serialises queries, so the map fills in more slowly, and
-that is the trade being made deliberately. No redeploy of code is needed.
+The single biggest cause of memory limit emails was **not** the queries. DuckDB
+sizes its buffer pool at 80% of the *machine's* RAM and takes one thread per
+host core; inside a 512 MB container on a large shared host it therefore
+believed it had gigabytes and grew until the kernel killed it. `open_reader`
+now sets `memory_limit` and `threads` explicitly. Over its budget DuckDB spills
+to disk rather than failing, so the cost of the cap is latency, not errors.
+
+*Failure — a "exceeded its memory limit" email from Render:* every dial below
+is already the code's default, so first confirm the deploy is actually running
+current code (the dashboard shows the commit). Then, to trade speed for
+headroom, set in the dashboard under Environment:
+
+| Variable | Try |
+|---|---|
+| `MISR_DUCKDB_MEMORY_LIMIT` | `64MB` — measured to serve every screen without a failure |
+| `MISR_MAX_CONCURRENT_QUERIES` | `1` — serialises queries; the map fills in more slowly |
+
+> **Adding a variable to `render.yaml` is not enough on its own.** Render
+> applies a blueprint's environment when the *blueprint* syncs, not when code is
+> redeployed, so a newly added variable can be absent from a running service —
+> which is exactly what happened here. That is why every one of these has a safe
+> default in code: the service must be survivable with no environment set.

@@ -70,10 +70,25 @@ services:
         value: local
       - key: MISR_DATA_ROOT
         value: /opt/render/project/src/data
-      # The memory ceiling, and the dial to turn if the service is still
-      # OOM-killed: lowering this to 1 serialises queries and costs latency,
-      # which is survivable in a way that being restarted mid-demo is not.
-      # Raise it on a host with more than 512 MB.
+      # These three bound memory. All of them are also the code's defaults, and
+      # that is deliberate: Render applies a blueprint's env vars when the
+      # BLUEPRINT syncs, not when code is redeployed, so a variable added here
+      # may simply not exist on an already-running service. Anything the
+      # service needs in order not to be OOM-killed has to be correct with no
+      # environment at all; these entries document the dials and make them
+      # editable, they are not what makes it safe.
+      #
+      # DuckDB sizes its buffer pool at 80% of the MACHINE's RAM and takes one
+      # thread per host core — inside a 512 MB container on a big shared host
+      # that is a promise to itself the kernel will not keep, and it is what
+      # kept killing this service after the per-query fixes had landed.
+      - key: MISR_DUCKDB_MEMORY_LIMIT
+        value: "128MB"
+      - key: MISR_DUCKDB_THREADS
+        value: "2"
+      # How many queries may run at once. Lower to 1 to serialise them; that
+      # costs latency, which is survivable in a way that being restarted
+      # mid-demo is not. Raise it on a host with more than 512 MB.
       - key: MISR_MAX_CONCURRENT_QUERIES
         value: "2"
       # Where fetch_corpus.py pulls the corpus from. Set this in the Render
