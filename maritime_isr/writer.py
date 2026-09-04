@@ -12,6 +12,8 @@ from typing import Iterable
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from .ingest.landing import read_parquet_rows, read_parquet_table
+
 from .h3util import index_both
 from .store import local_partition_path
 
@@ -61,7 +63,7 @@ def _merge_dedup(path: Path, new_rows: list[dict]) -> tuple[list[dict], int]:
     """
     existing: list[dict] = []
     if path.exists():
-        existing = pq.read_table(path).to_pylist()
+        existing = read_parquet_rows(path)
 
     def key(r: dict) -> str:
         ts = r["timestamp"]
@@ -78,5 +80,5 @@ def partition_stats(store: str, hour_key: str) -> dict:
     path = local_partition_path(store, hour_key)
     if not path.exists():
         return {"exists": False, "rows": 0}
-    t = pq.read_table(path)
+    t = read_parquet_table(path)
     return {"exists": True, "rows": t.num_rows, "path": str(path)}

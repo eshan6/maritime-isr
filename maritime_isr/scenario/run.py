@@ -18,14 +18,15 @@ both real and scenario rows keeps its real ones.
 from __future__ import annotations
 
 import shutil
+import time
 from dataclasses import dataclass
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from ..config import DATA_ROOT, GRAPH_DB_NAME
-from ..ingest.landing import (conformed_dir, read_table, split_real_synthetic,
-                              table_day_partitions)
+from ..ingest.landing import (conformed_dir, read_parquet_rows, read_table,
+                              split_real_synthetic, table_day_partitions)
 from .cast import build_cast, cohorts, expected_vessel_count
 from .identifiers import assert_no_collisions, reserve_against_corpus
 from .land import ALL_TABLES, land_world
@@ -143,6 +144,26 @@ def landed_counts() -> dict:
     return out
 
 
+def _unlink(path, *, attempts: int = 5) -> None:
+    """Delete a file, tolerating a Windows scanner holding it for a moment.
+
+    Even with our own handles released, an antivirus or the search indexer can
+    hold a freshly written file briefly. That is transient, so a few short
+    retries turn a hard failure into a pause. The last attempt is allowed to
+    raise: a file that is still locked after a second is a real problem and
+    should be reported rather than silently skipped, which would leave
+    synthetic rows in a corpus the operator believes is clean.
+    """
+    for i in range(attempts):
+        try:
+            path.unlink()
+            return
+        except PermissionError:
+            if i == attempts - 1:
+                raise
+            time.sleep(0.2 * (i + 1))
+
+
 def clear() -> dict:
     """Delete every synthetic row from every table. Returns rows removed.
 
@@ -173,10 +194,9 @@ def clear() -> dict:
         n = 0
         for path in table_day_partitions(table):
             try:
-                tbl = pq.read_table(path)
+                rows = read_parquet_rows(path)
             except Exception:                               # noqa: BLE001
                 continue
-            rows = tbl.to_pylist()
             keep = [r for r in rows if not r.get("is_synthetic")]
             n += len(rows) - len(keep)
             if len(keep) == len(rows):
@@ -185,7 +205,7 @@ def clear() -> dict:
                 pq.write_table(pa.Table.from_pylist(keep), path,
                                compression="zstd")
             else:
-                path.unlink()
+                _unlink(path)
         if n:
             removed[table] = n
     # The truth table has no real rows by construction.

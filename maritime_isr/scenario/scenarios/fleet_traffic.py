@@ -29,6 +29,8 @@ corpus that only validates at a lucky seed is not reproducible.
 """
 from __future__ import annotations
 
+import hashlib
+
 from ..fleet import ARCHETYPES, fleet_rng
 from ..geography import (BOMBAY_HIGH, PORTS, haversine_m, destination,
                          initial_bearing_deg)
@@ -220,6 +222,38 @@ def _has_sea_room(p: tuple[float, float]) -> bool:
     return not bool(globe.is_land(lat, lon).any())
 
 
+#: Cross-track lane offsets, metres. Hulls working the same rotation get the
+#: same deterministic route out of `searoute`, so without this they trace the
+#: *identical* path and pass each other at nothing. Measured before the fix:
+#: 25,811 encounters among 453 hulls, 76.6 per hull, with a tenth percentile
+#: closest approach of **21 metres**. Twenty-one metres between two merchant
+#: ships is not an encounter, it is a collision, and an encounter table built
+#: from it can only teach a rendezvous rule to fire on ordinary traffic.
+_LANE_MIN_M = 300.0
+_LANE_MAX_M = 2400.0
+
+#: The lane is handed to `build_port_call`, which moves the ROUTE waypoints and
+#: lets the integrator produce the motion. Displacing the integrated track
+#: instead was tried first and is unfixable — see `port_call._laned` for the
+#: mechanism and the 75-knot container ships that ended it.
+
+
+def lane_offset_m(key: str) -> float:
+    """This hull's signed lane, in metres. Stable across regeneration.
+
+    Derived from the key by hash rather than drawn from the fleet RNG: it is a
+    property of the hull, not an event in her voyage, and a hash keeps it
+    identical no matter what order the archetypes are built in. `hash()` itself
+    is unusable here — PYTHONHASHSEED randomises it per process, so the corpus
+    would not reproduce.
+    """
+    digest = hashlib.blake2b(key.encode(), digest_size=8).digest()
+    u = int.from_bytes(digest, "big") / float(1 << 64)
+    side = 1.0 if u >= 0.5 else -1.0
+    frac = (u * 2.0) % 1.0
+    return side * (_LANE_MIN_M + frac * (_LANE_MAX_M - _LANE_MIN_M))
+
+
 def emit_fleet(world: ScenarioWorld, key: str, points, rng, *,
                suppressions=None) -> None:
     """`common.emit`, but on the fleet's own random stream.
@@ -245,7 +279,7 @@ def _room(world: ScenarioWorld, t) -> float:
 
 def _call(world: ScenarioWorld, key: str, port: str, *, pos, t, rng,
           wait_h: float, berth_h: float, scenario_id: str = "FL",
-          declare: bool = True):
+          declare: bool = True, skip_berth: bool = False):
     """One port call, landed, or None when the window has no room for it.
 
     Returns (position, time) to continue from. The overrun guard is the one
@@ -256,9 +290,11 @@ def _call(world: ScenarioWorld, key: str, port: str, *, pos, t, rng,
     """
     if _room(world, t) < MIN_REMAINING_H:
         return None
+    lane = lane_offset_m(key)
     pts, spec = build_port_call(V(world, key), port, arrive_from=pos,
                                t_start=t, rng=rng, anchorage_hours=wait_h,
-                               berth_hours=berth_h)
+                               berth_hours=berth_h, lane_offset_m=lane,
+                               skip_berth=skip_berth)
     overrun_h = (pts[-1].t - (world.t1 - hours(2))).total_seconds() / 3600.0
     if overrun_h > 0.0:
         berth_h -= overrun_h
@@ -268,7 +304,8 @@ def _call(world: ScenarioWorld, key: str, port: str, *, pos, t, rng,
             return None
         pts, spec = build_port_call(V(world, key), port, arrive_from=pos,
                                    t_start=t, rng=rng, anchorage_hours=wait_h,
-                                   berth_hours=berth_h)
+                                   berth_hours=berth_h, lane_offset_m=lane,
+                                   skip_berth=skip_berth)
     emit_fleet(world, key, pts, rng)
     add_port_visit(world, scenario_id, key, spec, declare=declare)
     return (pts[-1].lat, pts[-1].lon), pts[-1].t
@@ -562,8 +599,24 @@ def _ferry(world, key, rng, i):
     twenty minutes and goes again, which is what makes the repetition visible at
     all.
     """
-    a_name, b_name = FERRY_RUNS[i % len(FERRY_RUNS)]
-    a, b = harbour_mooring(a_name), harbour_mooring(b_name)
+    # Pick a run whose crossing is actually water. A ferry builds her own legs
+    # rather than going through `build_port_call`, so the leg guard there never
+    # sees her — and the Mumbai/JNPT pair steams straight across the harbour
+    # headland. `sea_route` does not rescue it either: on a 20 km leg its
+    # sampling is ~244 m and the headland is about that wide, so it reports the
+    # crossing clear. Checked at 40 m instead, and a run that is not water is
+    # skipped rather than sailed: losing one harbour route costs the corpus far
+    # less than a ferry driving over Nhava Sheva twenty times.
+    from ..primitives.port_call import _leg_clear
+    runs = FERRY_RUNS[i % len(FERRY_RUNS):] + FERRY_RUNS[:i % len(FERRY_RUNS)]
+    for a_name, b_name in runs:
+        a, b = harbour_mooring(a_name), harbour_mooring(b_name)
+        if _leg_clear(a, b):
+            break
+    else:
+        world.clipped.append(
+            f"fleet {key}: no ferry run with a clear crossing — hull skipped")
+        return
     v = V(world, key)
     t = week(1, hours=(i % 24) * 12 + rng.uniform(0, 6))
     pos, target = a, b
@@ -587,9 +640,15 @@ def _ferry(world, key, rng, i):
     # The berth is short for the same reason the turnarounds are: a ten-hour
     # dwell at the end swamps twenty crossings and puts the median back at zero.
     for port in (a_name, b_name):
+        # `skip_berth`: she waits off the terminal instead of mooring on the
+        # quay coordinate. This is `harbour_mooring`'s own argument applied
+        # where it was being ignored — a harbour ferry's whole track is inside
+        # one port, so the handful of alongside points the 1 km land mask reads
+        # as shore are a fifth of HER track rather than a rounding error on a
+        # merchant's three-week voyage. That is what put fl_ferry_00 18% ashore.
         got = _call(world, key, port, pos=pos, t=t + hours(rng.uniform(1, 4)),
                     rng=rng, wait_h=rng.uniform(0.2, 1.0),
-                    berth_h=rng.uniform(2.0, 5.0))
+                    berth_h=rng.uniform(2.0, 5.0), skip_berth=True)
         if got is None:
             return
         pos, t = got

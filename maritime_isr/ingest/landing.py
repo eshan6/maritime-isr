@@ -179,6 +179,36 @@ def conformed_dir(table: str) -> Path:
     return d
 
 
+
+def read_parquet_rows(path) -> list[dict]:
+    """Read a parquet partition leaving NO open handle on the file.
+
+    `pq.read_table(path)` lets Arrow open the file, and the handle can outlive
+    the call. On Linux that is invisible: an open file may be unlinked and
+    replaced. On Windows it is fatal — `PermissionError [WinError 32] the
+    process cannot access the file because it is being used by another
+    process` — and it fires on the two things this module does constantly:
+    deleting a partition after reading it, and rewriting one in place after
+    merging into it. The corpus could not be generated on Windows at all.
+
+    Reading the bytes ourselves closes the handle when `read_bytes` returns,
+    and Arrow then parses from memory with no file involved.
+    """
+    raw = path.read_bytes()
+    table = pq.read_table(pa.BufferReader(raw))
+    rows = table.to_pylist()
+    del table, raw
+    return rows
+
+
+def read_parquet_table(path):
+    """As `read_parquet_rows`, but keeping the Arrow table (schema included)."""
+    raw = path.read_bytes()
+    table = pq.read_table(pa.BufferReader(raw))
+    del raw
+    return table
+
+
 def _partition_path(table: str, day: str) -> Path:
     d = conformed_dir(table) / f"day={day}"
     d.mkdir(parents=True, exist_ok=True)
@@ -349,7 +379,7 @@ def land_table(
         path = _partition_path(table, day)
         existing: list[dict] = []
         if path.exists():
-            existing = pq.read_table(path).to_pylist()
+            existing = read_parquet_rows(path)
 
         before = {_natural_key(r, key_fields) for r in existing}
         mine: dict[str, dict] = {}
@@ -425,7 +455,7 @@ def reconcile_null_columns(table: str) -> int:
     fixed = 0
     for p in table_day_partitions(table):
         try:
-            tbl = pq.read_table(p)
+            tbl = read_parquet_table(p)
         except Exception:                                      # noqa: BLE001
             continue
         bad = [f.name for f in tbl.schema
@@ -464,7 +494,7 @@ def read_table(table: str) -> list[dict]:
     """
     rows: list[dict] = []
     for p in table_day_partitions(table):
-        for r in pq.read_table(p).to_pylist():
+        for r in read_parquet_rows(p):
             if r.get("is_synthetic") is None:
                 r["is_synthetic"] = False
             rows.append(r)

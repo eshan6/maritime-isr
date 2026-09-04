@@ -22,11 +22,12 @@ every event.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from ..geography import (ANCHORAGES, PORTS, haversine_m, initial_bearing_deg,
-                         interpolate)
+from ..geography import (ANCHORAGES, PORTS, destination, haversine_m,
+                         initial_bearing_deg, interpolate)
 from .track import Leg, TrackPoint, VoyagePlan, generate_track
 
 
@@ -51,6 +52,173 @@ def anchorage_of(port: str) -> tuple[float, float]:
     return ANCHORAGES.get(port, PORTS[port])
 
 
+#: How far from the nominal anchorage centre a hull actually brings up, and how
+#: far along the quay her berth sits.
+#:
+#: **A port is not a point, and treating it as one was the whole defect.**
+#: `anchorage_of` returns one coordinate and `PORTS[port]` returns one
+#: coordinate, so every hull calling at Kandla anchored at the identical spot
+#: and moored at the identical spot, each drifting inside the same 700 m
+#: station circle. The result was encounters at *exactly 0.0 metres* lasting up
+#: to 7,225 minutes — five days of two ships occupying the same water. Measured
+#: across the corpus: 25,000 encounters with a tenth-percentile closest approach
+#: of 21 m, which is a collision rather than a rendezvous, and which would teach
+#: any encounter rule to fire on ordinary port traffic.
+#:
+#: A real anchorage is kilometres across and every hull swings on her own
+#: circle. The scatter is wider than the station radius on purpose: with the
+#: radius at 350 m, two hulls have to be brought up within 700 m of each other
+#: before their circles can touch at all.
+_ANCH_SCATTER_M = (400.0, 3500.0)
+#: Berths are close together — adjacent ships a couple of hundred metres apart
+#: is real and should stay in the corpus. What must not stay is zero.
+_BERTH_SCATTER_M = (90.0, 520.0)
+#: Was 700 m. Halved so the scatter above actually separates the swinging
+#: circles rather than merely moving their centres.
+_STATION_RADIUS_M = 350.0
+
+
+#: Sample spacing for the leg checks below, metres. `searoute.crosses_land`
+#: scales its sampling to leg length with a floor of 64 samples, which on a
+#: 27 km anchorage-to-berth run works out at 246 m between points. The land
+#: spit beside the JNPT berth is about that wide, so consecutive samples
+#: straddled it and the check reported the leg clear while the integrator
+#: walked a fifth of a container ship's track up a quay.
+#:
+#: The scatter validates short legs in the tightest water in the AOI, so it
+#: needs a finer instrument than the ocean-crossing router does. 40 m is well
+#: under the land mask's own resolution, and these legs are short enough that
+#: a few hundred extra samples cost nothing. `crosses_land` is deliberately
+#: left alone: raising its density globally would change which ocean passages
+#: get detoured, and re-routing the whole corpus is not a thing to do as a
+#: side effect of fixing a berth.
+_LEG_SAMPLE_M = 40.0
+
+
+def _leg_clear(a: tuple[float, float], b: tuple[float, float]) -> bool:
+    """True when the straight line a->b is water at 40 m resolution."""
+    try:
+        import numpy as np
+        from global_land_mask import globe
+    except ImportError:                                          # pragma: no cover
+        return True
+    metres = haversine_m(*a, *b)
+    n = max(16, min(20000, int(metres / _LEG_SAMPLE_M) + 2))
+    lat = np.linspace(a[0], b[0], n)
+    lon = np.linspace(a[1], b[1], n)
+    return not bool(globe.is_land(lat, lon).any())
+
+
+def _scatter(centre: tuple[float, float], rng, span: tuple[float, float],
+             *, must_be_sea: bool,
+             clear_to: tuple[float, float] | None = None) -> tuple[float, float]:
+    """A distinct spot near `centre`, drawn on the caller's seeded stream.
+
+    Per *call* rather than per vessel, because a ship does not get the same
+    square of water every time she visits — and two hulls that always anchored
+    on the same pair of spots would trade one artefact for another.
+
+    **`clear_to` is not optional in practice, and leaving it out cost a
+    regeneration.** Checking only that the scattered POINT is at sea is not
+    enough: around JNPT and Nhava Sheva the coastline is a maze of creeks and
+    spits, so a spot 3 km from the anchorage centre can be perfectly wet and
+    still sit on the far side of a headland from the berth. The straight run-in
+    then ploughs across the land between them, and `afloat` reports a quarter of
+    the track ashore. Requiring the leg itself to be clear is what makes the
+    scatter safe — the point being wet only says the ship could float there, not
+    that she could get there.
+    """
+    lo, hi = span
+    try:
+        from global_land_mask import globe
+    except ImportError:                                          # pragma: no cover
+        globe = None
+    from ..searoute import crosses_land
+
+    for _ in range(8):
+        brg = rng.uniform(0.0, 360.0)
+        # sqrt keeps the draw uniform over the annulus rather than crowding
+        # the inner edge, which is where the collisions would come back.
+        frac = math.sqrt(rng.uniform(0.0, 1.0))
+        cand = destination(*centre, brg, lo + frac * (hi - lo))
+        if must_be_sea and globe is not None \
+                and bool(globe.is_land(cand[0], cand[1])):
+            continue
+        if clear_to is not None and not _leg_clear(cand, clear_to):
+            continue
+        return cand
+    # Nothing usable found: the original coordinate is always valid, because it
+    # is the one the corpus was built on before any of this existed.
+    return centre
+
+
+def _laned(waypoints: list[tuple[float, float]],
+           origin: tuple[float, float],
+           offset_m: float,
+           destination_pt: tuple[float, float] | None = None,
+           ) -> list[tuple[float, float]]:
+    """Shift corridor waypoints sideways onto this hull's lane.
+
+    **The offset belongs to the ROUTE, not to the track.** Displacing already
+    integrated positions was tried and is unfixable: the shift is perpendicular
+    to instantaneous course, so on a turn the offset direction sweeps an arc and
+    the displaced point travels kilometres while the ship travels a few hundred
+    metres. `implied_speed_envelope` caught it immediately — container hulls
+    reaching 75 knots against a 23.5 knot maximum. Moving the waypoint instead
+    hands the integrator a smooth displaced path and lets it produce the motion,
+    so the result is physically valid by construction rather than by patching.
+
+    Only the corridor waypoints move. The anchorage, the berth and the outbound
+    target stay exactly where they are, so hulls converge on the real approach
+    the way they do in life, and the lane closes over the last leg — tens of
+    kilometres — rather than in a jump.
+
+    A waypoint whose lane position would sit on land keeps its original
+    position: separation is worth having, never at the price of routing a ship
+    through a headland.
+
+    **An empty route still needs a lane, and missing that is why the first
+    version of this changed nothing.** `sea_route` returns no waypoints at all
+    whenever the direct line is already clear of land, which is most fleet
+    voyages — so displacing "the waypoints" displaced only the minority that
+    route around the coast, and the measured closest approach stayed at 22 m.
+    With nothing to shift, one is synthesised: a single mid-leg point on the
+    lane, which the integrator turns into a shallow dogleg out and back. That
+    is what a ship keeping to one side of a strait actually does.
+    """
+    if abs(offset_m) < 1.0:
+        return waypoints
+    from ..searoute import crosses_land
+
+    if not waypoints:
+        if destination_pt is None:
+            return waypoints
+        brg = initial_bearing_deg(*origin, *destination_pt)
+        mid = interpolate(*origin, *destination_pt, 0.5)
+        side = (brg + (90.0 if offset_m >= 0.0 else -90.0)) % 360.0
+        cand = destination(*mid, side, abs(offset_m))
+        if crosses_land(origin, cand) or crosses_land(cand, destination_pt):
+            return waypoints
+        return [cand]
+
+    out: list[tuple[float, float]] = []
+    prev = origin
+    for i, w in enumerate(waypoints):
+        brg = initial_bearing_deg(*prev, *w)
+        side = (brg + (90.0 if offset_m >= 0.0 else -90.0)) % 360.0
+        # Taper the last corridor waypoint back in, so the hull is already
+        # rejoining the centreline before the anchorage leg begins.
+        scale = 0.5 if i == len(waypoints) - 1 else 1.0
+        cand = destination(*w, side, abs(offset_m) * scale)
+        prior = out[-1] if out else origin
+        if crosses_land(prior, cand) or crosses_land(cand, w):
+            out.append(w)
+        else:
+            out.append(cand)
+        prev = w
+    return out
+
+
 def build_port_call(vessel, port: str, *, arrive_from: tuple[float, float],
                     t_start: datetime, rng, anchorage_hours: float,
                     berth_hours: float,
@@ -58,6 +226,8 @@ def build_port_call(vessel, port: str, *, arrive_from: tuple[float, float],
                     skip_berth: bool = False,
                     initial_course_deg: float | None = None,
                     initial_sog_kn: float = 0.0,
+                    lane_offset_m: float = 0.0,
+                    _no_scatter: bool = False,
                     ) -> tuple[list[TrackPoint], PortCallSpec]:
     """Build a complete call. `skip_berth` gives floating storage / congestion.
 
@@ -69,18 +239,56 @@ def build_port_call(vessel, port: str, *, arrive_from: tuple[float, float],
     """
     if port not in PORTS:
         raise ValueError(f"unknown port {port!r}")
-    berth = PORTS[port]
-    anch = anchorage_of(port)
+    # Each call gets its own water. See `_ANCH_SCATTER_M` — sharing one
+    # coordinate is what produced five-day encounters at zero metres.
+    # Sea-checked like the anchorage. Berth coordinates sit hard against the
+    # quay, so a few hundred metres in the wrong direction is inland: scattering
+    # without the check put 9 positions on dry ground and failed `afloat`. When
+    # no water is found in six draws `_scatter` returns the centre, which is the
+    # original behaviour and always valid.
+    # The berth is checked against the ORIGINAL anchorage, not against the
+    # scattered one, and that ordering is the whole point. `_scatter` falls
+    # back to its centre when no draw works, and the fallback is not itself
+    # checked — so an anchorage that fell back to centre while the berth had
+    # moved left a run-in nobody had verified. At JNPT the port coordinate is
+    # at sea but a point 350 m away is not, so that line went ashore and
+    # `afloat` reported a fifth of the track on land. Anchoring the berth to
+    # the original waiting area makes the fallback safe by construction.
+    if _no_scatter:
+        berth, anch = PORTS[port], anchorage_of(port)
+    else:
+        berth = _scatter(PORTS[port], rng, _BERTH_SCATTER_M, must_be_sea=True,
+                         clear_to=anchorage_of(port))
+        anch = _scatter(anchorage_of(port), rng, _ANCH_SCATTER_M,
+                        must_be_sea=True, clear_to=berth)
+    # ATOMIC: either the scattered pair is mutually reachable, or BOTH revert.
+    #
+    # Checking each point against a fixed reference was not enough, and five
+    # regenerations went into learning why. `_scatter` falls back to its centre
+    # independently, so berth and anchorage could each be individually
+    # defensible and still leave a leg between them that nobody had verified.
+    # At JNPT, where the port coordinate is at sea and a point 350 m away is
+    # not, that leg went ashore.
+    #
+    # The pair is what has to be valid, so the pair is what is checked. The
+    # original coordinates are the one configuration known to work — the corpus
+    # was built on them before any scatter existed — so reverting both together
+    # is always safe, at the cost of no separation at that one port.
+    from ..searoute import crosses_land as _crosses
+    if not _leg_clear(anch, berth) or not _leg_clear(anchorage_of(port), anch):
+        berth, anch = PORTS[port], anchorage_of(port)
 
     # Route the approach around the coast rather than straight at the anchorage.
     # A direct line from a previous call anywhere down the coast crosses the
     # Saurashtra peninsula, which is how half the corpus ended up on land.
     from ..searoute import sea_route
     legs = [Leg("transit", target=w, speed_kn=vessel.service_kn)
-            for w in sea_route(arrive_from, anch)]
+            for w in _laned(sea_route(arrive_from, anch), arrive_from,
+                            lane_offset_m, destination_pt=anch)]
     legs += [
         Leg("transit", target=anch, speed_kn=vessel.service_kn),
-        Leg("station", duration_h=max(anchorage_hours, 0.2), radius_m=700.0),
+        Leg("station", duration_h=max(anchorage_hours, 0.2),
+            radius_m=_STATION_RADIUS_M),
     ]
     if not skip_berth:
         legs += [
@@ -114,6 +322,40 @@ def build_port_call(vessel, port: str, *, arrive_from: tuple[float, float],
                 *anch, *arrive_from,
                 min(1.0, 80.0 * 1852.0 / max(d, 1.0)))
     legs.append(Leg("transit", target=out_target, speed_kn=vessel.service_kn))
+
+    # LAST GUARD: walk the assembled legs and check every transit for land.
+    #
+    # Checking the pair (anchorage, berth) was still not enough, and this is the
+    # third correction to the same mistake — each time I validated the legs I had
+    # thought of rather than the legs the plan actually contains. What was going
+    # ashore at JNPT is the DEPARTURE: the berth sits on a coastline with land
+    # from 090 through 180, and moving it a few hundred metres swings the outbound
+    # line across the headland. Nothing validated that leg, in this change or
+    # before it.
+    #
+    # So the check is now over the built plan rather than over the inputs I
+    # happened to consider, and when it fails BOTH scattered points revert to the
+    # originals and the plan is rebuilt from them. The originals are the one
+    # configuration the corpus was generated on for its whole life, so the
+    # fallback needs no separate proof.
+    #
+    # The lesson, recorded because it cost five regenerations: validate the
+    # artifact, not the ingredients.
+    if (berth, anch) != (PORTS[port], anchorage_of(port)):
+        here = arrive_from
+        for leg in legs:
+            target = getattr(leg, "target", None)
+            if target is not None:
+                if not _leg_clear(here, target):
+                    return build_port_call(
+                        vessel, port, arrive_from=arrive_from, t_start=t_start,
+                        rng=rng, anchorage_hours=anchorage_hours,
+                        berth_hours=berth_hours, depart_to=depart_to,
+                        skip_berth=skip_berth,
+                        initial_course_deg=initial_course_deg,
+                        initial_sog_kn=initial_sog_kn,
+                        lane_offset_m=lane_offset_m, _no_scatter=True)
+                here = target
 
     plan = VoyagePlan(
         start=arrive_from, start_time=t_start,
