@@ -28,6 +28,9 @@ services:
     plan: free
     region: singapore          # nearest region to the Arabian Sea AOI and to India
     branch: main
+    # Render's own advice for button-deployed blueprints: a push to this
+    # repository must not redeploy every copy someone has spun up from it.
+    autoDeploy: false
 
     # `[api]` only. The pans extra pulls reportlab/pypdf/pillow, which the
     # SERVING path never uses — documents are generated on the laptop and

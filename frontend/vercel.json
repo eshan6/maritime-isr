@@ -6,7 +6,7 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "https://REPLACE-ME.onrender.com/api/:path*"
+      "destination": "https://maritime-isr-api.onrender.com/api/:path*"
     },
     {
       "source": "/(.*)",
