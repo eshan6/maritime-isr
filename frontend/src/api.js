@@ -14,6 +14,64 @@ function authHeaders(extra) {
   return { "X-API-Token": TOKEN, ...(extra || {}) };
 }
 
+// ---- request gate --------------------------------------------------------
+// The map asks for eleven things the instant it opens — 6,000 events, 2,000
+// radar contacts, 600 radar tracks, event density, detections, scenes, alerts,
+// ports, tracks — each a cold scan over Parquet. On the laptop that is fine.
+// On a free host with a tenth of a CPU core it is not: fired together they
+// saturate the box for long enough that the host's OWN health probe misses its
+// window (Render allows 5 seconds), and the host concludes the service is dead
+// and restarts it. The restart is cold, the map reconnects and fires the same
+// eleven again, and the service never converges. What the operator sees is
+// "API unreachable" — a connectivity story for what is really a load story.
+//
+// So cap how many are in flight. The work is identical and the wall-clock wait
+// is close to it, because a tenth of a core was never going to run eleven
+// scans in parallel anyway — it was going to interleave them and finish no
+// sooner. What changes is that the server keeps a slice free to answer
+// anything else, its own liveness check included. The map fills in
+// progressively rather than arriving at once.
+//
+// Three, not one: the requests are server-bound rather than CPU-bound at this
+// end, so a little overlap hides latency, and the queue still drains in order.
+const MAX_IN_FLIGHT = 3;
+
+let inFlight = 0;
+const waiting = [];
+
+function acquire() {
+  if (inFlight < MAX_IN_FLIGHT) {
+    inFlight += 1;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => waiting.push(resolve));
+}
+
+function release() {
+  // Hand the slot straight to the next waiter rather than decrementing and
+  // letting it re-test: that keeps exactly MAX_IN_FLIGHT live with no gap, and
+  // no chance of two waiters both seeing the same free slot.
+  const next = waiting.shift();
+  if (next) next();
+  else inFlight -= 1;
+}
+
+async function gated(fn, signal) {
+  await acquire();
+  try {
+    // A scrub of the timeline queues dozens of prediction requests and aborts
+    // all but the last. Without this check the aborted ones still reach the
+    // server once their slot comes up — the exact pile-on the gate exists to
+    // prevent. Honour the abort that already happened while queued.
+    if (signal && signal.aborted) {
+      throw new DOMException("aborted while queued", "AbortError");
+    }
+    return await fn();
+  } finally {
+    release();
+  }
+}
+
 // `signal` is optional and only one caller needs it: the map re-asks for
 // forward projections every time the clock crosses a refresh boundary, and a
 // scrub drags the clock across dozens of them in a second. Without an abort the
@@ -32,43 +90,49 @@ async function get(path, params, signal) {
       else url.searchParams.set(k, v);
     }
   }
-  const r = await fetch(url.pathname + url.search, {
-    headers: authHeaders({ Accept: "application/json" }),
-    signal,
-  });
-  if (!r.ok) {
-    const detail = await r.text().catch(() => "");
-    throw new Error(`${r.status} ${path} ${detail.slice(0, 200)}`);
-  }
-  return r.json();
+  return gated(async () => {
+    const r = await fetch(url.pathname + url.search, {
+      headers: authHeaders({ Accept: "application/json" }),
+      signal,
+    });
+    if (!r.ok) {
+      const detail = await r.text().catch(() => "");
+      throw new Error(`${r.status} ${path} ${detail.slice(0, 200)}`);
+    }
+    return r.json();
+  }, signal);
 }
 
 async function del(path) {
-  const r = await fetch(BASE + path, {
-    method: "DELETE",
-    headers: authHeaders({ Accept: "application/json" }),
+  return gated(async () => {
+    const r = await fetch(BASE + path, {
+      method: "DELETE",
+      headers: authHeaders({ Accept: "application/json" }),
+    });
+    if (!r.ok) {
+      const detail = await r.text().catch(() => "");
+      throw new Error(`${r.status} ${detail.slice(0, 300)}`);
+    }
+    return r.json();
   });
-  if (!r.ok) {
-    const detail = await r.text().catch(() => "");
-    throw new Error(`${r.status} ${detail.slice(0, 300)}`);
-  }
-  return r.json();
 }
 
 async function post(path, body) {
-  const r = await fetch(BASE + path, {
-    method: "POST",
-    headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify(body),
+  return gated(async () => {
+    const r = await fetch(BASE + path, {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      // The detail matters here: creating a geofence fails with a readable
+      // reason ("a geofence needs a name", "invalid geometry — a self-crossing
+      // outline?") and swallowing it leaves the operator with a status code.
+      const detail = await r.text().catch(() => "");
+      throw new Error(`${r.status} ${detail.slice(0, 300)}`);
+    }
+    return r.json();
   });
-  if (!r.ok) {
-    // The detail matters here: creating a geofence fails with a readable
-    // reason ("a geofence needs a name", "invalid geometry — a self-crossing
-    // outline?") and swallowing it leaves the operator with a status code.
-    const detail = await r.text().catch(() => "");
-    throw new Error(`${r.status} ${detail.slice(0, 300)}`);
-  }
-  return r.json();
 }
 
 // The one-click incident report. It cannot be a plain <a href> — every /api
@@ -78,14 +142,20 @@ async function post(path, body) {
 // that name and whatever it encodes has to survive being forwarded.
 async function downloadReport(vesselId) {
   const path = `${BASE}/vessels/${encodeURIComponent(vesselId)}/report`;
-  const r = await fetch(path, { headers: authHeaders() });
-  if (!r.ok) throw new Error(`${r.status} report`);
+  // Only the network half takes a slot; handing the blob to a click is local
+  // work and holding a slot across it would stall other requests for nothing.
+  const { blob, name } = await gated(async () => {
+    const r = await fetch(path, { headers: authHeaders() });
+    if (!r.ok) throw new Error(`${r.status} report`);
 
-  const disp = r.headers.get("Content-Disposition") || "";
-  const m = disp.match(/filename="([^"]+)"/);
-  const name = m ? m[1] : `incident-report-${vesselId}.html`;
+    const disp = r.headers.get("Content-Disposition") || "";
+    const m = disp.match(/filename="([^"]+)"/);
+    return {
+      blob: await r.blob(),
+      name: m ? m[1] : `incident-report-${vesselId}.html`,
+    };
+  });
 
-  const blob = await r.blob();
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;

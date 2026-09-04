@@ -65,8 +65,20 @@ def create_app() -> FastAPI:
     api = APIRouter()
 
     # ---- health (no auth) ------------------------------------------------
+    # `async def`, unlike every other route here, and the difference is load-
+    # bearing on a small host. FastAPI runs a plain `def` handler in a worker
+    # threadpool, so under a burst of heavy queries this would queue behind
+    # them — and a liveness probe that waits on the work it is meant to be
+    # reporting on is not measuring liveness. Render allows the probe 5
+    # seconds and kills the instance when it is missed, so the queue turned a
+    # slow moment into a restart, and the restart into a cold start, and the
+    # map's reconnect into the same burst again.
+    #
+    # Safe to put on the event loop only because the body genuinely does no
+    # work: `graph_exists()` is a single stat() call. Anything that touches
+    # DuckDB or the graph store belongs back in the threadpool.
     @api.get("/health")
-    def health() -> dict:
+    async def health() -> dict:
         return {"status": "ok", "graph": gsvc.graph_exists()}
 
     # ---- vessels ---------------------------------------------------------
