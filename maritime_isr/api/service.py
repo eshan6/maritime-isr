@@ -472,56 +472,105 @@ def list_tracks(*, max_vessels: int = 200, max_points: int = 140) -> dict:
         matched = int(reader.scalar(
             "SELECT count(*) FROM (SELECT vessel_id FROM ais_position "
             "WHERE lat IS NOT NULL GROUP BY vessel_id)") or 0)
+        # The tie-break on vessel_id is not cosmetic. `ORDER BY n DESC` alone
+        # leaves both WHICH vessels survive the cap and what order they come
+        # back in to however the engine happened to scan the Parquet, so two
+        # identical requests could draw a different fleet. Ties at the boundary
+        # are the common case, not the exotic one.
         vids = reader.rows(
             "SELECT vessel_id, count(*) AS n FROM ais_position "
-            "WHERE lat IS NOT NULL GROUP BY vessel_id ORDER BY n DESC "
+            "WHERE lat IS NOT NULL GROUP BY vessel_id ORDER BY n DESC, vessel_id "
             f"LIMIT {int(max_vessels)}")
+        # Decimated in SQL, but still ONE VESSEL PER QUERY, and both halves of
+        # that are deliberate.
+        #
+        # The old shape read a vessel's ENTIRE position history and built it
+        # twice in Python — once as dicts from the reader, then again as the
+        # `full` list — before keeping ~160 points of it. Across 200 vessels
+        # with another query in flight, on a host whose whole allowance is
+        # 512 MB, that is what took the deploy down.
+        #
+        # Doing all 200 vessels in a single windowed query fixes the Python side
+        # and moves the cost rather than removing it: measured, one query
+        # windowing 469,472 rows peaked HIGHER (294 MB) than the 200 small
+        # queries it replaced (216 MB), because the engine now holds the whole
+        # set at once. Per vessel, the partition is one hull's fixes, the engine
+        # holds little, and Python receives only what is returned.
+        #
+        # Session boundaries still come off the FULL-resolution series, which is
+        # the property that matters and the reason this is a window function
+        # rather than a stride: `lag(ts)` sees every fix, including the ones
+        # decimation is about to drop, so a five-day silence is detected on the
+        # evidence rather than on whatever survived.
+        syn_sel = ", is_synthetic AS syn" if syn_col else ", FALSE AS syn"
+        step_div = int(max(1, max_points))
+        per_vessel = f"""
+            WITH src AS (
+                SELECT ts, lat, lon{', is_synthetic' if syn_col else ''}
+                FROM ais_position
+                WHERE vessel_id = ?
+                  AND lat IS NOT NULL AND lon IS NOT NULL AND ts IS NOT NULL
+            ),
+            -- Its own step: DuckDB will not nest one window call in another.
+            lagged AS (
+                SELECT *, lag(ts) OVER (ORDER BY ts) AS prev_ts FROM src
+            ),
+            marked AS (
+                SELECT *,
+                    count(*) OVER () AS n,
+                    -- A new session wherever the silence exceeds the break; the
+                    -- running sum turns those flags into a session number.
+                    sum(CASE WHEN prev_ts IS NOT NULL
+                              AND epoch(ts) - epoch(prev_ts) > {float(break_s)}
+                             THEN 1 ELSE 0 END)
+                        OVER (ORDER BY ts
+                              ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+                        AS sess
+                FROM lagged
+            ),
+            seg AS (
+                SELECT *,
+                    row_number() OVER (PARTITION BY sess ORDER BY ts) AS rn_sess,
+                    count(*) OVER (PARTITION BY sess) AS sess_len
+                FROM marked
+            )
+            SELECT ts, lat, lon, sess, n{syn_sel}
+            FROM seg
+            -- `pts[::step]` within the session, plus the session's final fix
+            -- when the stride misses it. Appended rather than substituted,
+            -- which is what the old code did.
+            WHERE (rn_sess - 1) % greatest(1, n // {step_div}) = 0
+               OR rn_sess = sess_len
+            ORDER BY ts
+        """
+
         items = []
         for row in vids:
             vid = row["vessel_id"]
-            cols = "ts, lat, lon" + (", is_synthetic" if syn_col else "")
-            pts = reader.rows(
-                f"SELECT {cols} FROM ais_position WHERE vessel_id = ? "
-                "AND lat IS NOT NULL ORDER BY ts", [vid])
-            if not pts:
+            pts = reader.rows(per_vessel, [vid])
+            if len(pts) < 2:
                 continue
-            # Every usable fix, at full resolution, BEFORE decimation. The
-            # session boundaries have to be measured here: decimation is what
-            # destroys the evidence of a silence.
-            full = []
+            coords: list[list] = []
+            breaks: list[int] = []
+            prev_sess = None
             for p in pts:
                 ts = p["ts"]
                 epoch = int(ts.timestamp()) if hasattr(ts, "timestamp") else None
-                if epoch is None or p["lon"] is None or p["lat"] is None:
+                if epoch is None:
                     continue
-                full.append([round(p["lon"], 4), round(p["lat"], 4), epoch])
-            if len(full) < 2:
-                continue
-            starts = _session_starts([c[2] for c in full], break_s)
-
-            # Decimate WITHIN each session, never across one. The first and last
-            # fix of every session are always kept: they are where the broadcast
-            # resumed and where it stopped, which are the two instants the
-            # segmentation exists to preserve, and a stride that skipped them
-            # would move a session boundary by up to `step` fixes.
-            step = max(1, len(full) // max(1, max_points))
-            coords: list[list] = []
-            breaks: list[int] = []
-            for lo, hi in zip([0] + starts, starts + [len(full)]):
-                if lo > 0:
+                if prev_sess is not None and p["sess"] != prev_sess:
+                    # Index into `points` where the new session starts — on the
+                    # decimated series, which is what the client indexes.
                     breaks.append(len(coords))
-                seg = full[lo:hi]
-                dec = seg[::step]
-                if dec[-1] is not seg[-1]:
-                    dec.append(seg[-1])
-                coords.extend(dec)
+                prev_sess = p["sess"]
+                coords.append([round(p["lon"], 4), round(p["lat"], 4), epoch])
             if len(coords) < 2:
                 continue
             cid = canonical_id(vid)
             items.append({
                 "vessel_id": cid,
                 "name": names.get(cid),
-                "is_synthetic": bool(pts[0].get("is_synthetic")) if syn_col else False,
+                "is_synthetic": bool(pts[0].get("syn")) if syn_col else False,
                 "points": coords,
                 "breaks": breaks,
             })
