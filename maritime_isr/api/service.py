@@ -1705,47 +1705,116 @@ def list_radar_tracks(max_tracks: int = 400, max_points: int = 60) -> dict:
     Same shape and the same reasoning as `list_tracks`: this is tens of
     thousands of points and pydantic-validating each would cost more than it is
     worth for coordinates.
-    """
-    from collections import defaultdict
 
-    from maritime_isr.ingest.landing import read_table
+    **The decimation happens in SQL, and that is the whole point of this
+    function's shape.** It used to read the landed table whole — every
+    `radar_track_report` row as a Python dict — group it, and keep a few
+    thousand points. Measured on the scenario corpus that is 468,713 rows to
+    return 0.72 MB of JSON: 561 MB resident, peaking at 1.3 GB. The deploy host
+    allows 512 MB, so this one endpoint took the service down on its own, on
+    the first request, and no amount of rate-limiting the caller could have
+    helped. `list_tracks` reads a LARGER table (820,878 track_point rows) for
+    4 MB, because it asks DuckDB for what it needs instead of materialising the
+    table first — this now does the same.
+
+    Picking the biggest tracks is not enough by itself: the top 600 of 6,345
+    tracks still hold 85% of the points. The stride has to be applied before
+    the rows become Python objects, so only what is actually returned is ever
+    built.
+    """
     from maritime_isr.ingest.radar import TABLE as RADAR_TABLE
 
-    try:
-        rows = read_table(RADAR_TABLE)
-    except Exception:                                            # noqa: BLE001
-        rows = []
+    with open_reader() as reader:
+        if not reader.has(RADAR_TABLE):
+            return {"count": {"real": 0, "synthetic": 0}, "items": [],
+                    "note": "no landed radar_track_report data"}
+
+        # `n` is the track's FULL length and is reported as `n_points`, so the
+        # client can tell a decimated 11,000-point track from a short one. It
+        # rides along on every row rather than being counted again, because it
+        # is already needed to compute the stride.
+        #
+        # The tie-break on `radar_track_id` makes the choice of which tracks
+        # survive the cap deterministic. The old code inherited row order from
+        # the Parquet files, so two equally long tracks at the boundary were
+        # kept or dropped by accident of how the corpus happened to be written.
+        #
+        # `(rn - 1) % step = 0` is the SQL spelling of `pts[::step]`, and
+        # `rn = n` additionally fetches the true last fix — the substitution
+        # itself stays in Python below, where the cap can be preserved.
+        sql = f"""
+            WITH src AS (
+                SELECT CAST(radar_track_id AS VARCHAR) AS tid, lon, lat, ts
+                FROM {RADAR_TABLE}
+                WHERE lat IS NOT NULL AND lon IS NOT NULL AND ts IS NOT NULL
+            ),
+            top AS (
+                SELECT tid, count(*) AS n FROM src
+                GROUP BY tid ORDER BY n DESC, tid LIMIT {int(max_tracks)}
+            ),
+            ranked AS (
+                SELECT s.tid, s.lon, s.lat, s.ts, t.n,
+                       row_number() OVER (PARTITION BY s.tid
+                                          ORDER BY s.ts, s.lon, s.lat) AS rn
+                FROM src s JOIN top t USING (tid)
+            )
+            SELECT tid, lon, lat, ts, n, rn,
+                   CAST(CEIL(n / {float(max_points)}) AS BIGINT) AS step
+            FROM ranked
+            WHERE (rn - 1) % CAST(CEIL(n / {float(max_points)}) AS BIGINT) = 0
+               OR rn = n
+            ORDER BY tid, rn
+        """
+        try:
+            rows = reader.rows(sql)
+        except Exception:                                        # noqa: BLE001
+            rows = []
     if not rows:
         return {"count": {"real": 0, "synthetic": 0}, "items": [],
                 "note": "no landed radar_track_report data"}
-    by: dict[str, list] = defaultdict(list)
-    for r in rows:
-        lat, lon, ts = r.get("lat"), r.get("lon"), r.get("ts")
-        if lat is None or lon is None or ts is None:
-            continue
-        by[str(r.get("radar_track_id"))].append(
-            (_epoch(ts), round(float(lon), 5), round(float(lat), 5)))
-    items = []
-    for tid, pts in sorted(by.items(), key=lambda kv: -len(kv[1]))[:max_tracks]:
-        pts.sort()
-        # Ceiling division, so `max_points` is a CAP and not a hint. Floor
-        # division overshoots: 210 points at max_points=20 gives step 10 and
-        # 21 samples. That is one point over on a request the caller sized, and
-        # the caller sizing it is the whole reason this parameter exists.
-        step = max(1, -(-len(pts) // max_points))
-        thin = pts[::step]
+
+    # Rows arrive grouped by tid and ordered within it, so one pass closes each
+    # track as the next begins — nothing accumulates beyond the current track.
+    items: list[dict] = []
+    cur_tid = None
+    thin: list[tuple] = []
+    last: tuple | None = None
+    n_full = 0
+
+    def _close():
+        if cur_tid is None or not thin:
+            return
         # The track must end where it truly ends — a stride rarely lands on the
         # last fix, and a polyline that stops short reads as a target that
         # vanished. Substituted rather than appended, so the cap still holds.
-        if thin[-1] != pts[-1]:
-            thin[-1] = pts[-1]
+        pts = list(thin)
+        if last is not None and pts[-1] != last:
+            pts[-1] = last
         items.append({
-            "radar_track_id": tid,
-            "station_id": tid.split(":", 1)[0],
-            "n_points": len(pts),
-            "points": [[lon, lat, t] for t, lon, lat in thin],
+            "radar_track_id": cur_tid,
+            "station_id": cur_tid.split(":", 1)[0],
+            "n_points": n_full,
+            "points": [[lon, lat, t] for t, lon, lat in pts],
             "is_synthetic": True,
         })
+
+    for r in rows:
+        tid = r["tid"]
+        if tid != cur_tid:
+            _close()
+            cur_tid, thin, last, n_full = tid, [], None, int(r["n"])
+        pt = (_epoch(r["ts"]), round(float(r["lon"]), 5),
+              round(float(r["lat"]), 5))
+        # A row can be both a stride sample and the final fix; it belongs in
+        # both, and `rn = n` is what makes the substitution below possible.
+        if (int(r["rn"]) - 1) % int(r["step"]) == 0:
+            thin.append(pt)
+        if int(r["rn"]) == n_full:
+            last = pt
+    _close()
+
+    # SQL ordered by tid; the cap is by length, so restore that for the client.
+    items.sort(key=lambda it: -it["n_points"])
     return {"count": {"real": 0, "synthetic": len(items)}, "items": items}
 
 

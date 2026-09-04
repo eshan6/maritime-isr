@@ -14,6 +14,7 @@ are contract-level guarantees (see :mod:`.models`), not conventions.
 """
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Optional
 
@@ -41,6 +42,28 @@ def require_token(x_api_token: Optional[str] = Header(default=None)) -> None:
         raise HTTPException(status_code=401, detail="invalid or missing API token")
 
 
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """Bound how many blocking handlers run at once, to bound memory.
+
+    Starlette runs every `def` endpoint in a threadpool that defaults to 40
+    workers. Forty of these queries do not fit in the free host's 512 MB — four
+    do not — and nothing else in the stack imposes a ceiling: a limit in the
+    browser is per-page, so it holds for one viewer and fails for two. This is
+    the ceiling that holds however many people open the map. Excess requests
+    queue instead of running, which on a tenth of a CPU is what was happening
+    anyway; the difference is that queueing is survivable and exhausting the
+    memory is not.
+
+    The limiter belongs to the running event loop, so it is set here rather than
+    at import: there is no loop yet when the module is read.
+    """
+    import anyio.to_thread
+    anyio.to_thread.current_default_thread_limiter().total_tokens = (
+        settings.max_concurrent_queries)
+    yield
+
+
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Maritime ISR — Phase 6 API",
@@ -48,6 +71,7 @@ def create_app() -> FastAPI:
         description="Local serving layer for the Arabian Sea dark-vessel "
                     "fusion prototype. Real and scenario data share every table "
                     "and are always split by is_synthetic (ADR-019).",
+        lifespan=_lifespan,
     )
     app.add_middleware(
         CORSMiddleware,

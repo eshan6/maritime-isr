@@ -297,23 +297,27 @@ def workload(*, at: Optional[float] = None) -> dict:
     """
     at = time.time() if at is None else at
     from ..api import graph_service as gsvc
-    from ..ingest.landing import read_table
 
     n_ais_tracks = n_radar_tracks = 0
     n_alerts = 0
-    try:
-        rows = read_table("radar_track_report")
-        n_radar_tracks = len({r.get("radar_track_id") for r in rows
-                              if r.get("radar_track_id")})
-    except Exception:                                            # noqa: BLE001
-        # No landed radar picture is the normal state on a corpus that has
-        # only AIS, not an error. The count stays 0 and the ratio is computed
-        # over what does exist — the alternative, refusing to state any
-        # workload figure without radar, would hide the measurement on exactly
-        # the corpus the operator has.
-        n_radar_tracks = 0
 
     with open_reader() as reader:
+        # Both counts are the same question and are now asked the same way. The
+        # radar one used to read the landed table whole — 468,713 rows built as
+        # Python dicts so that a set of their ids could be measured — which cost
+        # 550 MB resident and peaked at 1.3 GB, over the deploy host's entire
+        # 512 MB allowance, to produce a single integer. The AIS count two lines
+        # down had always done it in SQL; this now matches it.
+        #
+        # No landed radar picture is the normal state on a corpus that has only
+        # AIS, not an error. The count stays 0 and the ratio is computed over
+        # what does exist — the alternative, refusing to state any workload
+        # figure without radar, would hide the measurement on exactly the corpus
+        # the operator has.
+        if reader.has("radar_track_report"):
+            n_radar_tracks = int(reader.scalar(
+                "SELECT count(DISTINCT radar_track_id) FROM radar_track_report "
+                "WHERE radar_track_id IS NOT NULL") or 0)
         if reader.has("ais_position"):
             n_ais_tracks = int(reader.scalar(
                 "SELECT count(DISTINCT vessel_id) FROM ais_position") or 0)
