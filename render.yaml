@@ -12,20 +12,25 @@
 # MEMORY, MEASURED RATHER THAN ASSUMED
 # ------------------------------------
 # The 228 MB this file used to quote was measured before the fleet tripled and
-# was wrong in a way that mattered: `/radar/tracks` and `/voi/workload` each
-# read a 468,713-row table into Python to return a fraction of it, costing
-# ~560 MB apiece and peaking at 1.3 GB. Either one killed the instance on the
-# first request. Both now decimate and count in SQL.
+# was wrong in a way that mattered. Three endpoints read a whole table into
+# Python to return a fraction of it: `/radar/tracks` and `/voi/workload` cost
+# ~560 MB apiece and peaked at 1.3 GB, and `/tracks` rebuilt every fix of every
+# hull twice before keeping ~160 of them. All three now decimate or count in
+# SQL, so only what is returned is ever built.
 #
-# What remains scales with how many requests run at once — about 65 MB each
-# over a ~250 MB floor — so `MISR_MAX_CONCURRENT_QUERIES` bounds it. Measured
-# on the scenario corpus, with the bound in force:
+# What remains scales with how many requests run at once, which is why
+# `MISR_MAX_CONCURRENT_QUERIES` exists. Measured on the scenario corpus, ten
+# simultaneous viewers:
 #
-#     1 viewer -> 318 MB     3 viewers -> 356 MB     10 viewers -> 415 MB
+#     bound = 1 -> 344 MB        bound = 2 -> 399 MB       unbounded -> 650 MB+
 #
-# The bound is what makes those numbers flat instead of linear; without it six
-# concurrent requests reached 650 MB. A cap in the browser cannot do this job,
-# because it is per-page and two viewers simply double it.
+# A cap in the browser cannot do this job, because it is per-page and two
+# viewers simply double it.
+#
+# These numbers are from a 206 MB local corpus and the published one is larger.
+# Three deploys running code that measured comfortably here were still killed,
+# so the bound is set where being wrong again is survivable rather than where
+# the measurement says it just fits.
 #
 # THE ONE REAL WEAKNESS, AND THE FIX
 # ----------------------------------
@@ -86,11 +91,13 @@ services:
         value: "128MB"
       - key: MISR_DUCKDB_THREADS
         value: "2"
-      # How many queries may run at once. Lower to 1 to serialise them; that
-      # costs latency, which is survivable in a way that being restarted
-      # mid-demo is not. Raise it on a host with more than 512 MB.
+      # How many queries may run at once. One, deliberately: serialised
+      # queries make the map fill in visibly rather than all at once, and the
+      # alternative on this host was being OOM-killed mid-load and restarted
+      # cold, which is not slower but absent. Raise it once the deploy is known
+      # stable, or on a host with more than 512 MB.
       - key: MISR_MAX_CONCURRENT_QUERIES
-        value: "2"
+        value: "1"
       # Where fetch_corpus.py pulls the corpus from. Set this in the Render
       # dashboard to the GitHub Release asset URL — see deploy/README.md. It is
       # not a secret; it is public synthetic data.

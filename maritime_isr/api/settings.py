@@ -59,24 +59,26 @@ class ApiSettings:
     #: person opens the map — a limit in the browser is per-page, so two viewers
     #: double it and ten viewers overwhelm any client-side cap.
     #:
-    #: Measured on the scenario corpus, the map's opening burst costs about
-    #: 65 MB per request in flight over a ~250 MB floor:
+    #: **One, and that is a decision about which failure to prefer.** Serialised
+    #: queries make the map fill in visibly rather than at once; the alternative
+    #: on a 512 MB host was a service that was OOM-killed mid-load and restarted
+    #: cold, which is not slower, it is absent. Measured across ten simultaneous
+    #: viewers: 344 MB at 1, 399 MB at 2. Both fit here, and the margin is the
+    #: point — three deploys in a row died on a host whose behaviour did not
+    #: match the local measurement, so the ceiling is set where being wrong
+    #: again is still survivable.
     #:
-    #:     1 -> 317 MB    2 -> 389 MB    3 -> 447 MB    4 -> 516 MB    6 -> 650 MB
-    #:
-    #: The free deploy host allows 512 MB, and the published corpus is about a
-    #: quarter larger than the one those numbers came from, which lands
-    #: concurrency 3 just over the line and leaves 2 with real headroom. Hence
-    #: the default. Raise it on a host with more memory — it costs nothing but
-    #: memory, and on 0.1 of a CPU the requests were queueing behind each other
-    #: regardless.
+    #: Raise it once the deploy is known stable, or on a host with more memory.
+    #: On a tenth of a CPU core the requests were interleaving rather than
+    #: running in parallel regardless, so the wall-clock cost is smaller than
+    #: the number suggests.
     #:
     #: Only handlers declared `def` are governed by this; `async def` ones run
     #: on the event loop and are deliberately outside it, which is what keeps
     #: /health answering while the queue is full.
     max_concurrent_queries: int = field(
         default_factory=lambda: max(
-            1, int(os.getenv("MISR_MAX_CONCURRENT_QUERIES", "2") or 2)))
+            1, int(os.getenv("MISR_MAX_CONCURRENT_QUERIES", "1") or 1)))
 
     #: What DuckDB is allowed to hold, and how many threads it may spawn.
     #:
