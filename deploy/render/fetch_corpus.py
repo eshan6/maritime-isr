@@ -7,7 +7,7 @@ up to 2 GB per file, and public, which this data is anyway.
 
 Run from the repo root as a build step. It is a no-op when the corpus is
 already present, so a redeploy that reuses the build cache does not re-download
-145 MB.
+a quarter of a gigabyte.
 
 `MISR_CORPUS_URL` points at the asset. It is deliberately an env var rather
 than a constant: the corpus is rebuilt whenever the scenario changes, and the
@@ -90,7 +90,7 @@ def main() -> int:
         missing = [n for n in REQUIRED if not (DATA / n).exists()]
         print(f"ERROR: extracted, but {missing} are missing — the tarball is "
               f"not a corpus built from data/. Rebuild it with "
-              f"deploy/pack_corpus.sh.", file=sys.stderr)
+              f"deploy/pack_corpus.py.", file=sys.stderr)
         return 1
 
     print(f"corpus ready at {DATA}")

@@ -16,8 +16,8 @@ to type into a dashboard.
 ## Before you click: publish the corpus
 
 This is the one step no button can do, because `data/` is gitignored — the
-corpus lives on whichever machine generated it, and at 137 MB it is over
-GitHub's 100 MB per-file limit for ordinary git.
+corpus lives on whichever machine generated it, and at around 260 MB it is well
+over GitHub's 100 MB per-file limit for ordinary git.
 
 Build it (about 55 minutes, and the order matters — `graph-populate` reads what
 the earlier steps land, so it goes **last**):
@@ -59,9 +59,15 @@ It will ask for one value:
 
 Then Apply.
 
-*Success:* the build log prints `downloaded 137 MB, extracting` then `corpus
+*Success:* the build log prints `downloaded 258 MB, extracting` then `corpus
 ready`, the service goes **Live**, and
-`https://maritime-isr-api.onrender.com/api/health` returns `{"status":"ok"}`.
+`https://maritime-isr-api.onrender.com/api/health` returns
+`{"status":"ok","graph":true}`.
+
+`"graph":true` is the half worth reading. `"status":"ok"` only says the web
+process is answering; `"graph":true` says the corpus arrived, extracted, and
+`graph.sqlite` opened. A response of `{"status":"ok","graph":false}` is a
+service that is up and has no data — check the build log for the download.
 
 *Failure — `MISR_CORPUS_URL is not set`:* the variable was skipped. The build
 fails on purpose rather than starting empty, because a service that comes up
